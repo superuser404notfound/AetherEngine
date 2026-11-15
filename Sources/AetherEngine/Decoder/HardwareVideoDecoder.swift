@@ -905,22 +905,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         var keyFrames = 0
         var source = "none"
         if codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084 {
-            values = HDR10StaticMetadataSEI.fromCodedSideData(codecpar)
-            if !values.isEmpty { source = "container" }
-            if !values.isComplete, codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
-               let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
-                let fromRecord = HDR10StaticMetadataSEI.scanHEVCConfigRecord(
-                    extradata, size: Int(codecpar.pointee.extradata_size))
-                if !fromRecord.isEmpty { source = values.isEmpty ? "hvcC" : source + "+hvcC" }
-                values = values.filling(from: fromRecord)
-            }
-            if !values.isComplete, codecpar.pointee.codec_id == AV_CODEC_ID_AV1,
-               let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
-                let fromRecord = HDR10StaticMetadataSEI.scanAV1ConfigRecord(
-                    extradata, size: Int(codecpar.pointee.extradata_size))
-                if !fromRecord.isEmpty { source = values.isEmpty ? "av1C" : source + "+av1C" }
-                values = values.filling(from: fromRecord)
-            }
+            (values, source) = HDR10StaticMetadataSEI.declared(by: codecpar)
             // HEVC (SEI) and AV1 (metadata OBUs). This decoder opens no H.264 (VideoToolboxVideoFormat),
             // and VP9 has no in-band HDR10 metadata.
             let scansInBand = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC

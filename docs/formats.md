@@ -203,10 +203,11 @@ Native AVPlayer path, VideoToolbox:
 | H.264 with both MVC stereo views in one track | VideoToolbox is handed both views in one sample and renders nothing (#435) | libavcodec (base view) |
 | Dolby Vision Profile 7 FEL, opt-in | `preferDualLayerDolbyVision` with the `DualLayerDolbyVision` trait composes both layers here ([Profile 7](#profile-7)) | VideoToolbox, both layers, plus the Metal composer |
 | Upscaling, opt-in | With `upscalesLowResolutionVideo`, a source the route accepts moves here for the Metal scaler, and returns to native when the stage is dropped (#846, [Upscaling](#upscaling)) | The source's usual decoder |
+| HDR10 tone map, opt-in | With `videoProcessing`, an HDR10 source brighter than the target moves here for the tone map, and returns to native when the processing is dropped (#957, [Tone map to the display's peak](#tone-map-to-the-displays-peak)) | The source's usual decoder |
 | A native session AVPlayer refuses on its media | With `escalatesToSoftwarePath` (default), a CoreMedia refusal or a confirmed H.264 parameter-set change rebuilds the session here at its playhead ([Files with broken timestamps or bitstreams](#files-with-broken-timestamps-or-bitstreams)) | libavcodec, or VideoToolbox for HEVC |
 | Anything, by request | `preferredDecodePath = .software` ([api › Overriding the decode path](api.md#overriding-the-decode-path)) | As above |
 
-On the software host, VideoToolbox still decodes where it can: VP9 (see below), HEVC (which reaches the software host through, for example, escalation, the dual-layer route, upscaling or `preferredDecodePath = .software`), and AV1 Dolby Vision Profile 10.1 on devices with hardware AV1. Everything else there decodes in libavcodec.
+On the software host, VideoToolbox still decodes where it can: VP9 (see below), HEVC (which reaches the software host through, for example, escalation, the dual-layer route, upscaling, the tone map or `preferredDecodePath = .software`), and AV1 Dolby Vision Profile 10.1 on devices with hardware AV1. Everything else there decodes in libavcodec.
 
 
 #### AV1
@@ -355,9 +356,19 @@ An explicit decode-path choice and disabled escalation are honored; the load the
 
 Broadcast HLG (BBC iPlayer, UK DVB-T2 UHD) names HLG only in the `alternative_transfer_characteristics` SEI. Its VUI keeps a backward-compatible transfer (BT.709, BT.2020 10 or 12 bit, or unspecified) over BT.2020 primaries, so an SDR set still shows a picture. The demuxer reads the first video packets (at most 8) for that SEI. When it names HLG, the stream is marked HLG for every later reader: format detection, display criteria, `VIDEO-RANGE`, the muxer's `colr` and `probe(url:)` (AE#839).
 
-AetherEngine does not tone-map (convert HDR to SDR) on the host. It tells the system "this is BT.2020 PQ" (or DV, or HLG) through the HLS-fMP4 sample description. AVPlayer and the system compositor then map HDR to SDR as the connected display needs. tvOS / iOS pick the right path.
+By default AetherEngine does not tone-map (convert HDR to SDR, or to a dimmer display) on the host. It tells the system "this is BT.2020 PQ" (or DV, or HLG) through the HLS-fMP4 sample description. AVPlayer and the system compositor then map HDR to SDR as the connected display needs. tvOS / iOS pick the right path.
 
 **On the software host** there is no HLS sample description, so the same signal travels on each decoded frame. Both decoders (libavcodec and VideoToolbox) attach the colour primaries, transfer (PQ, HLG) and matrix to every pixel buffer. HDR10+ metadata goes out per frame as `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. So an AV1 or VP9 HDR10 or HDR10+ source keeps its HDR and its dynamic metadata off the native route too. `videoFormat` moves to `.hdr10Plus` on the first frame that carries it.
+
+### Tone map to the display's peak
+
+`LoadOptions.videoProcessing` (#957, opt-in) maps an HDR10 title brighter than the display to the display's peak itself, with BT.2390, instead of leaving it to the television. The title then plays on the software host.
+
+- Taken only for HDR10 (PQ) with a declared mastering display or MaxCLL whose peak is above `targetPeakNits`, on a display that takes HDR10.
+- Dolby Vision, HDR10+, HLG and SDR keep their usual route.
+- Each frame goes out with HDR10 metadata that says the target, so the television does not tone map it a second time.
+
+Details and costs: [api › `videoProcessing`](api.md#videoprocessing).
 
 ### When an HDR master is served
 

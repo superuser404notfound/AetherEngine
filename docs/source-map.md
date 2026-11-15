@@ -58,6 +58,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+EnhancementLayerProbe.swift` | `probeDolbyVisionEnhancementLayer` and `DolbyVisionEnhancementLayer`: FEL or MEL from a Profile 7 source's first RPU. |
 | `AetherEngine+Prewarm.swift` | `prewarmDualLayerDolbyVision()` (compiles the FEL composer's shaders ahead of time) and `prewarm(url:...)`, the source warm (#551). |
 | `AetherEngine+Upscale.swift` | #846: the load's side of the upscale stage. Reads probe, display and device once per load; publishes the stage's status. |
+| `AetherEngine+VideoProcessing.swift` | #957: the load's side of the picture processing (`LoadOptions.videoProcessing`). Reads the probe's stream once per load; publishes the stage's status and latches its disable. |
 | `AetherEngine+Recording.swift` | `startRecording(to:)` / stop: records the playing live stream from the connection the session already holds (AE#560). |
 | `PlaybackErrorInfo.swift` | `PlaybackErrorKind` (stable string tokens, #376) and `PlaybackErrorInfo` behind a published `PlaybackState.error`. |
 | `SessionCacheStatus.swift` | `SessionCacheStatus` and its enums: which route owns buffering for the session, and the session cache's capability, cleanup and failure reasons. |
@@ -201,7 +202,7 @@ Notes:
 | `AlternativeTransferSEI.swift` | AE#839: reads the `alternative_transfer_characteristics` SEI that names HLG behind a backward-compatible VUI. |
 | `AV1DolbyVisionRPU.swift` | The Dolby Vision RPU from an AV1 T.35 metadata OBU (Profile 10), attached to decoded frames for the system's DV display management. |
 | `DualLayerRouteDecision.swift` | Whether a Profile 7 load takes the dual-layer route or stays native, and why. Pure, logged once per source. |
-| `UpscalingFrameHandler.swift` | Runs the upscale stage (#846), or the HDR10 pass-through probe (AE#957), on every decoded frame; a nil from the stage delivers the original. |
+| `UpscalingFrameHandler.swift` | Runs the upscale stage (#846), or the HDR10 pass-through probe (AE#957), on every decoded frame; a nil from the stage delivers the original. The picture processing stage (#957) is wrapped the same way in `SoftwarePlaybackHost`, which also hands it the frame's HDR10+ flag. |
 
 Notes:
 
@@ -582,9 +583,11 @@ Notes:
 | `IFrameJPEGBuilder.swift` | AE#682: one keyframe as a Motion JPEG fragment, for sources whose own keyframes AVKit will not show. |
 | `IFramePayloadCache.swift` | AE#682: byte-capped on-disk cache of keyframe payloads read for the rendition. |
 | `FrameUpscaler.swift` | The per-frame upscale stage (#846): optional VT super resolution, then MetalFX, with overrun fallback. |
+| `FrameToneMapper.swift` | #957: the per-frame picture processing stage: a frame chain with the tone map, rebuilt for a frame's own metadata, with the overrun and HDR10+ switch-off. |
 | `BT2390ToneCurve.swift` | AE#957: the BT.2390 tone curve from a source peak to a target peak on PQ values (the CPU reference), the PQ conversions, which source value sets the peak (`ToneMapSourcePeak`), and the curve's shader parameters. |
 | `FrameChainOutput.swift` | AE#957: `FrameChainColorVolume`, the colour volume a frame chain stage declares for its output, and the attachments a chain's output buffer carries (the source's, minus its geometry, with the declared HDR10 metadata). |
 | `UpscaleRouteDecision.swift` | Whether and how a load upscales: source geometry, the plan, and process-wide failure and cost memory. |
+| `VideoProcessingRouteDecision.swift` | #957: whether a load takes the picture processing route, the plan (curve and declared metadata), and the process-wide failure memory. |
 
 ### `Video/FelCurves/`
 

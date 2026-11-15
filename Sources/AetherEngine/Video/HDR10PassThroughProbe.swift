@@ -307,7 +307,7 @@ final class HDR10ProbeStage: @unchecked Sendable {
                 if let toneMap, case .hdr10(let out) = built.outputColorVolume {
                     line += String(format: ", tone map %g nit (%@) to %g nit, knee at %.0f nit, out ",
                                    toneMap.curve.sourcePeakNits, toneMap.from, toneMap.curve.targetPeakNits,
-                                   BT2390ToneCurve.nits(pq: toneMap.curve.kneeStart * toneMap.curve.sourcePeakPQ))
+                                   toneMap.curve.kneeNits)
                         + Self.describe(out) + (built.isRoundTripOnly ? ", one kernel" : ", two passes")
                 }
                 EngineLog.emit(line, category: .swPlayback)

@@ -46,6 +46,9 @@ struct BT2390ToneCurve: Equatable, Sendable {
         return p * sourcePeakPQ
     }
 
+    /// Where the roll-off starts, in nit (464 for a 1000 nit source and a 600 nit target).
+    var kneeNits: Double { Self.nits(pq: kneeStart * sourcePeakPQ) }
+
     /// The light level in nit after the curve, for one light level in nit before it.
     func map(nits: Double) -> Double { Self.nits(pq: map(pq: Self.pq(nits: nits))) }
 
@@ -83,7 +86,7 @@ struct BT2390ToneCurve: Equatable, Sendable {
 }
 
 /// Which of the source's values set the peak the curve maps from.
-enum ToneMapSourcePeak: String, Equatable, Sendable {
+public enum ToneMapSourcePeak: String, Equatable, Sendable {
     /// The mastering display's peak luminance.
     case mastering
     /// MaxCLL, the brightest pixel in the title, when it is below the mastering peak.

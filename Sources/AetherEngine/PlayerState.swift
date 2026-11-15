@@ -587,6 +587,34 @@ public struct LoadOptions: Sendable, Equatable {
     /// Ignored while `upscalesLowResolutionVideo` is off. A tuning field like it.
     public var upscaleScaler: UpscaleScaler = .automatic
 
+    /// Opt in to picture processing for HDR10 titles brighter than the display (#957). nil (the default)
+    /// is off.
+    ///
+    /// What it costs: a processed title plays on `SoftwarePlaybackHost`, not AVPlayer. There it has no
+    /// AVPlayer Picture in Picture (the host presents `softwarePiPSource` instead), less over AirPlay (the
+    /// sound goes to the receiver, the picture stays on this device), and an E-AC-3 Atmos (JOC) track
+    /// plays as its channel bed, without the objects, because on tvOS only AVPlayer emits them.
+    ///
+    /// What it does: every decoded frame runs a BT.2390 tone map in the PQ domain, from the source peak
+    /// (MaxCLL when it is below the mastering peak, else the mastering peak) to
+    /// `VideoProcessingOptions.targetPeakNits`, and the frame goes out with HDR10 metadata that says the
+    /// target, so the display does not tone map it again. Needs tvOS / iOS / macOS 26. These keep their
+    /// usual route: Dolby Vision, a source that is not HDR10 (SDR, HLG), a display that does not take
+    /// HDR10, a source whose container declares no mastering display and no MaxCLL, a source peak at or
+    /// below the target, a wireless AirPlay route and a demuxed-audio live stream. The load logs one
+    /// `[VideoProcessing]` line saying which.
+    ///
+    /// The processing never stops playback: a frame it cannot process is delivered as decoded, and
+    /// repeated failures, a sustained overrun of the frame budget or HDR10+ metadata in the stream switch
+    /// it off for the session (`AetherEngine.activeVideoProcessing`). A session it alone moved to the
+    /// software path then reloads on the native path (URL sources, not live).
+    ///
+    /// A tuning field: `reloadAtCurrentPosition(applying:)` carries a change on a URL source, which
+    /// re-runs `load()` and re-decides the route. On a custom `IOReader` source turning it off is honoured
+    /// in place, and turning it on or changing the target is refused with
+    /// `SessionReloadRefusal.videoProcessingRouteNeedsFreshLoad`.
+    public var videoProcessing: VideoProcessingOptions? = nil
+
     /// Mirror of `AVDisplayManager.isDisplayCriteriaMatchingEnabled`. Default `true`. When `false`, engine routes HDR sources through the media playlist (auto-tonemap path) because AVKit cannot switch the panel.
     public var matchContentEnabled: Bool
 
@@ -1189,6 +1217,7 @@ public struct LoadOptions: Sendable, Equatable {
         foldsDolbyVisionFEL: Bool = true,
         upscalesLowResolutionVideo: Bool = false,
         upscaleScaler: UpscaleScaler = .automatic,
+        videoProcessing: VideoProcessingOptions? = nil,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         attemptsHDRMasterOnUnprovenPanel: Bool = true,
@@ -1260,6 +1289,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.foldsDolbyVisionFEL = foldsDolbyVisionFEL
         self.upscalesLowResolutionVideo = upscalesLowResolutionVideo
         self.upscaleScaler = upscaleScaler
+        self.videoProcessing = videoProcessing
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
         self.attemptsHDRMasterOnUnprovenPanel = attemptsHDRMasterOnUnprovenPanel
@@ -1995,5 +2025,70 @@ public struct UpscaleStatus: Sendable, Equatable {
         self.targetSize = targetSize
         self.degraded = degraded
         self.disabledReason = disabledReason
+    }
+}
+
+/// Picture processing for an HDR10 title on a display that cannot show all of it (#957), set as
+/// `LoadOptions.videoProcessing`. nil (the default) is off.
+public struct VideoProcessingOptions: Sendable, Equatable {
+    /// The display's peak luminance in nit: highlights above it are rolled off (BT.2390) before the
+    /// display gets the picture, and the HDR10 metadata sent with it says this peak, so the display does
+    /// not tone map a second time. A title whose source peak is at or below it is not processed.
+    public var targetPeakNits: Double
+
+    public init(targetPeakNits: Double) {
+        self.targetPeakNits = targetPeakNits
+    }
+}
+
+/// One stage of the picture processing (`VideoProcessingStatus.stages`).
+public enum VideoProcessingStage: String, Sendable, Equatable {
+    /// BT.2390 tone map in the PQ domain, from the source peak to `VideoProcessingOptions.targetPeakNits`.
+    case toneMap
+}
+
+/// What the picture processing is doing for the current session (#957), published as
+/// `AetherEngine.activeVideoProcessing` once the first processed frame is delivered, nil otherwise.
+public struct VideoProcessingStatus: Sendable, Equatable {
+    /// The stages that run on every frame, in order.
+    public let stages: [VideoProcessingStage]
+    /// The source peak the tone map starts from, in nit.
+    public let sourcePeakNits: Double
+    /// Which value set `sourcePeakNits`: the mastering display's peak, or MaxCLL when it is lower.
+    public let sourcePeak: ToneMapSourcePeak
+    /// The peak the picture is mapped to (`VideoProcessingOptions.targetPeakNits`).
+    public let targetPeakNits: Double
+    /// Set when the processing switched itself off mid-session (repeated failures, a sustained overrun
+    /// of the frame budget, or HDR10+ metadata in the stream); frames are then delivered as decoded.
+    public let disabledReason: String?
+
+    init(stages: [VideoProcessingStage], sourcePeakNits: Double, sourcePeak: ToneMapSourcePeak,
+         targetPeakNits: Double, disabledReason: String? = nil) {
+        self.stages = stages
+        self.sourcePeakNits = sourcePeakNits
+        self.sourcePeak = sourcePeak
+        self.targetPeakNits = targetPeakNits
+        self.disabledReason = disabledReason
+    }
+
+    /// The status of a plan before or without a processed frame.
+    init(plan: VideoProcessingPlan, disabledReason: String? = nil) {
+        self.init(stages: [.toneMap], sourcePeakNits: plan.curve.sourcePeakNits, sourcePeak: plan.sourcePeak,
+                  targetPeakNits: plan.curve.targetPeakNits, disabledReason: disabledReason)
+    }
+
+    /// A processed frame publishes what ran, unless a disable was already published.
+    static func afterFirstFrame(_ delivered: VideoProcessingStatus, current: VideoProcessingStatus?) -> VideoProcessingStatus {
+        if let current, current.disabledReason != nil { return current }
+        return delivered
+    }
+
+    /// A disable keeps what was published and adds the reason; `plan` stands in when nothing was.
+    static func afterDisable(reason: String, current: VideoProcessingStatus?, plan: VideoProcessingPlan)
+        -> VideoProcessingStatus {
+        let base = current ?? VideoProcessingStatus(plan: plan)
+        return VideoProcessingStatus(stages: base.stages, sourcePeakNits: base.sourcePeakNits,
+                                     sourcePeak: base.sourcePeak, targetPeakNits: base.targetPeakNits,
+                                     disabledReason: reason)
     }
 }

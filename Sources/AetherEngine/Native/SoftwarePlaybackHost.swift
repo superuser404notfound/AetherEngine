@@ -220,6 +220,13 @@ final class SoftwarePlaybackHost {
     /// Typed loosely because the class does not exist in simulator builds or before OS 26.
     private(set) var frameUpscaler: AnyObject?
 
+    /// #957: set by the load before `load(demuxer:...)`; non-nil runs the picture processing on every decoded frame.
+    var videoProcessingPlan: VideoProcessingPlan?
+
+    /// The stage built for the current processing plan (a `FrameToneMapper`), nil when none was. Typed
+    /// loosely for the same reason as `frameUpscaler`.
+    private(set) var frameToneMapper: AnyObject?
+
     /// Forwarded Dolby Vision profile number (e.g. 7, 8) if detected from bitstream or container
     var configuredDVProfile: Int?
 
@@ -1216,6 +1223,7 @@ final class SoftwarePlaybackHost {
 
     /// #846: `handler` wrapped in the upscale stage when a plan is set and a stage builds, else unchanged.
     /// Never for the dual-layer decoder (FEL sources are HDR and refused upstream).
+    /// #957: the picture processing stage the same way for its own plan (HDR10 only, so never both).
     /// AE#957: without a plan, `AETHER_HDR10_PROBE` wraps it in the HDR10 pass-through probe instead.
     func upscaledFrameHandler(
         _ handler: @escaping DecodedFrameHandler,
@@ -1223,6 +1231,20 @@ final class SoftwarePlaybackHost {
         frameRate: Double?
     ) -> DecodedFrameHandler {
         frameUpscaler = nil
+        frameToneMapper = nil
+        if let plan = videoProcessingPlan, upscalePlan == nil, !Self.isDualLayer(decoder) {
+            #if !targetEnvironment(simulator)
+            if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
+                let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
+                let stage = FrameToneMapper(plan: plan, frameInterval: interval)
+                frameToneMapper = stage
+                return { buffer, pts, hdr10Plus in
+                    handler(stage.process(buffer, pts: pts, carriesHDR10Plus: hdr10Plus != nil) ?? buffer, pts, hdr10Plus)
+                }
+            }
+            #endif
+            return handler
+        }
         if upscalePlan == nil, !Self.isDualLayer(decoder), let settings = HDR10ProbeSettings.fromEnvironment() {
             let probe = HDR10ProbeStage(settings: settings)
             return UpscalingFrameHandler.wrap(handler) { probe.process($0, pts: $1) }

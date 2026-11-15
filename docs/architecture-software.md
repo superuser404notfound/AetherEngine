@@ -56,7 +56,7 @@ Source URL ──► Demuxer ──┬─► video decoder ──► [UpscalingF
 
 **At load.** `VideoRoutingPolicy` sends a source here when AVPlayer's HLS-fMP4 pipeline cannot take its video. The per-codec list, with the reason for each row, is in [formats.md, Software decode](formats.md#software-decode).
 
-- Two opt-in stages also move a session here: [upscaling](#low-resolution-upscaling) and [Dolby Vision FEL composition](#dolby-vision-profile-7-fel).
+- Three opt-in stages also move a session here: [upscaling](#low-resolution-upscaling), [picture processing](#picture-processing) and [Dolby Vision FEL composition](#dolby-vision-profile-7-fel).
 - A host app can ask for this host directly with `LoadOptions.preferredDecodePath = .software`.
 
 **Mid-session (escalation).** A running native session can also move here. Escalation means `SoftwarePathEscalation` rebuilds the session on this host after CoreMedia refuses the media.
@@ -292,7 +292,7 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 
 ### HDR10 tone map
 
-`ToneMapStage` and `BT2390ToneCurve` (AE#957) are a [frame chain](#low-resolution-upscaling) stage: the BT.2390 EETF (ITU-R BT.2390, section 5.4.1) from the source's peak to a lower target peak, on the PQ-coded RGB of an HDR10 frame. No playback path builds it yet: only the HDR10 probe's `chain+tonemap` mode and the benchmark do.
+`ToneMapStage` and `BT2390ToneCurve` (AE#957) are a [frame chain](#low-resolution-upscaling) stage: the BT.2390 EETF (ITU-R BT.2390, section 5.4.1) from the source's peak to a lower target peak, on the PQ-coded RGB of an HDR10 frame. The [picture processing](#picture-processing) runs it in playback; the HDR10 probe's `chain+tonemap` mode and the benchmark build it too.
 
 - Below the knee the picture is unchanged to the code value. From the knee, a Hermite spline rolls the rest of the source range off into the target's top. Values above the source peak land on the target peak.
 - The knee is at 1.5 times the target minus 0.5 on the curve's scale (PQ of the target over PQ of the source peak). A 1000 nit source to a 600 nit target starts rolling off at 464 nit.
@@ -303,6 +303,31 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 - The stage declares the mapped metadata: the target as the mastering peak, the source's mastering black, and MaxCLL and MaxFALL through the same curve.
 - The shader computes both sides of the knee and picks one, so its cost does not depend on the picture. The spline is one cubic per component, its coefficients worked out once on the CPU (`FrameChainToneMapParams`). On a GPU it matches the CPU curve to within a quarter of a 10-bit code, and the one kernel matches the two passes to within one code.
 - On the A12 Apple TV at 4K the one-kernel tone map takes 5.3 ms per frame (GPU 4.0 ms), and 4K60 played with no dropped frame. As its own pass between the two passes it takes 16.9 ms, more than a 60 fps frame. Numbers: [measurements.md › Tone map at 4K60 on the A12](measurements.md#tone-map-at-4k60-on-the-a12-ae957).
+
+### Picture processing
+
+With `LoadOptions.videoProcessing` (#957), `load()` asks `VideoProcessingRouteDecision` once, from the probe and the display (`AetherEngine+VideoProcessing.swift`). The decision is a pure function and logs one `[VideoProcessing]` line. Its one stage today is the [HDR10 tone map](#hdr10-tone-map) above.
+
+**When the route is taken.** All of these must hold:
+
+- HDR10: PQ, not Dolby Vision, no HDR10+ known at load, 8 or 10-bit 4:2:0,
+- the stream declares a mastering display or MaxCLL before its first packet (container, `hvcC` or `av1C`, read by `HDR10StaticMetadataSEI.declared(by:)`, the same values the decoder starts from),
+- a curve exists: the source peak is above the target, and the target is not below a third of it on the PQ scale,
+- the display takes HDR10, and the panel routes as HDR once the load has settled it,
+- OS 26 or later, not a wireless AirPlay route, and not a live session with demuxed audio.
+
+A title whose processing gave up earlier in this process (`VideoProcessingFailureMemory`) is not taken again: at that frame rate or a faster one after an overrun or failures, at any rate after HDR10+.
+
+**Where it runs.** A taken route moves the session to the software host, also when it would otherwise have played natively (`sourceSoftwareOnlyForVideoProcessing`). The host wraps its decoder's frame handler, and `FrameToneMapper` runs on every decoded frame:
+
+- It builds a `FrameChain` with one `ToneMapStage`, which the chain fuses into its one kernel, and `FrameChain.attach(from:to:)` writes the mapped metadata on every output frame.
+- The curve starts from the frame's own HDR10 metadata, and from the stream's declaration for a frame without any. Other values rebuild the chain.
+- A frame it does not apply to (not PQ, not 4:2:0, a peak at or below the target) goes out as decoded.
+- Upscaling and processing never both take a source: one wants SDR, the other HDR10.
+
+**Budget.** The upscaler's: over a 48-frame window the mean wall time must stay under 90% of the frame interval. There is no lighter rung, so an overrun, three failures in a row, or a frame carrying HDR10+ disables it for the session. A display applies HDR10+ to the picture it receives, so a mapped picture would be mapped twice.
+
+- If only the processing had put a URL VOD session on the software path, the session is then rebuilt on the native path, by the upscaler's rule (`upscaleDisableReturnsToNative`).
 
 ### Dolby Vision Profile 7 FEL
 

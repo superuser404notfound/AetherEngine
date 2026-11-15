@@ -148,6 +148,18 @@ extension AetherEngine {
             throw AetherEngineError.sessionNotReloadable(refusal)
         }
 
+        // #957: the same shape for the picture processing.
+        if let refusal = SessionOptionCorrection.videoProcessingRouteRefusal(
+            isCustomSource: isCustomSource, current: loadedOptions, proposed: proposed
+        ) {
+            EngineLog.emit(
+                "[AetherEngine] videoProcessing correction refused, \(refusal.rawValue): a custom source keeps "
+                + "the route it was loaded with; load() it again with the new option",
+                category: .engine
+            )
+            throw AetherEngineError.sessionNotReloadable(refusal)
+        }
+
         // Stating the no-op matters for the same reason #364's teletext switch states it: a host
         // that corrected an option and saw a plain reload cannot otherwise tell "the correction was
         // already in force" from "the correction did not arrive".
@@ -291,6 +303,12 @@ public enum SessionReloadRefusal: String, Sendable, Equatable, CustomStringConve
     /// effect. Call `load()` again with the new option. Turning it off is honoured in place, and URL
     /// sources are not affected: their correction re-runs `load()`.
     case upscaleRouteNeedsFreshLoad
+    /// #957: a correction that turns `videoProcessing` on, or changes its target while it is on, for a
+    /// session that plays from a custom `IOReader` source. The route and the curve are decided by
+    /// `load()`, which a custom source's in-place rebuild does not re-run. Call `load()` again with the new
+    /// option. Turning it off is honoured in place, and URL sources are not affected: their correction
+    /// re-runs `load()`.
+    case videoProcessingRouteNeedsFreshLoad
 
     public var description: String {
         switch self {
@@ -304,6 +322,8 @@ public enum SessionReloadRefusal: String, Sendable, Equatable, CustomStringConve
             return "the dual-layer Dolby Vision route of a custom source is decided by load(), not by a rebuild"
         case .upscaleRouteNeedsFreshLoad:
             return "the low-resolution upscale route of a custom source is decided by load(), not by a rebuild"
+        case .videoProcessingRouteNeedsFreshLoad:
+            return "the picture processing route of a custom source is decided by load(), not by a rebuild"
         }
     }
 }
@@ -465,6 +485,16 @@ enum SessionOptionCorrection {
         return .upscaleRouteNeedsFreshLoad
     }
 
+    /// Why a correction of `videoProcessing` cannot be honoured, or nil when it can (#957). Same rule as
+    /// `upscaleRouteRefusal`: on a custom source turning it on, or changing the target while it stays on,
+    /// is refused; turning it off is honoured, because the next host simply gets no plan.
+    static func videoProcessingRouteRefusal(
+        isCustomSource: Bool, current: LoadOptions, proposed: LoadOptions
+    ) -> SessionReloadRefusal? {
+        guard isCustomSource, let next = proposed.videoProcessing, next != current.videoProcessing else { return nil }
+        return .videoProcessingRouteNeedsFreshLoad
+    }
+
     /// Every field the proposal changed, for the log line. Reflection is right here and wrong
     /// above: a diagnostic that names a new field the day it is added is worth more than one that
     /// cannot be wrong, and being wrong here costs a log line.
@@ -496,7 +526,7 @@ enum SessionOptionCorrection {
     static let knownFields: [String] = [
         "sourceDiagnosticsContext",
         "omitCriteriaColorExtensions", "suppressDisplayCriteria", "displayCriteriaOwner", "httpHeaders", "nativeVideoFrameDiagnostics", "nativeVideoFrameRecovery", "hostRetriesExhaustedLiveReplay",
-        "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "dolbyVisionHandling", "preferDualLayerDolbyVision", "dualLayerRoute", "foldsDolbyVisionFEL", "upscalesLowResolutionVideo", "upscaleScaler", "matchContentEnabled",
+        "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "dolbyVisionHandling", "preferDualLayerDolbyVision", "dualLayerRoute", "foldsDolbyVisionFEL", "upscalesLowResolutionVideo", "upscaleScaler", "videoProcessing", "matchContentEnabled",
         "panelIsInHDRMode", "attemptsHDRMasterOnUnprovenPanel", "panelPresentsDolbyVision",
         "audioBridgeMode", "objectAudioRendering", "rendersDTSXObjectAudio", "stereoPresentation", "isLive", "audioOnly",
         "dvrWindowSeconds",

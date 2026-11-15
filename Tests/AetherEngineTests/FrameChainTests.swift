@@ -372,6 +372,120 @@ private final class DeclaringStage: FrameChainStage {
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture { input }
 }
 
+/// #957: the picture processing stage as the session runs it: a PQ frame is tone mapped and goes out with
+/// the target's metadata; what it does not apply to passes through; HDR10+ and an overrun switch it off.
+@Suite("Picture processing stage (#957)", .serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(5)),
+       .enabled(if: ChainGate.gpuAvailable))
+struct FrameToneMapperTests {
+
+    private static let master = HDR10StaticMetadata(maxCLL: 1000, maxFALL: 400, masteringPeakNits: 1000,
+                                                    masteringMinNits: 0.005)
+
+    private func plan() throws -> VideoProcessingPlan {
+        try #require(VideoProcessingRouteDecision.decide(
+            options: VideoProcessingOptions(targetPeakNits: 600), osSupportsStage: true, isPQ: true,
+            isDolbyVision: false, carriesHDR10Plus: false, displayTakesHDR10: true, declared: Self.master,
+            width: 320, height: 180, isFourTwoZero: true, wirelessAirPlayRoute: false, demuxedAudioLive: false).plan)
+    }
+
+    /// A 10-bit ramp from about 6 to about 990 nit, tagged PQ, with `metadata` attached when given.
+    private func frame(pq: Bool = true, metadata: HDR10StaticMetadata? = master) throws -> CVPixelBuffer {
+        let pb = try ChainFrames.gradient(320, 180, tenBit: true)
+        CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey,
+                              pq ? kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ : kCVImageBufferTransferFunction_ITU_R_709_2,
+                              .shouldPropagate)
+        if let metadata {
+            CVBufferSetAttachment(pb, kCVImageBufferMasteringDisplayColorVolumeKey,
+                                  metadata.masteringDisplayColorVolume as CFData, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferContentLightLevelInfoKey,
+                                  metadata.contentLightLevel as CFData, .shouldPropagate)
+        }
+        return pb
+    }
+
+    private static func metadata(of pb: CVPixelBuffer) -> HDR10StaticMetadata? {
+        HDR10StaticMetadata(
+            masteringDisplayColorVolume: CVBufferCopyAttachment(pb, kCVImageBufferMasteringDisplayColorVolumeKey, nil) as? Data,
+            contentLightLevel: CVBufferCopyAttachment(pb, kCVImageBufferContentLightLevelInfoKey, nil) as? Data)
+    }
+
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957APQFrameIsMappedAndSaysTheTarget() throws {
+        let plan = try plan()
+        let stage = FrameToneMapper(plan: plan, frameInterval: 1.0 / 24)
+        let input = try frame()
+        let output = try #require(stage.process(input, pts: CMTime(value: 0, timescale: 24), carriesHDR10Plus: false))
+        #expect(ChainFrames.lumaRange(output).upperBound < ChainFrames.lumaRange(input).upperBound)
+        #expect(ChainFrames.lumaRange(output).lowerBound == ChainFrames.lumaRange(input).lowerBound)
+        #expect(Self.metadata(of: output) == plan.curve.outputMetadata(from: Self.master))
+        #expect(stage.delivered == VideoProcessingStatus(stages: [.toneMap], sourcePeakNits: 1000, sourcePeak: .mastering,
+                                                         targetPeakNits: 600))
+        #expect(stage.disabledReason == nil)
+    }
+
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957AFrameWithoutMetadataUsesTheSourcesDeclaration() throws {
+        let plan = try plan()
+        let stage = FrameToneMapper(plan: plan, frameInterval: 1.0 / 24)
+        let output = try #require(stage.process(try frame(metadata: nil), pts: .zero, carriesHDR10Plus: false))
+        #expect(Self.metadata(of: output) == plan.curve.outputMetadata(from: Self.master))
+    }
+
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957WhatTheStageDoesNotApplyToPassesThrough() throws {
+        let stage = FrameToneMapper(plan: try plan(), frameInterval: 1.0 / 24)
+        #expect(stage.process(try frame(pq: false), pts: .zero, carriesHDR10Plus: false) == nil)
+        let dim = HDR10StaticMetadata(maxCLL: 500, maxFALL: 200, masteringPeakNits: 500, masteringMinNits: 0.005)
+        #expect(stage.process(try frame(metadata: dim), pts: .zero, carriesHDR10Plus: false) == nil)
+        #expect(stage.disabledReason == nil, "passing a frame through is no failure")
+        #expect(stage.process(try frame(), pts: .zero, carriesHDR10Plus: false) != nil)
+    }
+
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957HDR10PlusSwitchesItOffForGood() throws {
+        let stage = FrameToneMapper(plan: try plan(), frameInterval: 1.0 / 24)
+        #expect(stage.process(try frame(), pts: .zero, carriesHDR10Plus: true) == nil)
+        #expect(stage.disabled?.cause == .hdr10Plus)
+        #expect(stage.process(try frame(), pts: .zero, carriesHDR10Plus: false) == nil)
+    }
+
+    /// A frame interval no frame can meet: the 48-frame window fills, its mean is over 90% of it, and the
+    /// stage switches itself off once, with the reason.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957ASustainedOverrunSwitchesItOff() throws {
+        let stage = FrameToneMapper(plan: try plan(), frameInterval: 1e-6)
+        let events = EventBox()
+        stage.onEvent = { events.append($0) }
+        let input = try frame()
+        for _ in 0 ..< FrameToneMapper.budgetWindow - 1 {
+            #expect(stage.process(input, pts: .invalid, carriesHDR10Plus: false) != nil)
+        }
+        #expect(stage.disabledReason == nil)
+        _ = stage.process(input, pts: .invalid, carriesHDR10Plus: false)
+        #expect(stage.disabled?.cause == .overrun)
+        #expect(stage.disabledReason?.hasPrefix("over budget") == true)
+        #expect(stage.process(input, pts: .invalid, carriesHDR10Plus: false) == nil)
+        #expect(events.count(where: { if case .disabled = $0 { true } else { false } }) == 1)
+        #expect(events.count(where: { if case .firstFrame = $0 { true } else { false } }) == 1)
+    }
+
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    private final class EventBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [FrameToneMapper.Event] = []
+        func append(_ e: FrameToneMapper.Event) { lock.lock(); events.append(e); lock.unlock() }
+        func count(where match: (FrameToneMapper.Event) -> Bool) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return events.filter(match).count
+        }
+    }
+}
+
 /// 8-bit (420v) and 10-bit (x420) BT.709 video-range test frames. 10-bit samples sit in the high bits of 16.
 private enum ChainFrames {
     struct Failure: Error {}

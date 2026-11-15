@@ -488,6 +488,7 @@ swift run aetherctl play --fel --fel-output <p7-file.mkv>      # compose it on A
 swift run aetherctl play --fel --surface --cycle-el 10 <p7-file.mkv>   # flip the residual off and on every 10 s over a visible window (--window is the same flag)
 swift run aetherctl play --fel --surface --dv-pin 'darkest:240,period:2' <url>   # DEBUG: pulse a pinned frame's DV metadata (from dvsurvey)
 swift run aetherctl play --upscale <sd-or-720p-url>           # opt in to upscaling sub-1080p SDR video to the display (LoadOptions.upscalesLowResolutionVideo, #846); logs one [Upscale] line and an UPSCALE line once the first frame is upscaled
+swift run aetherctl play --tone-map 600 <hdr10-url>           # opt in to tone mapping HDR10 brighter than 600 nit to 600 nit (LoadOptions.videoProcessing, #957); logs one [VideoProcessing] line and a PROCESSING line once the first frame is processed
 ```
 
 ### Telemetry
@@ -627,6 +628,7 @@ Other lines `play` prints:
 | `--dv-pin <spec>` | DEBUG: pulses a pinned frame's DV metadata. | off |
 | `--upscale` | `LoadOptions.upscalesLowResolutionVideo` (#846). | off |
 | `--line-art` | `LoadOptions.upscaleScaler = .lineArt` (AE#1039); implies `--upscale`. | off |
+| `--tone-map <nits>` | `LoadOptions.videoProcessing` with this `targetPeakNits` (#957). | off |
 | `--deinterlace-field-rate field\|frame` | `LoadOptions.deinterlaceFieldRate` (AE#492). | `field` |
 | `--native-video-frame-diagnostics` | `LoadOptions.nativeVideoFrameDiagnostics`. | off |
 | `--native-video-frame-recovery` | Bounded SDR native decoded-output repair. | off |
@@ -963,6 +965,10 @@ See [dolby-vision-fel.md](dolby-vision-fel.md).
 `--upscale` opts in to upscaling sub-1080p SDR video to the display (`LoadOptions.upscalesLowResolutionVideo`, #846). It logs one `[Upscale]` line, and an `UPSCALE` line once the first frame is upscaled.
 
 `--line-art` runs the line-art scaler instead (`LoadOptions.upscaleScaler = .lineArt`, AE#1039) and implies `--upscale`. It also takes 1080p and 10-bit SDR. The `UPSCALE` line then ends in `scaler=lineArt`, and the `[Upscale] timing` lines show the chain's GPU time under `metal`.
+
+### Tone map (`--tone-map`)
+
+`--tone-map <nits>` opts in to the picture processing with that target peak (`LoadOptions.videoProcessing`, #957). It logs one `[VideoProcessing]` line, and a `PROCESSING toneMap <source> nit (<mastering|maxCLL>) -> <target> nit` line once the first frame is processed, again with `disabled: <reason>` if it switches itself off. The stage needs macOS 26; before that the line says `not taken (needs OS 26)`.
 
 ### Dropped audio (`--drop-audio`)
 

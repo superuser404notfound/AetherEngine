@@ -12,12 +12,21 @@ the public-API contract.
 
 ### Added
 
+- **`LoadOptions.videoProcessing`: tone map HDR10 titles brighter than the display to its peak (#957).** Off
+  by default. With `VideoProcessingOptions(targetPeakNits:)` set, an HDR10 title whose declared peak is above
+  the target plays on the software host, every frame runs the BT.2390 tone map, and the frame tells the
+  display the target, so it does not tone map a second time. The cost is the software path's (no AVPlayer
+  PiP, the picture stays on this device over AirPlay, E-AC-3 Atmos as its channel bed). Dolby Vision,
+  HDR10+, HLG, SDR, a title at or below the target and one with no declared metadata keep their route; the
+  load logs one `[VideoProcessing]` line saying why. `$activeVideoProcessing` reports what runs. Falling
+  behind, failing, or HDR10+ in the stream switches it off, and a session it alone moved goes back to the
+  native path. On the A12 Apple TV a 4K60 HDR10 title fits. `aetherctl play --tone-map <nits>` runs it.
+
 - **A BT.2390 tone map stage for the frame chain, timed by `aetherctl bench` (#957).** Groundwork for HDR
   tone mapping to a display's peak. The stage maps an HDR10 picture from its source peak to a lower target
-  and declares the mapped metadata, and it runs inside the chain's one round-trip kernel. No playback path
-  builds it yet. `aetherctl bench` gains `chain: tone map, one kernel, wall time` and
-  `chain: tone map, two passes, wall time`, and the HDR10 probe gains `chain+tonemap` for timing it in
-  playback.
+  and declares the mapped metadata, and it runs inside the chain's one round-trip kernel. `aetherctl bench`
+  gains `chain: tone map, one kernel, wall time` and `chain: tone map, two passes, wall time`, and the HDR10
+  probe gains `chain+tonemap` for timing it in playback.
 
 ## [7.67.1] - 2026-11-14
 
