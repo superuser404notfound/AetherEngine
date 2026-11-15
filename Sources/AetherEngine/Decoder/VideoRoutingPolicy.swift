@@ -135,6 +135,17 @@ enum VideoRoutingPolicy {
         return fieldOrder == AV_FIELD_UNKNOWN && spsIndicatesInterlaced
     }
 
+    /// AE#1070: true when interlaced H.264 that the declared-interlace rule alone sends to software
+    /// should take the native route instead, because a wireless AirPlay receiver that shows video holds
+    /// the route. The software host's layer stays on the device, so the receiver would get sound only;
+    /// native hands it the stream, at the cost of this device's deinterlacer.
+    static func declaredInterlaceYieldsToAirPlayReceiver(
+        declaredInterlaceRoutesSoftware: Bool,
+        airPlayVideoReceiver: Bool
+    ) -> Bool {
+        declaredInterlaceRoutesSoftware && airPlayVideoReceiver
+    }
+
     /// Hardware deinterlace setup is unrelated to progressive software codecs such as VP8/VP9/AV1.
     /// Start that relatively expensive Metal/VideoToolbox warm-up only when probe metadata says the
     /// source can actually enter the deinterlacer.

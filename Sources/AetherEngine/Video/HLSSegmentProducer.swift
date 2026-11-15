@@ -580,6 +580,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var felLookaheadDecided = false
     #endif
     private var loggedFirstDtsBump = false
+    /// AE#1070: joins the two fields of a PAFF frame into one packet. Created on the first read of an
+    /// H.264 stream whose SPS allows field pictures.
+    private var fieldJoiner: H264FieldPairJoiner?
+    private var fieldJoinerDecided = false
     private var loggedFirstDtsDrop = false
     private var loggedFirstAudioDtsBump = false
 
@@ -1291,6 +1295,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             return false
         }
         discardPregateScanState()
+        fieldJoiner?.reset()
         #if DolbyVisionFelCurves
         felLookahead?.reset()
         #endif
@@ -1933,6 +1938,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             return nil
         }
         pendingAdVideoConfig = nil
+        // AE#1070: the joiner's slice context came from the old SPS and cannot read the new stream.
+        fieldJoiner?.disarm()
         // #133 follow-up: same trigger and versioned-init path, two origins. SSAI = new video PID (ad creative,
         // its own signaling). Same-PID = in-band SPS/PPS change on the running program (encoder restart / splice),
         // whose DV/color overrides must be kept, so only versionedInit is set, not isAdCreative.
@@ -2562,6 +2569,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let positions = Self.moovPrimeHuntPositions(durationSeconds: demuxer.duration)
         guard !positions.isEmpty else { return nil }
         let deadline = Date().addingTimeInterval(Self.moovPrimeHuntTimeoutSeconds)
+        fieldJoiner?.reset()
 
         for target in positions {
             if checkShouldStop() || Date() > deadline { break }
@@ -3522,12 +3530,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 return packet.map { ($0, .main) }
             }
             #endif
-            guard let packet = try demuxer.readPacket() else { return nil }
+            guard let packet = try readMainSourcePacket() else { return nil }
             boundSourceTimestamps(packet)
             return (packet, .main)
         }
         if mergeMainLookahead == nil, !mergeMainEOF {
-            mergeMainLookahead = try demuxer.readPacket()
+            mergeMainLookahead = try readMainSourcePacket()
             if let pkt = mergeMainLookahead {
                 boundSourceTimestamps(pkt)
                 // Only video moves the main clock run: the variant's other streams (muxed audio the
@@ -3575,6 +3583,23 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         mergeMainLookahead = nil
         return (main, .main)
+    }
+
+    /// AE#1070: the main demuxer's packets with PAFF field pairs joined, see `H264FieldPairJoiner`.
+    private func readMainSourcePacket() throws -> UnsafeMutablePointer<AVPacket>? {
+        if !fieldJoinerDecided {
+            fieldJoinerDecided = true
+            if let stream = demuxer.stream(at: videoStreamIndex), let codecpar = stream.pointee.codecpar {
+                fieldJoiner = H264FieldPairJoiner.make(
+                    videoStreamIndex: videoStreamIndex, codecpar: codecpar, framing: a53NALFraming)
+            }
+            if fieldJoiner != nil {
+                EngineLog.emit("[HLSSegmentProducer] AE#1070 H.264 SPS allows field pictures: joining "
+                               + "field pairs into one sample each", category: .session)
+            }
+        }
+        guard let joiner = fieldJoiner else { return try demuxer.readPacket() }
+        return try joiner.next { try demuxer.readPacket() }
     }
 
     #if DolbyVisionFelCurves
@@ -5128,6 +5153,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         freeReplayPackets()
         freeMergeLookaheads()
+        if let joiner = fieldJoiner {
+            if joiner.pairsJoined > 0 || joiner.unpairedFields > 0 {
+                EngineLog.emit("[HLSSegmentProducer] AE#1070 field pairs joined=\(joiner.pairsJoined) "
+                               + "unpaired=\(joiner.unpairedFields)", category: .session)
+            }
+            joiner.reset()
+        }
         #if DolbyVisionFelCurves
         felLookahead?.reset()
         #endif

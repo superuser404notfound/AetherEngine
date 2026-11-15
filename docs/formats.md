@@ -281,6 +281,10 @@ On a seekable VOD source the engine first checks the declared field order agains
 - A flagged frame ends the sample at once (~29 ms on 1080i, ~100 ms for a full sample).
 - Live sources are never probed.
 
+**On an AirPlay receiver that shows video it plays natively (AE#1070).** The software host draws into a layer that stays on the device, so an Apple TV picked from the AirPlay button got the sound alone. While the host reports a video receiver on the wireless route (`setAirPlayReceiverShowsVideo(true)`), interlaced H.264 takes the native route and the receiver gets the stream as it is, without the device's deinterlacer. The engine reloads at the playhead when that changes mid-session, in both directions. See [AirPlay and the software host](api.md#airplay-and-the-software-host).
+
+**On the native route, field pairs become one sample.** Broadcast 1080i often codes each field as a picture of its own (PAFF), so MPEG-TS delivers 50 packets a second for 25 frames. Muxed one field per sample, AVPlayer shows every field as a frame and the picture bounces up and down. `H264FieldPairJoiner` puts both fields of a frame into one sample, the way ISO/IEC 14496-15 wants it. It only runs when the SPS allows field pictures, and a frame picture or a field without its partner passes through unchanged. The receiver still gets the frame woven, so motion can show combing where the device's deinterlacer would have removed it.
+
 #### High profiles without a hardware decoder
 
 H.264 High 4:2:2 / 4:4:4 / High-10 and HEVC Rext (4:2:2 / 4:4:4 / 12-bit), on hardware whose VideoToolbox has no decoder for the profile (Intel Macs, older Apple TV chips).

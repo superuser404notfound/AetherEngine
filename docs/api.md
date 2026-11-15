@@ -1165,6 +1165,7 @@ It is per engine instance, so several engines at once can be told apart without 
 | `$audioDelivery` | `AudioDelivery`: how the audio reaches the renderer, one of `.none`, `.noAudioInSource`, `.streamCopy`, `.bridged`, `.decoded`, `.droppedNoPipeline`, `.playerManaged`. A fallback ladder demotes on `.droppedNoPipeline` (AE#641). See [Reading whether the audio was delivered](#reading-whether-the-audio-was-delivered). |
 | `$currentAVPlayer`, `$currentAVPlayerItem` | The live AVFoundation objects, re-emitted on every reload. Both nil on `.software`, which renders into its own layer. A host that only hands `currentAVPlayer` to an `AVPlayerViewController` gets audio over an empty video plane on that route (#298). |
 | `$airPlayPictureStaysLocal` | iOS: true while a wireless AirPlay receiver holds the audio route but the session runs on the software host. See [AirPlay and the software host](#airplay-and-the-software-host). |
+| `$airPlayPictureCanMoveToReceiver` | iOS: true while the picture stays local and `setAirPlayReceiverShowsVideo(true)` would move it to the receiver. |
 | `setScreenMirrored(_:)` | iOS: tell the engine whether the screen is being mirrored. |
 | `setAirPlayReceiverShowsVideo(_:)` | iOS: tell the engine whether the AirPlay receiver on the audio route shows video. |
 
@@ -1178,6 +1179,11 @@ It is per engine instance, so several engines at once can be told apart without 
 - False on the native paths, where the receiver gets the stream, and everywhere off iOS.
 - False too while the host reports the screen as mirrored (`setScreenMirrored(_:)`), because the mirror carries the layer.
 
+**`$airPlayPictureCanMoveToReceiver`** (iOS, AE#1070) is true while `airPlayPictureStaysLocal` is true and `setAirPlayReceiverShowsVideo(true)` would move the picture to the receiver. Show a "show it on the TV" action exactly while it is true, and call that setter when the viewer taps it. The engine reloads at the playhead onto the native route, and both flags drop.
+
+- Today that covers interlaced H.264 on a URL source that can reopen at its position (seekable VOD, or live).
+- VP9, AV1 without hardware decode, MPEG-2, VC-1 and a host's `preferredDecodePath = .software` have no native route for it, so it stays false there.
+
 **`setScreenMirrored(_:)`** (iOS). Pass `true` for a mirror only, derived from `UITraitCollection.sceneCaptureState`; a screen recording also reads as captured there. A mirror carries the software host's layer to the receiver, so `airPlayPictureStaysLocal` reads false while it is on. No effect off iOS.
 
 **`setAirPlayReceiverShowsVideo(_:)`** (iOS) tells the engine whether the AirPlay receiver on the audio route shows video (an Apple TV or a TV).
@@ -1185,8 +1191,9 @@ It is per engine instance, so several engines at once can be told apart without 
 - The audio session reports every AirPlay output as the same port type, so the engine cannot tell a TV from a HomePod on its own. The default is false (audio-only or unknown).
 - A host has the same limit, so pass what it knows itself: the viewer's own choice (for example a "playing to a TV" control), or a host-owned `AVPlayer`'s `isExternalPlaybackActive`.
 - While true and a wireless route is active, a Profile 7 FEL source loads on the native route (8.1 where the display takes Dolby Vision, no enhancement layer), so the receiver gets a picture. The dual-layer route would draw into a layer no receiver picks up.
+- Interlaced H.264 does the same (AE#1070): native while a video receiver holds the route, so the receiver gets the stream without this device's deinterlacer, and the software deinterlacer otherwise. For it the engine does not wait for the next load. A session the interlace rule routed reloads at its position by itself when this value or the wireless route changes (VOD on a seekable URL source, or live). A host can therefore offer "show it on the TV" when `airPlayPictureStaysLocal` turns true and only call this setter.
 - Opt-in: nothing changes for a host that never calls it.
-- Read at each load. On a URL source, `reloadAtCurrentPosition()` decides again; a custom source keeps its route until the next `load()`.
+- Read at each load. For a FEL source, `reloadAtCurrentPosition()` on a URL source decides again; a custom source keeps its route until the next `load()`.
 - No effect off iOS.
 
 ### Source and format
