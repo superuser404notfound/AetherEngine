@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An HDR start no longer waits five seconds for a mode switch that has already ended (#1067).** When the
+  play gate opened right after the panel's switch had ended, but tvOS still reported a switch in progress,
+  the gate waited for a second end that never came and only gave up at its cap. It now proceeds after at
+  most one second, unless a new switch starts in that time. The HDR master refusal line also says whether
+  the engine's display criteria were still set at that moment, and on which window. Thanks to en0x for the
+  report and logs.
+
 ### Added
 
 - **A BT.2390 tone map stage for the frame chain, timed by `aetherctl bench` (#957).** Groundwork for HDR

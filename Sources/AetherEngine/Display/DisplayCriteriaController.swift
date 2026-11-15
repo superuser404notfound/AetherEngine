@@ -470,6 +470,11 @@ final class DisplayCriteriaController {
         /// A start was recorded and no end followed it. Stage 1 has nothing left to discover, so the gate
         /// goes straight to waiting the end out.
         case running(startBeforeGateMs: Int)
+        /// AE#1067: start and end both recorded, but the in-progress flag still reads true. The flag may veto
+        /// a settle, so this is not `.settled`, but it is not a running switch either: the only end that
+        /// switch will post is already on the record. What can still come is a follow-on switch, and that
+        /// announces itself with a new start.
+        case endedFlagStillSet(startBeforeGateMs: Int, switchMs: Int)
         /// Nothing usable recorded since the write.
         case none
     }
@@ -741,11 +746,38 @@ final class DisplayCriteriaController {
                                            switchInProgress: Bool) -> ObservedSwitch {
         guard let started = startedAtNanos else { return .none }
         let startBeforeGateMs = elapsedMs(fromNanos: started, toNanos: gateEntryNanos)
-        if let ended = endedAtNanos, ended >= started, !switchInProgress {
-            return .settled(startBeforeGateMs: startBeforeGateMs,
-                            switchMs: elapsedMs(fromNanos: started, toNanos: ended))
+        if let ended = endedAtNanos, ended >= started {
+            let switchMs = elapsedMs(fromNanos: started, toNanos: ended)
+            return switchInProgress
+                ? .endedFlagStillSet(startBeforeGateMs: startBeforeGateMs, switchMs: switchMs)
+                : .settled(startBeforeGateMs: startBeforeGateMs, switchMs: switchMs)
         }
         return .running(startBeforeGateMs: startBeforeGateMs)
+    }
+
+    /// AE#1067: how long after the recorded end a gate that found `.endedFlagStillSet` watches for a
+    /// follow-on switch. Timed from the end, not from gate entry: a follow-on start comes right after the end
+    /// it follows, so a gate that opens late on a long item build owes it nothing extra. The same
+    /// second Stage 1 gives an inbound dynamic-range switch (`StartGrace.full`). On the reporter's Apple TV
+    /// 4K (3rd gen, tvOS 27.2.1) the flag stayed set for 8 s after modeSwitchEnd with the panel idle, so
+    /// waiting for the flag is not an option.
+    nonisolated static let endedSwitchFlagGraceMs = 1000
+
+    enum EndedSwitchFlagVerdict: Equatable {
+        /// A new start arrived: a second switch is running, wait for its end.
+        case followOnStart
+        /// The flag cleared: the switch on the record was the last one.
+        case flagCleared
+        /// Neither within the grace: the flag is stuck, the switch on the record was the last one.
+        case graceSpent
+    }
+
+    /// One poll of the follow-on watch, `nil` while it keeps watching.
+    nonisolated static func endedSwitchFlagWatch(elapsedMs: Int, newStart: Bool,
+                                                 switchInProgress: Bool) -> EndedSwitchFlagVerdict? {
+        if newStart { return .followOnStart }
+        if !switchInProgress { return .flagCleared }
+        return elapsedMs >= endedSwitchFlagGraceMs ? .graceSpent : nil
     }
 
     /// The numbers a settle log needs to be usable: when the switch started relative to the gate, how long
@@ -925,12 +957,14 @@ final class DisplayCriteriaController {
         didApply = true
         lastCriteriaWasHDR = isHDR
         lastApplied = target
+        writtenWindow = ObjectIdentifier(window)
 
         EngineLog.emit(
             "[DisplayCriteria] SET: format=\(format) codec=\(fourccString(codecType)) "
             + "rate=\(frameRate.map { String(format: "%.3f", $0) } ?? "default(24)") "
             + "extensions=\(extensions != nil ? "HDR" : "none") "
-            + "before write: \(preWrite.logDescription)\(switchInFlight ? ", a switch already in flight" : "")",
+            + "before write: \(preWrite.logDescription)\(switchInFlight ? ", a switch already in flight" : ""); "
+            + Self.windowDescription(window),
             category: .engine
         )
         // SDR rate-only switches are sub-second; only HDR criteria need the waitForSwitch delay.
@@ -1007,6 +1041,32 @@ final class DisplayCriteriaController {
         return false
         #else
         return false
+        #endif
+    }
+
+    #if os(tvOS)
+    /// AE#1067: the window the last SET went to. tvOS keeps criteria per window, and `resolveWindow()`
+    /// takes the first window of the first scene, so a host that adds a window can move it.
+    private var writtenWindow: ObjectIdentifier?
+
+    private static func windowDescription(_ window: UIWindow) -> String {
+        let count = window.windowScene?.windows.count ?? 0
+        return "window key=\(window.isKeyWindow ? "yes" : "no") (\(count) in its scene)"
+    }
+    #endif
+
+    /// AE#1067: whether the criteria the engine wrote are still on the display manager it reads, for a log
+    /// line at a refusal. A refusal with them gone is about whoever cleared them, not about the panel.
+    var criteriaHoldingDescription: String {
+        #if os(tvOS)
+        guard didApply else { return "engine wrote no criteria" }
+        guard let window = resolveWindow() else { return "no window" }
+        let held = window.avDisplayManager.preferredDisplayCriteria != nil
+        let sameWindow = writtenWindow == ObjectIdentifier(window)
+        return "criteria still set=\(held ? "yes" : "no"), \(sameWindow ? "same window as the SET" : "NOT the window of the SET"), "
+            + Self.windowDescription(window)
+        #else
+        return "n/a"
         #endif
     }
 
@@ -1119,6 +1179,39 @@ final class DisplayCriteriaController {
             // Start already recorded: Stage 1 has nothing to discover, only the end is still open.
             startSignal = .preGateObserved
             preGateStartMs = before
+        case .endedFlagStillSet(let before, let measured):
+            // AE#1067: Stage 2 would wait for a new end, and the switch on the record has posted its end
+            // already. Watch for a follow-on start instead; only that one has an end still to come.
+            let watchEntry = DispatchTime.now()
+            let watchFrom = gateSnapshot.endedAt ?? watchEntry.uptimeNanoseconds
+            let suffix = Self.timingSuffix(startSignal: .preGateObserved, stage1Ms: 0, totalMs: 0,
+                                           startBeforeGateMs: before, switchMs: measured)
+            while true {
+                let verdict = Self.endedSwitchFlagWatch(
+                    elapsedMs: Self.elapsedMs(fromNanos: watchFrom, toNanos: DispatchTime.now().uptimeNanoseconds),
+                    newStart: observation.hasNewStart(since: gateSnapshot),
+                    switchInProgress: displayManager.isDisplayModeSwitchInProgress)
+                switch verdict {
+                case .followOnStart:
+                    EngineLog.emit("[DisplayCriteria] #1067: a follow-on switch started \(Self.elapsedMs(since: watchEntry))ms after the gate opened on an ended one (\(suffix)); waiting for its end", category: .engine)
+                case .flagCleared:
+                    EngineLog.emit("[DisplayCriteria] switch settled before the gate opened (\(suffix)); the in-progress flag cleared after \(Self.elapsedMs(since: entry))ms", category: .engine)
+                    return
+                case .graceSpent:
+                    EngineLog.emit("[DisplayCriteria] #1067: switch ended before the gate opened (\(suffix)) and the in-progress flag still reads true after \(Self.elapsedMs(since: entry))ms with no new start; the flag is stuck, proceeding", category: .engine)
+                    return
+                case nil:
+                    guard await Self.gateTick(milliseconds: 20, isCurrent: isCurrent) else {
+                        EngineLog.emit("[DisplayCriteria] gate abandoned while watching for a follow-on switch after \(Self.elapsedMs(since: entry))ms: the load it held was cancelled or superseded", category: .engine)
+                        return
+                    }
+                    continue
+                }
+                break
+            }
+            // The follow-on start is new against the snapshot, so its end will be too.
+            startSignal = .inGate
+            stage1Ms = Self.elapsedMs(since: entry)
         case .none:
             break
         }

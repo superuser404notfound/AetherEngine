@@ -110,11 +110,45 @@ struct DisplayCriteriaSwitchObservationTests {
             gateEntryNanos: gateEntry, switchInProgress: false) == .running(startBeforeGateMs: 200))
     }
 
-    @Test("The in-progress flag vetoes a settle: a start/end pair with the panel still switching keeps waiting")
+    @Test("The in-progress flag vetoes a settle, but a start/end pair is not a running switch")
     func inProgressFlagVetoesSettle() {
+        // AE#1067: reading this as `.running` sent the gate to wait for an end that was already on the
+        // record. On the reporter's Apple TV the flag stayed set for 8 s after modeSwitchEnd, so the play
+        // gate spent the rest of the observed-end budget (5.2 s) on a panel that had finished.
         #expect(DisplayCriteriaController.observedSwitch(
             startedAtNanos: gateEntry - 900 * ms, endedAtNanos: gateEntry - 100 * ms,
-            gateEntryNanos: gateEntry, switchInProgress: true) == .running(startBeforeGateMs: 900))
+            gateEntryNanos: gateEntry, switchInProgress: true)
+            == .endedFlagStillSet(startBeforeGateMs: 900, switchMs: 800))
+    }
+
+    // MARK: - Ended, flag still set (AE#1067)
+
+    @Test("After a recorded end, a new start is a follow-on switch and the gate waits for its end")
+    func followOnStartAfterEnd() {
+        #expect(DisplayCriteriaController.endedSwitchFlagWatch(
+            elapsedMs: 300, newStart: true, switchInProgress: true) == .followOnStart)
+    }
+
+    @Test("After a recorded end, the flag clearing settles the gate")
+    func flagClearsAfterEnd() {
+        #expect(DisplayCriteriaController.endedSwitchFlagWatch(
+            elapsedMs: 300, newStart: false, switchInProgress: false) == .flagCleared)
+    }
+
+    @Test("After a recorded end, a flag that stays set only costs the follow-on grace, not the end budget")
+    func stuckFlagCostsOnlyTheGrace() {
+        let grace = DisplayCriteriaController.endedSwitchFlagGraceMs
+        #expect(grace <= DisplayCriteriaController.StartGrace.full.budgetMs)
+        #expect(DisplayCriteriaController.endedSwitchFlagWatch(
+            elapsedMs: grace - 1, newStart: false, switchInProgress: true) == nil)
+        #expect(DisplayCriteriaController.endedSwitchFlagWatch(
+            elapsedMs: grace, newStart: false, switchInProgress: true) == .graceSpent)
+    }
+
+    @Test("A new start wins over a spent grace in the same poll")
+    func newStartBeatsSpentGrace() {
+        #expect(DisplayCriteriaController.endedSwitchFlagWatch(
+            elapsedMs: 5_000, newStart: true, switchInProgress: true) == .followOnStart)
     }
 
     // MARK: - Finished before the gate opened

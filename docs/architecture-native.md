@@ -840,6 +840,10 @@ Disk retention is shared the same way, through `RetentionClaims`. Host contract:
 
 After the session is built, a play gate (`waitForSwitch`) holds the start until a switch settles, on the native and the software path alike. `isAwaitingDisplaySwitch` is raised around that gate (AE#1000). `playbackPhase` reads `.loading` throughout, so this flag is how a host tells a panel wait from a source wait. Details: [api.md, Display criteria](api.md#display-criteria).
 
+Once a switch is known to have started, the gate ends on tvOS's mode-switch end notification, a rise in EDR headroom, or the system's in-progress flag clearing, whichever comes first, and otherwise at a cap. Before a start is seen, the flag alone does not end the wait, because it is unreliable right after a write.
+
+The flag can also stay set long after a switch has ended. On one Apple TV 4K (3rd gen, tvOS 27.2.1) it read true for 8 s after the end notification, with the panel idle. A gate that opens with both a start and an end on record therefore does not wait for another end. It watches for a follow-on switch until one second after the recorded end, and waits that one out if it starts (AE#1067).
+
 ## Live sources
 
 How the engine recovers when a live source reconnects, replays media it already sent, or changes shape. This page covers the native stream-copy path, playlist renewal and recording. The software host's live admission and its no-DVR loop are in [architecture-software.md, Live sources on the software host](architecture-software.md#live-sources-on-the-software-host).
