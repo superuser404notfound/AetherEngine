@@ -9,6 +9,28 @@ struct HDR10StaticMetadata: Equatable, Sendable {
     var masteringPeakNits: Double
     var masteringMinNits: Double
 
+    init(maxCLL: Int, maxFALL: Int, masteringPeakNits: Double, masteringMinNits: Double) {
+        self.maxCLL = maxCLL
+        self.maxFALL = maxFALL
+        self.masteringPeakNits = masteringPeakNits
+        self.masteringMinNits = masteringMinNits
+    }
+
+    /// The values in a frame's two attachments. A missing or malformed key reads as 0 (unknown); nil when
+    /// neither key is usable.
+    init?(masteringDisplayColorVolume mastering: Data?, contentLightLevel lightLevel: Data?) {
+        let m = mastering.flatMap { $0.count == 24 ? [UInt8]($0) : nil }
+        let l = lightLevel.flatMap { $0.count == 4 ? [UInt8]($0) : nil }
+        guard m != nil || l != nil else { return nil }
+        func u32(_ b: [UInt8], _ i: Int) -> Double {
+            Double(UInt32(b[i]) << 24 | UInt32(b[i + 1]) << 16 | UInt32(b[i + 2]) << 8 | UInt32(b[i + 3]))
+        }
+        masteringPeakNits = m.map { u32($0, 16) / 10_000 } ?? 0
+        masteringMinNits = m.map { u32($0, 20) / 10_000 } ?? 0
+        maxCLL = l.map { Int($0[0]) << 8 | Int($0[1]) } ?? 0
+        maxFALL = l.map { Int($0[2]) << 8 | Int($0[3]) } ?? 0
+    }
+
     /// BT.2020 primaries in the SEI's order (green, blue, red), then the D65 white point, in 0.00002 units.
     static let bt2020Chromaticities: [UInt16] = [8500, 39850, 6550, 2300, 35400, 14600, 15635, 16450]
 

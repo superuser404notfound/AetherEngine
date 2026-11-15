@@ -181,6 +181,33 @@ struct FrameChainTests {
         #expect(mastering == fitted.masteringDisplayColorVolume)
     }
 
+    /// AE#957: the tone map runs inside the one round-trip kernel and gives what its own pass between the two
+    /// passes gives, to within rounding. 320 wide takes the wide kernel, 322 the narrow one.
+    @Test(arguments: [320, 322])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957TheFusedToneMapMatchesItsOwnPass(width: Int) throws {
+        let curve = try #require(BT2390ToneCurve(sourcePeakNits: 1000, targetPeakNits: 600))
+        let master = HDR10StaticMetadata(maxCLL: 1000, maxFALL: 400, masteringPeakNits: 1000, masteringMinNits: 0.005)
+        let input = try ChainFrames.gradient(width, 180, tenBit: true)
+        // Luma 240...720 of 1023: from about 6 nit, below the 464 nit knee, to about 990 nit, above it.
+        let fused = try chain(width, 180, stages: [ToneMapStage(curve: curve, source: master), PassThroughStage()])
+        let twoPass = try chain(width, 180, stages: [ToneMapStage(curve: curve, source: master)], fusesRoundTrip: false)
+        let twoMaps = try chain(width, 180, stages: [ToneMapStage(curve: curve, source: master),
+                                                     ToneMapStage(curve: curve, source: master)])
+        #expect(fused.isRoundTripOnly)
+        #expect(!twoPass.isRoundTripOnly)
+        #expect(!twoMaps.isRoundTripOnly, "one fused stage per kernel")
+        let (a, _) = try fused.process(input, picture: whole(width, 180))
+        let (b, _) = try twoPass.process(input, picture: whole(width, 180))
+        let diff = ChainFrames.maxDifference(a, b)
+        #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c) (width \(width))")
+        // The ramp's top is brighter than the target, so the map lowers it; the dark end is below the knee.
+        let plain = try chain(width, 180, stages: [PassThroughStage()]).process(input, picture: whole(width, 180)).0
+        #expect(ChainFrames.lumaRange(a).upperBound < ChainFrames.lumaRange(plain).upperBound)
+        #expect(ChainFrames.lumaRange(a).lowerBound == ChainFrames.lumaRange(plain).lowerBound)
+        #expect(fused.outputColorVolume == .hdr10(curve.outputMetadata(from: master)))
+    }
+
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func unsupportedFormatIsRefused() throws {

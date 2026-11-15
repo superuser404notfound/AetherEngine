@@ -6,7 +6,8 @@ import Metal
 /// A chain of GPU stages over one decoded frame (AE#957, AE#1039): the 4:2:0 picture (8 or 10-bit) goes to
 /// RGB in a half-float texture, through each stage in order, and back to the input's pixel format at the
 /// target size, resampled bilinearly where the last stage does not land on it. Everything runs in one
-/// command buffer. Stages see gamma-coded RGB in 0...1 (SDR only, so there is no transfer handling).
+/// command buffer. Stages see the input's non-linear RGB in 0...1 (gamma or PQ coded); the chain does no
+/// transfer handling, and a stage that needs one (the tone map, on PQ) is built for it.
 ///
 /// When no stage needs the RGB picture (`FrameChainStage.isIdentity`) and the size stays, one kernel does
 /// the whole round trip with the same arithmetic and no RGB texture between the passes. At 4K that texture
@@ -40,6 +41,8 @@ final class FrameChain {
     private let rgb: MTLTexture?
     /// One kernel from the input planes to the output planes, no RGB texture.
     let isRoundTripOnly: Bool
+    /// The tone map the round-trip kernel runs on each sample, when a stage fuses one into it.
+    private let roundTripToneMap: FrameChainToneMapParams?
     private var outputPools: [OSType: CVPixelBufferPool] = [:]
 
     /// The formats the chain reads and writes: 8 and 10-bit bi-planar 4:2:0, video and full range.
@@ -65,11 +68,15 @@ final class FrameChain {
         self.targetWidth = targetWidth
         self.targetHeight = targetHeight
         self.stages = stages
-        isRoundTripOnly = fusesRoundTrip && stages.allSatisfy { $0.isIdentity }
+        let toneMaps = stages.compactMap(\.fusedToneMap)
+        isRoundTripOnly = fusesRoundTrip && toneMaps.count <= 1
+            && stages.allSatisfy { $0.isIdentity || $0.fusedToneMap != nil }
             && sourceWidth == targetWidth && sourceHeight == targetHeight
+        roundTripToneMap = isRoundTripOnly ? toneMaps.first : nil
         rgb = isRoundTripOnly ? nil : try Self.texture(device, sourceWidth, sourceHeight)
         var size = (sourceWidth, sourceHeight)
-        for (i, stage) in stages.enumerated() {
+        // The one kernel runs a fused stage's arithmetic itself: nothing to allocate.
+        for (i, stage) in stages.enumerated() where !isRoundTripOnly {
             let last = i == stages.count - 1
             size = try stage.prepare(device: device, kernels: kernels, input: size,
                                      finalTarget: last ? (targetWidth, targetHeight) : nil)
@@ -142,12 +149,18 @@ final class FrameChain {
                 Self.dispatch(enc, kernels.toYCbCr, textures: [current, oy.0, oc.0],
                               grid: (targetWidth / 2, targetHeight / 2))
             }
-        } else if wide {
-            Self.dispatch(enc, kernels.roundTripWide, textures: [iy.0, ic.0, oy.0, oc.0],
-                          grid: (targetWidth / 4, targetHeight / 2))
         } else {
-            Self.dispatch(enc, kernels.roundTrip, textures: [iy.0, ic.0, oy.0, oc.0],
-                          grid: (targetWidth / 2, targetHeight / 2))
+            if var toneMap = roundTripToneMap {
+                enc.setBytes(&toneMap, length: MemoryLayout<FrameChainToneMapParams>.size, index: 1)
+            }
+            let mapped = roundTripToneMap != nil
+            if wide {
+                Self.dispatch(enc, mapped ? kernels.roundTripWideToneMapped : kernels.roundTripWide,
+                              textures: [iy.0, ic.0, oy.0, oc.0], grid: (targetWidth / 4, targetHeight / 2))
+            } else {
+                Self.dispatch(enc, mapped ? kernels.roundTripToneMapped : kernels.roundTrip,
+                              textures: [iy.0, ic.0, oy.0, oc.0], grid: (targetWidth / 2, targetHeight / 2))
+            }
         }
         enc.endEncoding()
         cb.commit()
@@ -214,7 +227,8 @@ final class FrameChain {
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 protocol FrameChainStage: AnyObject {
     /// Allocates what the stage needs for an input of `input` size and returns its output size.
-    /// `finalTarget` is the chain's target size when this is the last stage, else nil.
+    /// `finalTarget` is the chain's target size when this is the last stage, else nil. Not called when the
+    /// chain runs as one round-trip kernel.
     func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int)
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture
     /// True for a stage that leaves every sample as it is: a chain of only such stages needs no RGB texture.
@@ -225,12 +239,16 @@ protocol FrameChainStage: AnyObject {
     /// The colour volume of what the stage outputs; the chain writes the frames' HDR10 metadata from it.
     /// A stage that changes the picture's brightness or gamut must declare it.
     var outputColorVolume: FrameChainColorVolume { get }
+    /// A per-pixel stage the one round-trip kernel can run on each sample instead of `encode`: a chain of
+    /// identity stages and one such stage, at its own size, needs no RGB texture.
+    var fusedToneMap: FrameChainToneMapParams? { get }
 }
 
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 extension FrameChainStage {
     var isIdentity: Bool { false }
     var outputColorVolume: FrameChainColorVolume { .unchanged }
+    var fusedToneMap: FrameChainToneMapParams? { nil }
     func encodeFinal(_ encoder: MTLComputeCommandEncoder, input: MTLTexture, luma: MTLTexture, chroma: MTLTexture) -> Bool {
         false
     }
@@ -244,6 +262,42 @@ final class PassThroughStage: FrameChainStage {
         input
     }
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture { input }
+}
+
+/// AE#957: BT.2390 tone mapping from the source's peak to a target peak (`BT2390ToneCurve`), on the PQ-coded
+/// RGB of an HDR10 frame. It declares the mapped picture's HDR10 metadata, so the display does not tone map
+/// again. Per pixel and without a branch, so its cost does not depend on the picture, and a chain of it and
+/// identity stages at its own size runs it inside the one round-trip kernel (`frameChainRoundTrip` with
+/// `toneMapsInRoundTrip`).
+@available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
+final class ToneMapStage: FrameChainStage {
+    let curve: BT2390ToneCurve
+    let outputColorVolume: FrameChainColorVolume
+    private var params: FrameChainToneMapParams
+    private var pipeline: MTLComputePipelineState?
+    private var output: MTLTexture?
+
+    /// `source` is the title's HDR10 metadata; the declared volume is that metadata after the curve.
+    init(curve: BT2390ToneCurve, source: HDR10StaticMetadata) {
+        self.curve = curve
+        params = FrameChainToneMapParams(curve)
+        outputColorVolume = .hdr10(curve.outputMetadata(from: source))
+    }
+
+    var fusedToneMap: FrameChainToneMapParams? { params }
+
+    func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
+        pipeline = kernels.toneMap
+        output = try FrameChain.texture(device, input.0, input.1)
+        return input
+    }
+
+    func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture {
+        guard let pipeline, let output else { return input }
+        encoder.setBytes(&params, length: MemoryLayout<FrameChainToneMapParams>.size, index: 1)
+        FrameChain.dispatch(encoder, pipeline, textures: [input, output], grid: (output.width, output.height))
+        return output
+    }
 }
 
 /// The line-art scaler (`LineArtShaderSource`, Anime4K): with `restores`, its "mode A" in the small size:
@@ -378,6 +432,9 @@ final class FrameChainKernels: @unchecked Sendable {
     let toYCbCr: MTLComputePipelineState
     let roundTrip: MTLComputePipelineState
     let roundTripWide: MTLComputePipelineState
+    let roundTripToneMapped: MTLComputePipelineState
+    let roundTripWideToneMapped: MTLComputePipelineState
+    let toneMap: MTLComputePipelineState
     let lineArtConvolutions: [MTLComputePipelineState]
     let lineArtDepthToSpace: MTLComputePipelineState
     let lineArtOutput: MTLComputePipelineState
@@ -391,7 +448,8 @@ final class FrameChainKernels: @unchecked Sendable {
     nonisolated(unsafe) private static var byDevice: [UInt64: FrameChainKernels] = [:]
 
     private init(toRGB: MTLComputePipelineState, toYCbCr: MTLComputePipelineState, roundTrip: MTLComputePipelineState,
-                 roundTripWide: MTLComputePipelineState,
+                 roundTripWide: MTLComputePipelineState, roundTripToneMapped: MTLComputePipelineState,
+                 roundTripWideToneMapped: MTLComputePipelineState, toneMap: MTLComputePipelineState,
                  lineArtConvolutions: [MTLComputePipelineState], lineArtDepthToSpace: MTLComputePipelineState,
                  lineArtOutput: MTLComputePipelineState, lineArtOutputClamped: MTLComputePipelineState,
                  restoreConvolutions: [MTLComputePipelineState], clampStatsRows: MTLComputePipelineState,
@@ -406,6 +464,9 @@ final class FrameChainKernels: @unchecked Sendable {
         self.toYCbCr = toYCbCr
         self.roundTrip = roundTrip
         self.roundTripWide = roundTripWide
+        self.roundTripToneMapped = roundTripToneMapped
+        self.roundTripWideToneMapped = roundTripWideToneMapped
+        self.toneMap = toneMap
         self.lineArtConvolutions = lineArtConvolutions
         self.lineArtDepthToSpace = lineArtDepthToSpace
     }
@@ -413,13 +474,16 @@ final class FrameChainKernels: @unchecked Sendable {
     static func shared(for device: MTLDevice) -> FrameChainKernels? {
         lock.lock(); defer { lock.unlock() }
         if let kernels = byDevice[device.registryID] { return kernels }
-        func pipeline(_ library: MTLLibrary, _ name: String, clamps: Bool? = nil) -> MTLComputePipelineState? {
+        /// `constants` are bool function constants by index: 0 `clampsHighlights`, 1 `toneMapsInRoundTrip`.
+        func pipeline(_ library: MTLLibrary, _ name: String, constants: [Int: Bool] = [:]) -> MTLComputePipelineState? {
             let function: MTLFunction?
-            if let clamps {
-                var value = clamps
-                let constants = MTLFunctionConstantValues()
-                constants.setConstantValue(&value, type: .bool, index: 0)
-                function = try? library.makeFunction(name: name, constantValues: constants)
+            if !constants.isEmpty {
+                let values = MTLFunctionConstantValues()
+                for (index, value) in constants {
+                    var v = value
+                    values.setConstantValue(&v, type: .bool, index: index)
+                }
+                function = try? library.makeFunction(name: name, constantValues: values)
             } else {
                 function = library.makeFunction(name: name)
             }
@@ -428,10 +492,13 @@ final class FrameChainKernels: @unchecked Sendable {
         guard let chain = try? device.makeLibrary(source: FrameChainShaderSource.source, options: nil),
               let lineArt = try? device.makeLibrary(source: LineArtShaderSource.source, options: nil),
               let toRGB = pipeline(chain, "frameChainToRGB"), let toYCbCr = pipeline(chain, "frameChainToYCbCr"),
-              let roundTrip = pipeline(chain, "frameChainRoundTrip"),
-              let roundTripWide = pipeline(chain, "frameChainRoundTripWide"),
-              let lineArtOutput = pipeline(chain, "frameChainLineArtOutput", clamps: false),
-              let lineArtOutputClamped = pipeline(chain, "frameChainLineArtOutput", clamps: true),
+              let roundTrip = pipeline(chain, "frameChainRoundTrip", constants: [1: false]),
+              let roundTripWide = pipeline(chain, "frameChainRoundTripWide", constants: [1: false]),
+              let roundTripToneMapped = pipeline(chain, "frameChainRoundTrip", constants: [1: true]),
+              let roundTripWideToneMapped = pipeline(chain, "frameChainRoundTripWide", constants: [1: true]),
+              let toneMap = pipeline(chain, "frameChainToneMap"),
+              let lineArtOutput = pipeline(chain, "frameChainLineArtOutput", constants: [0: false]),
+              let lineArtOutputClamped = pipeline(chain, "frameChainLineArtOutput", constants: [0: true]),
               let clampStatsRows = pipeline(chain, "frameChainClampStatsRows"),
               let clampStatsColumns = pipeline(chain, "frameChainClampStatsColumns"),
               let clampHighlights = pipeline(chain, "frameChainClampHighlights"),
@@ -442,7 +509,9 @@ final class FrameChainKernels: @unchecked Sendable {
         guard convolutions.count == LineArtShaderSource.convolutionKernels.count,
               restore.count == LineArtShaderSource.restoreKernels.count else { return nil }
         let kernels = FrameChainKernels(
-            toRGB: toRGB, toYCbCr: toYCbCr, roundTrip: roundTrip, roundTripWide: roundTripWide, lineArtConvolutions: convolutions, lineArtDepthToSpace: depthToSpace,
+            toRGB: toRGB, toYCbCr: toYCbCr, roundTrip: roundTrip, roundTripWide: roundTripWide,
+            roundTripToneMapped: roundTripToneMapped, roundTripWideToneMapped: roundTripWideToneMapped, toneMap: toneMap,
+            lineArtConvolutions: convolutions, lineArtDepthToSpace: depthToSpace,
             lineArtOutput: lineArtOutput, lineArtOutputClamped: lineArtOutputClamped, restoreConvolutions: restore,
             clampStatsRows: clampStatsRows, clampStatsColumns: clampStatsColumns, clampHighlights: clampHighlights)
         byDevice[device.registryID] = kernels
@@ -461,6 +530,29 @@ enum FrameChainShaderSource {
         float yOffset; float yRange; float cOffset; float cRange;
         float kr; float kb;
     };
+
+    // AE#957: BT2390ToneCurve.map on each PQ-coded component, its spline as one cubic (FrameChainToneMapParams).
+    // Both sides of the knee are computed and one is picked, so the cost does not depend on the picture.
+    // Below the knee the value comes back unchanged.
+    struct FrameChainToneMapParams {
+        float kneePQ; float xScale; float xOffset; float c0; float c1; float c2; float c3;
+    };
+    inline float3 frameChainToneMap(float3 e, constant FrameChainToneMapParams &t) {
+        float3 x = saturate(fma(e, float3(t.xScale), float3(-t.xOffset)));
+        float3 p = fma(fma(fma(float3(t.c3), x, float3(t.c2)), x, float3(t.c1)), x, float3(t.c0));
+        return select(p, e, e < t.kneePQ);
+    }
+    // The tone map as its own pass over the RGB texture, for a chain that keeps the two passes.
+    kernel void frameChainToneMap(constant FrameChainToneMapParams &t [[buffer(1)]],
+                                  texture2d<half, access::read> src [[texture(0)]],
+                                  texture2d<half, access::write> out [[texture(1)]],
+                                  uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= out.get_width() || gid.y >= out.get_height()) { return; }
+        out.write(half4(half3(frameChainToneMap(float3(src.read(gid).rgb), t)), 1.0h), gid);
+    }
+    // Set for the round-trip kernels that run a fused tone map; its parameters are at buffer 1. Each mapped
+    // sample is rounded to half, as the two passes store it, so both give the same picture.
+    constant bool toneMapsInRoundTrip [[function_constant(1)]];
 
     // The picture region starts at the origin (even); chroma is sampled at each luma sample's centre.
     // Rounded to half, which is what the RGB texture holds.
@@ -515,11 +607,13 @@ enum FrameChainShaderSource {
                                     texture2d<float, access::sample> cIn [[texture(1)]],
                                     texture2d<float, access::write> yOut [[texture(2)]],
                                     texture2d<float, access::write> cOut [[texture(3)]],
+                                    constant FrameChainToneMapParams &t [[buffer(1), function_constant(toneMapsInRoundTrip)]],
                                     uint2 gid [[thread_position_in_grid]]) {
         if (gid.x * 2 >= yOut.get_width() || gid.y * 2 >= yOut.get_height()) { return; }
         float3 rgb[4];
         for (uint k = 0; k < 4; k++) {
             rgb[k] = float3(frameChainRGB(p, yIn, cIn, gid * 2 + uint2(k & 1, k >> 1)));
+            if (toneMapsInRoundTrip) { rgb[k] = float3(half3(frameChainToneMap(rgb[k], t))); }
         }
         frameChainWriteBlock(p, rgb, gid, yOut, cOut);
     }
@@ -576,6 +670,7 @@ enum FrameChainShaderSource {
                                         texture2d<float, access::sample> cIn [[texture(1)]],
                                         texture2d<float, access::write> yOut4 [[texture(2)]],
                                         texture2d<float, access::write> cOut2 [[texture(3)]],
+                                        constant FrameChainToneMapParams &t [[buffer(1), function_constant(toneMapsInRoundTrip)]],
                                         uint2 gid [[thread_position_in_grid]]) {
         if (gid.x >= yOut4.get_width() || gid.y * 2 >= yOut4.get_height()) { return; }
         constexpr sampler bilinear(coord::pixel, address::clamp_to_edge, filter::linear);
@@ -588,6 +683,9 @@ enum FrameChainShaderSource {
         for (uint i = 0; i < 4; i++) {
             s[i] = frameChainFoldedRGB(k, row0[i], cIn.sample(bilinear, c0 + float2(i, 0) * 0.5).rg);
             s[i + 4] = frameChainFoldedRGB(k, row1[i], cIn.sample(bilinear, c0 + float2(i, 1) * 0.5).rg);
+        }
+        if (toneMapsInRoundTrip) {
+            for (uint i = 0; i < 8; i++) { s[i] = float3(half3(frameChainToneMap(s[i], t))); }
         }
         float4 out0, out1;
         for (uint i = 0; i < 4; i++) {

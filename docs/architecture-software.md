@@ -274,7 +274,7 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 
 **The frame chain** (`FrameChain`, AE#957) is what the line-art scaler runs on. It turns the 4:2:0 frame into a half-float RGB texture, runs its stages, and turns the result back into the input's format at the target size, all in one command buffer.
 
-- A chain whose stages all leave the picture alone (`FrameChainStage.isIdentity`, today `PassThroughStage`) at its own size runs as one kernel with no RGB texture. On an A12 Apple TV the RGB texture cost most of the 10 ms the two passes took per 4K frame. No playback path builds such a chain yet: line art changes the picture and the size, so it keeps the two passes. The one kernel is the fast path for chains that only convert, and the benchmark times it.
+- A chain whose stages all leave the picture alone (`FrameChainStage.isIdentity`, today `PassThroughStage`) at its own size runs as one kernel with no RGB texture. One per-pixel stage may join them (`FrameChainStage.fusedToneMap`, today [`ToneMapStage`](#hdr10-tone-map)): the kernel then runs that stage's arithmetic on each sample, rounded to half as the two passes store it. On an A12 Apple TV the RGB texture cost most of the 10 ms the two passes took per 4K frame. Line art changes the picture and the size, so it keeps the two passes. The one kernel is the fast path for chains that only convert or tone map, and the benchmark times both.
 - That kernel is `frameChainRoundTripWide` when the width and the picture's x origin are multiples of 4: it reads and writes four luma samples per texel and folds the colour arithmetic, 2.7 ms per 4K frame on the A12. Otherwise `frameChainRoundTrip`, one sample per access, 4.0 ms.
 - Every other chain keeps the two passes: a stage reads its neighbours from that texture.
 - Both paths give the same picture: luma unchanged, chroma within one code value.
@@ -288,7 +288,21 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 
 - The last stage that declares a volume sets the chain's. A dither or LUT stage after a tone mapper declares nothing and keeps the tone mapper's volume.
 - `FrameChain.attach(from:to:)` gives every output buffer its attachments: the source's, minus the geometry keys (the output is the picture region alone, so a clean aperture would crop it again), then the declared HDR10 metadata. The HDR10 probe calls it. `FrameUpscaler` runs the same step on every rung, with `.unchanged` when it built no chain.
-- Only `PassThroughStage` and `LineArtStage` exist today, and both declare nothing, so no frame changes yet.
+- `PassThroughStage` and `LineArtStage` declare nothing. `ToneMapStage` declares the mapped metadata ([HDR10 tone map](#hdr10-tone-map)).
+
+### HDR10 tone map
+
+`ToneMapStage` and `BT2390ToneCurve` (AE#957) are a [frame chain](#low-resolution-upscaling) stage: the BT.2390 EETF (ITU-R BT.2390, section 5.4.1) from the source's peak to a lower target peak, on the PQ-coded RGB of an HDR10 frame. No playback path builds it yet: only the HDR10 probe's `chain+tonemap` mode and the benchmark do.
+
+- Below the knee the picture is unchanged to the code value. From the knee, a Hermite spline rolls the rest of the source range off into the target's top. Values above the source peak land on the target peak.
+- The knee is at 1.5 times the target minus 0.5 on the curve's scale (PQ of the target over PQ of the source peak). A 1000 nit source to a 600 nit target starts rolling off at 464 nit.
+- No curve is built for a target below a third of the source peak on that scale (about 5 nit for a 1000 nit source): the knee would fall below 0 and the spline would turn back down.
+- It maps each R'G'B' component, as BT.2390 does: highlights above the target move toward white instead of clipping one channel.
+- Black is not mapped (source and target black are 0, as on an OLED).
+- The source peak is MaxCLL when it is known and below the mastering peak, else the mastering peak (`ToneMapSourcePeak`). No curve is built when the target is at or above it.
+- The stage declares the mapped metadata: the target as the mastering peak, the source's mastering black, and MaxCLL and MaxFALL through the same curve.
+- The shader computes both sides of the knee and picks one, so its cost does not depend on the picture. The spline is one cubic per component, its coefficients worked out once on the CPU (`FrameChainToneMapParams`). On a GPU it matches the CPU curve to within a quarter of a 10-bit code, and the one kernel matches the two passes to within one code.
+- On the A12 Apple TV at 4K the one-kernel tone map takes 5.3 ms per frame (GPU 4.0 ms), and 4K60 played with no dropped frame. As its own pass between the two passes it takes 16.9 ms, more than a 60 fps frame. Numbers: [measurements.md › Tone map at 4K60 on the A12](measurements.md#tone-map-at-4k60-on-the-a12-ae957).
 
 ### Dolby Vision Profile 7 FEL
 
@@ -330,10 +344,12 @@ It is off unless `AETHER_HDR10_PROBE` is set (`HDR10PassThroughProbe.swift`). Th
 | `chain+meta` | both: the engine's own buffer, with the probe's values |
 | `pulse` | as `meta`, but every 72 frames the values switch to a 4000 nit set (MaxCLL 4000, MaxFALL 1000) and back |
 | `chain+pulse` | as `chain+meta`, switching the same way |
+| `chain+tonemap` | through the frame chain with the tone-map stage, from the frame's own HDR10 peak to `AETHER_HDR10_PROBE_TARGET` nit (600 by default), with the metadata the stage declares |
 
 - `AETHER_HDR10_PROBE_META` sets the values, as `maxcll=345,maxfall=123,peak=777,min=0.005` (the default). They share no number with a real master, so an analyser shows whose metadata a television got, and a MaxCLL of 345 changes the television's tone mapping visibly (`Probes/HDR10PassThrough`). A value out of range turns the probe off with one `[HDR10Probe] ignored:` line.
 - `meta` changes the attachments of VideoToolbox's buffer in place. Attachments are not pixels, so reference frames decode the same, but it is a probe, not the output-metadata policy above.
-- The chain runs on OS 26 and later on a device. Elsewhere, and on a frame the chain cannot take, both chain modes deliver the frame unchanged, without the probe's values.
+- The chain runs on OS 26 and later on a device. Elsewhere, and on a frame the chain cannot take, the chain modes deliver the frame unchanged, without the probe's values.
+- `chain+tonemap` is for timing the real tone-map kernel in playback (the 59.94 fps pacing number). A frame that is not PQ, carries no HDR10 metadata, or whose peak is not above the target passes through unchanged. When `AETHER_HDR10_PROBE_META` is set, a frame with no metadata of its own is mapped as if it carried those values, so a test clip without any still times the kernel (its cost does not depend on the values). The chain's log line names the curve: source peak and where it came from, target, knee, the output metadata, and whether it runs as one kernel.
 - The pulse modes need no instrument. The pixels stay the same and only the metadata changes, so a television that reads it tone-maps the bright parts brighter and dimmer every 3 s at 23.976 fps. The first four switches are logged. The renderer makes a new format description for each switch ([VideoToolbox output metadata](#videotoolbox-output-metadata)).
 - The log lines start with `[HDR10Probe]`: the first frame before and after, the format description built from the output, and the GPU time over each 48-frame window (the first ten). Three chain failures in a row turn the probe off for the session.
 

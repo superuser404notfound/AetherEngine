@@ -425,6 +425,36 @@ So the sampler is free, wide accesses halve the memory cost, and the arithmetic 
 
 **The time outside the GPU** (about 1.3 ms) is mostly the CPU slowing down while it waits for the command buffer. Spinning on the status instead of `waitUntilCompleted` cut the wall time by 0.8 ms, but holds a core busy for the whole GPU time, so the chain still waits.
 
+### Tone map at 4K60 on the A12 (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2) on 2026-11-14. The answer first: **the BT.2390 tone map fits 4K at 60 fps on the A12, inside the one round-trip kernel.** No frame-rate gate is needed for a chain of the tone map alone. As its own pass between the two passes through RGB it does not fit.
+
+Current rule: [architecture-software.md › HDR10 tone map](architecture-software.md#hdr10-tone-map).
+
+**Benchmark.** `AetherEngine.runPerFrameBenchmarks`, 4K P010, 300 runs per case, a 1000 nit master to a 600 nit target:
+
+| Chain, 4K P010 | Wall median (us) | GPU median (us) |
+|---|---|---|
+| Pass-through, one kernel | 3950 | 2674 |
+| Tone map, one kernel | 5297 | 3976 |
+| Tone map, two passes | 16869 | 15209 |
+
+- A 60 fps frame lasts 16683 us, so the one-kernel tone map takes about a third of it.
+- The first version wrote the spline out term by term: 8531 wall, 7150 GPU. As one cubic per component (coefficients worked out once on the CPU) it is the 5297 / 3976 above, with the same output to within a quarter of a 10-bit code. The arithmetic sets the time on the A12, as for the round trip.
+- The two-pass tone map costs what the extra trip through the RGB texture costs, not the curve.
+
+**Playback.** The Jellyfin test clip "4K HEVC HDR10 40M" (3840x2160, HEVC Main 10, PQ BT.2020, 60 fps, 30 s), on the software path through the HDR10 probe. The clip carries no HDR10 metadata, so the probe's values stood in (`maxcll=1000,maxfall=400,peak=1000`), mapped to 600 nit. Each run played 28.9 s.
+
+| Run | Dropped frames | Chain GPU per frame, mean of 48-frame windows | Worst frame |
+|---|---|---|---|
+| Software path, no chain | 1 | - | - |
+| Chain, pass-through | 1 | 4.16 ms | 8.71 ms |
+| Tone map, six runs in a row (173 s) | 0 in every run | 4.95 to 5.04 ms | 13.68 ms |
+
+- The first ten windows of each run are logged (480 frames). The six tone-map runs show no drift, so the A12 did not slow down as it warmed.
+- The output frames and the format description carried the stage's metadata: mastering peak 600, MaxCLL / MaxFALL 600 / 400.
+- In playback the chain's GPU time is about 1.5 ms above the benchmark's, with the decoder and the display on the same GPU.
+
 ### Software channel layout mismatch
 
 Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.

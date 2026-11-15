@@ -19,10 +19,13 @@ import Metal
 /// | `chain+meta` | both: our own buffer, carrying the probe's values |
 /// | `pulse` | as `meta`, but every 72 frames (3 s at 24p) the values switch to a 4000 nit set and back |
 /// | `chain+pulse` | as `chain+meta`, with the same switching |
+/// | `chain+tonemap` | the chain with `ToneMapStage`: BT.2390 from the frame's own HDR10 peak to `AETHER_HDR10_PROBE_TARGET` nit (600 by default), with the mapped metadata the stage declares |
 ///
 /// `AETHER_HDR10_PROBE_META` sets the values (`maxcll=345,maxfall=123,peak=777,min=0.005`, the default).
 /// They are chosen to be unlike any real master, so a television's HDR info screen tells at a glance whose
-/// metadata it got. `Probes/HDR10PassThrough` plays the arms on an Apple TV.
+/// metadata it got. `Probes/HDR10PassThrough` plays the arms on an Apple TV. `chain+tonemap` is for timing the
+/// real tone-map kernel in playback (AE#957, 59.94 fps pacing); it maps only PQ frames whose peak is above the
+/// target, and passes the others through.
 ///
 /// Only on the software path, never with an upscale plan or on the dual-layer decoder. Nothing here runs
 /// unless the variable is set.
@@ -34,9 +37,11 @@ struct HDR10ProbeSettings: Equatable, Sendable {
         case chainMeta = "chain+meta"
         case pulse
         case chainPulse = "chain+pulse"
+        case chainToneMap = "chain+tonemap"
 
-        var runsChain: Bool { self == .chain || self == .chainMeta || self == .chainPulse }
-        var setsMetadata: Bool { self != .log && self != .chain }
+        var runsChain: Bool { self == .chain || self == .chainMeta || self == .chainPulse || self == .chainToneMap }
+        /// The tone map declares its own output metadata, so this mode sets none of the probe's.
+        var setsMetadata: Bool { self != .log && self != .chain && self != .chainToneMap }
         /// The pixels stay as they are and only the metadata switches, so a television that uses it
         /// brightens and dims the highlights in step: visible by eye, no camera needed.
         var pulses: Bool { self == .pulse || self == .chainPulse }
@@ -44,16 +49,24 @@ struct HDR10ProbeSettings: Equatable, Sendable {
 
     var mode: Mode
     var metadata: HDR10StaticMetadata
+    /// `chain+tonemap`'s target peak in nit.
+    var targetPeakNits: Double = Self.defaultTargetPeakNits
+    /// True when `AETHER_HDR10_PROBE_META` was set. `chain+tonemap` then maps a frame that carries no HDR10
+    /// metadata as if it carried these values, so a test clip without any can still time the kernel.
+    var metadataGiven = false
 
     static let modeVariable = "AETHER_HDR10_PROBE"
     static let metadataVariable = "AETHER_HDR10_PROBE_META"
+    static let targetVariable = "AETHER_HDR10_PROBE_TARGET"
+    /// About what an LG G4 reaches on a large bright area; a 1000 nit master needs mapping to it.
+    static let defaultTargetPeakNits = 600.0
 
     /// Read with `getenv` at each call, not cached: a probe host switches modes between arms with `setenv`.
     static func fromEnvironment(
         _ read: (String) -> String? = { getenv($0).map { String(cString: $0) } }
     ) -> HDR10ProbeSettings? {
         guard let raw = read(modeVariable), !raw.isEmpty else { return nil }
-        switch parse(mode: raw, metadata: read(metadataVariable)) {
+        switch parse(mode: raw, metadata: read(metadataVariable), target: read(targetVariable)) {
         case let .success(settings):
             return settings
         case let .failure(error):
@@ -66,16 +79,25 @@ struct HDR10ProbeSettings: Equatable, Sendable {
         let message: String
     }
 
-    static func parse(mode raw: String, metadata: String?) -> Result<HDR10ProbeSettings, ParseError> {
+    static func parse(mode raw: String, metadata: String?, target: String? = nil) -> Result<HDR10ProbeSettings, ParseError> {
         let name = raw.trimmingCharacters(in: .whitespaces).lowercased()
         guard let mode = Mode(rawValue: name) else {
             let known = Mode.allCases.map(\.rawValue).joined(separator: ", ")
             return .failure(ParseError(message: "\(modeVariable)=\(raw) is not one of \(known)"))
         }
-        guard let metadata, !metadata.isEmpty else {
-            return .success(HDR10ProbeSettings(mode: mode, metadata: .probeDefault))
+        var targetPeakNits = defaultTargetPeakNits
+        if let target, !target.isEmpty {
+            guard let nits = Double(target.trimmingCharacters(in: .whitespaces)), nits >= 1, nits <= 10_000 else {
+                return .failure(ParseError(message: "\(targetVariable)=\(target) is not 1...10000 nit"))
+            }
+            targetPeakNits = nits
         }
-        return HDR10StaticMetadata.parse(metadata).map { HDR10ProbeSettings(mode: mode, metadata: $0) }
+        guard let metadata, !metadata.isEmpty else {
+            return .success(HDR10ProbeSettings(mode: mode, metadata: .probeDefault, targetPeakNits: targetPeakNits))
+        }
+        return HDR10StaticMetadata.parse(metadata).map {
+            HDR10ProbeSettings(mode: mode, metadata: $0, targetPeakNits: targetPeakNits, metadataGiven: true)
+        }
     }
 }
 
@@ -150,6 +172,8 @@ final class HDR10ProbeStage: @unchecked Sendable {
     /// A `FrameChain`, typed loosely because the class needs OS 26.
     private var chain: AnyObject?
     private var chainSize: (Int, Int)?
+    /// The source metadata the tone-map chain was built for; a change rebuilds it.
+    private var chainSource: HDR10StaticMetadata?
     private var device: MTLDevice?
     private var queue: MTLCommandQueue?
     #endif
@@ -159,7 +183,9 @@ final class HDR10ProbeStage: @unchecked Sendable {
         EngineLog.emit("[HDR10Probe] on: mode=\(settings.mode.rawValue)"
                        + (settings.mode.setsMetadata ? " " + Self.describe(settings.metadata) : "")
                        + (settings.mode.pulses ? " alternating every \(Self.pulseFrames) frames with "
-                          + Self.describe(.pulseAlternate) : ""),
+                          + Self.describe(.pulseAlternate) : "")
+                       + (settings.mode == .chainToneMap
+                          ? String(format: " target %g nit", settings.targetPeakNits) : ""),
                        category: .swPlayback)
     }
 
@@ -248,9 +274,18 @@ final class HDR10ProbeStage: @unchecked Sendable {
         guard picture.width % 2 == 0, picture.height % 2 == 0 else {
             return .failure(Note(message: "picture \(picture.width)x\(picture.height) is odd", counts: false))
         }
+        var toneMap: (curve: BT2390ToneCurve, source: HDR10StaticMetadata, from: String)?
+        if settings.mode == .chainToneMap {
+            switch Self.toneMapCurve(for: input, targetPeakNits: settings.targetPeakNits,
+                                     standIn: settings.metadataGiven ? settings.metadata : nil) {
+            case let .success(found): toneMap = found
+            case let .failure(note): return .failure(note)
+            }
+        }
         do {
             let built: FrameChain
-            if let existing = chain as? FrameChain, chainSize.map({ $0 == (picture.width, picture.height) }) == true {
+            if let existing = chain as? FrameChain, chainSize.map({ $0 == (picture.width, picture.height) }) == true,
+               chainSource == toneMap?.source {
                 built = existing
             } else {
                 if device == nil {
@@ -260,12 +295,22 @@ final class HDR10ProbeStage: @unchecked Sendable {
                 guard let device, let queue else {
                     return .failure(Note(message: "no Metal device", counts: true))
                 }
+                let stage: any FrameChainStage = toneMap.map { ToneMapStage(curve: $0.curve, source: $0.source) }
+                    ?? PassThroughStage()
                 built = try FrameChain(device: device, queue: queue, sourceWidth: picture.width,
                                        sourceHeight: picture.height, targetWidth: picture.width,
-                                       targetHeight: picture.height, stages: [PassThroughStage()])
+                                       targetHeight: picture.height, stages: [stage])
                 chain = built
                 chainSize = (picture.width, picture.height)
-                EngineLog.emit("[HDR10Probe] chain built for \(picture.width)x\(picture.height)", category: .swPlayback)
+                chainSource = toneMap?.source
+                var line = "[HDR10Probe] chain built for \(picture.width)x\(picture.height)"
+                if let toneMap, case .hdr10(let out) = built.outputColorVolume {
+                    line += String(format: ", tone map %g nit (%@) to %g nit, knee at %.0f nit, out ",
+                                   toneMap.curve.sourcePeakNits, toneMap.from, toneMap.curve.targetPeakNits,
+                                   BT2390ToneCurve.nits(pq: toneMap.curve.kneeStart * toneMap.curve.sourcePeakPQ))
+                        + Self.describe(out) + (built.isRoundTripOnly ? ", one kernel" : ", two passes")
+                }
+                EngineLog.emit(line, category: .swPlayback)
             }
             let (output, ms) = try built.process(input, picture: picture)
             built.attach(from: input, to: output)
@@ -274,6 +319,30 @@ final class HDR10ProbeStage: @unchecked Sendable {
             return .failure(Note(message: "chain: \(error)", counts: true))
         }
         #endif
+    }
+
+    /// The curve for `chain+tonemap` from the frame's own HDR10 metadata, else from `standIn` (the probe's
+    /// values, when set); a frame it does not apply to is no failure (it passes through). `from` names the
+    /// value that set the peak, with "probe stand-in" when the frame had none.
+    private static func toneMapCurve(for input: CVPixelBuffer, targetPeakNits: Double, standIn: HDR10StaticMetadata?)
+        -> Result<(curve: BT2390ToneCurve, source: HDR10StaticMetadata, from: String), Note> {
+        let transfer = CVBufferCopyAttachment(input, kCVImageBufferTransferFunctionKey, nil) as? String
+        guard transfer == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String else {
+            return .failure(Note(message: "tone map: the frame is not PQ", counts: false))
+        }
+        let own = HDR10StaticMetadata(
+            masteringDisplayColorVolume: CVBufferCopyAttachment(input, kCVImageBufferMasteringDisplayColorVolumeKey, nil) as? Data,
+            contentLightLevel: CVBufferCopyAttachment(input, kCVImageBufferContentLightLevelInfoKey, nil) as? Data)
+        guard let source = own ?? standIn, let peak = ToneMapSourcePeak.choose(masteringPeakNits: source.masteringPeakNits,
+                                                               maxCLL: source.maxCLL) else {
+            return .failure(Note(message: "tone map: the frame carries no HDR10 metadata", counts: false))
+        }
+        guard let curve = BT2390ToneCurve(sourcePeakNits: peak.nits, targetPeakNits: targetPeakNits) else {
+            return .failure(Note(message: String(format: "tone map: no curve from a %g nit source peak to %g nit "
+                                                 + "(the target must be lower, and not below a third of it in PQ)",
+                                                 peak.nits, targetPeakNits), counts: false))
+        }
+        return .success((curve, source, own == nil ? "probe stand-in, " + peak.from.rawValue : peak.from.rawValue))
     }
 
     private func notePassThrough(_ message: String) {

@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **A BT.2390 tone map stage for the frame chain, timed by `aetherctl bench` (#957).** Groundwork for HDR
+  tone mapping to a display's peak. The stage maps an HDR10 picture from its source peak to a lower target
+  and declares the mapped metadata, and it runs inside the chain's one round-trip kernel. No playback path
+  builds it yet. `aetherctl bench` gains `chain: tone map, one kernel, wall time` and
+  `chain: tone map, two passes, wall time`, and the HDR10 probe gains `chain+tonemap` for timing it in
+  playback.
 
 ## [7.67.1] - 2026-11-14
 

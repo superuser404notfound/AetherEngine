@@ -21,10 +21,11 @@ import UIKit
 //   (the same pixels, 4000 nit metadata) every 6 s, so it shows whether the television visibly follows a
 //   metadata change that Apple's own player makes.
 // - `native`: AetherEngine as a host uses it, default routing (the native AVPlayer route for this clip).
-// - `software`, `meta`, `chain`, `chainmeta`, `pulse`, `chainpulse`: AetherEngine on the software path
-//   (`preferredDecodePath: .software`) with `AETHER_HDR10_PROBE` set to `log`, `meta`, `chain`,
-//   `chain+meta`, `pulse` and `chain+pulse`. The engine reads the variable at each load, so the harness
-//   sets it before each arm.
+// - `software`, `meta`, `chain`, `chainmeta`, `pulse`, `chainpulse`, `chaintonemap`: AetherEngine on the
+//   software path (`preferredDecodePath: .software`) with `AETHER_HDR10_PROBE` set to `log`, `meta`, `chain`,
+//   `chain+meta`, `pulse`, `chain+pulse` and `chain+tonemap`. The engine reads the variable at each load, so
+//   the harness sets it before each arm. `chain+tonemap`'s target comes from `AETHER_HDR10_PROBE_TARGET` in
+//   the launch environment (600 nit by default).
 //
 // The pulse arms need no camera: the picture stays the same and only the metadata switches every 3 s,
 // so a television that reads it tone-maps the bright patches brighter and dimmer every 3 s.
@@ -71,6 +72,7 @@ struct ProbeArm {
         case "chainmeta": "chain+meta"
         case "pulse": "pulse"
         case "chainpulse": "chain+pulse"
+        case "chaintonemap": "chain+tonemap"
         default: nil
         }
     }
@@ -83,6 +85,7 @@ struct ProbeArm {
         case "meta", "chainmeta": "probe's metadata (777 nit, MaxCLL 345): compare with S and C"
         case "software", "chain": "the clip's metadata, attached by the decoder (1000 nit, MaxCLL 1000)"
         case "pulse", "chainpulse": "metadata switches every 3 s: do the bright patches pulse?"
+        case "chaintonemap": "the engine tone maps to the target (600 nit by default) and says so in the metadata"
         case "avpulse": "Apple's player switches 1000 / 4000 nit metadata every 6 s: does it change?"
         case "avplayer" where url.lastPathComponent.contains("m4000"): "clip's metadata (4000 nit, MaxCLL 4000)"
         default: "clip's metadata (1000 nit, MaxCLL 1000)"
@@ -175,7 +178,7 @@ struct ProbeHarnessView: View {
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, log: say)
             case "avpulse":
                 await host.playAVPulse(arm.url, seconds: arm.seconds, log: say)
-            case "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse":
+            case "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse", "chaintonemap":
                 await playEngine(arm, log: say)
             default:
                 say("unknown mode \(arm.mode), skipped")
