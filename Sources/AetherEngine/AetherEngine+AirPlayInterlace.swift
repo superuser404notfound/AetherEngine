@@ -46,12 +46,22 @@ extension AetherEngine {
             receiverAtLoad: interlaceRouteReceiverAtLoad, receiverNow: receiverNow,
             sessionSettled: settled, reopensAtPosition: interlaceRouteReopensAtPosition) else { return }
         // Written now so a burst of route notifications reloads once.
+        let receiverBefore = interlaceRouteReceiverAtLoad
         interlaceRouteReceiverAtLoad = receiverNow
         EngineLog.emit(
             "[AirPlay] AE#1070 interlaced H.264: a video receiver \(receiverNow ? "now holds" : "let go of") "
             + "the route; reloading onto the \(receiverNow ? "native route so it gets the picture" : "software deinterlacer")",
             category: .engine)
-        Task { try? await reloadAtCurrentPosition() }
+        Task {
+            do {
+                try await reloadAtCurrentPosition()
+            } catch {
+                // A reload that threw before its load decided the route again leaves the session where it
+                // was, so the next route change has to see the old answer and try again.
+                if interlaceRouteReceiverAtLoad == receiverNow { interlaceRouteReceiverAtLoad = receiverBefore }
+                EngineLog.emit("[AirPlay] AE#1070 interlace route reload failed: \(error)", category: .engine)
+            }
+        }
         #endif
     }
 }
