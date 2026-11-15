@@ -528,7 +528,8 @@ Notes:
 | `VODSegmentCutter.swift` | Native path: decode-order, keyframe-gated VOD segment cutter (the IRAP opens its segment, #92). |
 | `PlanBoundaryAxis.swift` | Which axis a container stamps its index entries on, and so which packet timestamp the cutter gate may compare with a plan boundary: decode for a mov/mp4 sample table, presentation for a Matroska Cue (#358, AE#561). |
 | `VideoConfigRecord.swift` | The `hvcC` / `avcC` config record and the framing question that hangs off it (#365). See note. |
-| `H264SPS.swift` | Hand-written H.264 SPS parser (SSAI ad-creative coded dimensions / codec config). |
+| `H264SPS.swift` | Hand-written H.264 SPS parser (SSAI ad-creative coded dimensions / codec config, and the slice context `H264FieldPairJoiner` reads field headers with). |
+| `H264FieldPairJoiner.swift` | AE#1070: joins the two fields of a field-coded (PAFF) H.264 frame into one packet between the Demuxer and `HLSSegmentProducer`, so the native route muxes one sample per frame. |
 | `H264CompositionOffsetRepair.swift` | Rebuilds the presentation axis of an MP4 whose writer dropped `ctts` while the bitstream still reorders pictures (#409, HEVC #699). See note. |
 | `OutputTimestampSanitizer.swift` | Last-stage DTS/PTS monotonicity guard before the fMP4 mux (SSAI splices, program restarts). |
 | `CFRFrameGrid.swift` | Exact frame grid for a constant-rate VOD track on a coarse time base: the muxer's video time base and the slot each on-grid PTS/DTS lands on (AE#886). |

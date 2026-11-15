@@ -22,6 +22,17 @@ enum H264SPS {
         parse(fromNAL: nal)?.signature
     }
 
+    /// What a slice header parser needs from the SPS to reach `field_pic_flag` (AE#1070).
+    struct SliceContext: Equatable, Sendable {
+        let separateColourPlane: Bool
+        let log2MaxFrameNum: Int
+        let frameMbsOnly: Bool
+    }
+
+    static func sliceContext(fromNAL nal: [UInt8]) -> SliceContext? {
+        parse(fromNAL: nal)?.slice
+    }
+
     /// First SPS NAL (incl. 1-byte header) from codecpar extradata, accepting both layouts: Annex-B
     /// (MPEG-TS, start-code delimited) and avcC (MP4/MKV, configurationVersion byte 0x01 then
     /// length-prefixed parameter sets). Returns nil when neither layout yields an SPS.
@@ -39,7 +50,7 @@ enum H264SPS {
         return extradata.withUnsafeBufferPointer { extractSPSandPPS(fromAnnexB: $0)?.sps }
     }
 
-    private static func parse(fromNAL nal: [UInt8]) -> (width: Int, height: Int, frameMbsOnly: Bool, signature: [UInt8])? {
+    private static func parse(fromNAL nal: [UInt8]) -> (width: Int, height: Int, frameMbsOnly: Bool, signature: [UInt8], slice: SliceContext)? {
         guard nal.count > 1, (nal[0] & 0x1f) == 7 else { return nil }
         let rbsp = unescape(Array(nal[1...]))  // strip NAL header + emulation-prevention (00 00 03 -> 00 00)
         var r = BitReader(rbsp)
@@ -51,11 +62,12 @@ enum H264SPS {
         let coreStart = r.position
 
         var chromaFormatIdc = 1
+        var separateColourPlane = false
         let highProfiles: Set<Int> = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135]
         if highProfiles.contains(profileIdc) {
             guard let cf = r.ue() else { return nil }
             chromaFormatIdc = cf
-            if cf == 3 { _ = r.flag() }            // separate_colour_plane_flag
+            if cf == 3 { separateColourPlane = r.flag() == true }
             guard r.ue() != nil, r.ue() != nil else { return nil } // bit_depth_luma/chroma -8
             _ = r.flag()                            // qpprime_y_zero_transform_bypass
             if r.flag() == true {                   // seq_scaling_matrix_present
@@ -68,7 +80,7 @@ enum H264SPS {
             }
         }
 
-        guard r.ue() != nil else { return nil }     // log2_max_frame_num_minus4
+        guard let log2MaxFrameNumMinus4 = r.ue() else { return nil }
         guard let pocType = r.ue() else { return nil }
         if pocType == 0 {
             guard r.ue() != nil else { return nil }  // log2_max_pic_order_cnt_lsb_minus4
@@ -119,7 +131,9 @@ enum H264SPS {
             if count == 8 { signature.append(UInt8(packed)); packed = 0; count = 0 }
         }
         if count > 0 { signature.append(UInt8(packed << (8 - count))) }
-        return (width, height, frameMbsOnly, signature)
+        let slice = SliceContext(separateColourPlane: separateColourPlane,
+                                 log2MaxFrameNum: log2MaxFrameNumMinus4 + 4, frameMbsOnly: frameMbsOnly)
+        return (width, height, frameMbsOnly, signature, slice)
     }
 
     /// Scan Annex-B for the first SPS (NAL type 7) and PPS (NAL type 8), returned with their 1-byte NAL header.
