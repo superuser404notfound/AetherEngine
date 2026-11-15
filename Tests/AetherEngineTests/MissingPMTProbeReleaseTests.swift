@@ -325,17 +325,19 @@ private struct PacedOpen {
         let url = URL(string: "http://127.0.0.1:\(origin.port)/live.ts")!
         let demuxer = Demuxer()
         defer { demuxer.close() }
-        let containerOpened = InstantBox<ContinuousClock.Instant?>(nil)
-        demuxer.onOpenProgress = { stage in
-            if stage == .containerOpened { containerOpened.set(ContinuousClock.now) }
+        // The close is armed on a GCD timer from the open's own thread, not polled from this task.
+        // In the nightly one-thread pool job the pool sat starved for two minutes, the poll ran only
+        // after the pass had already released at 3.5 s, and the test failed on a close never sent.
+        if let closeDelay {
+            let delay = DispatchTimeInterval.milliseconds(Int(closeDelay / .milliseconds(1)))
+            demuxer.onOpenProgress = { [weak demuxer] stage in
+                guard stage == .containerOpened else { return }
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay) { demuxer?.markClosed() }
+            }
         }
 
         let opening = Task { await openOffTheTestThread(demuxer, url: url,
                                                         profile: .playback.withReaderLabel(marker)) }
-        if let closeDelay {
-            try await waitFor { containerOpened.get().map { ContinuousClock.now >= $0 + closeDelay } ?? false }
-            demuxer.markClosed()
-        }
         _ = await opening.value
 
         let line = try #require(capture.matching("open timings (\(marker))").first,
@@ -370,14 +372,6 @@ private struct PacedOpen {
             demuxer.markClosed()
         }
     }
-}
-
-private final class InstantBox<Value: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Value
-    init(_ value: Value) { self.value = value }
-    func get() -> Value { lock.withLock { value } }
-    func set(_ newValue: Value) { lock.withLock { value = newValue } }
 }
 
 /// Packet-level edits of an ffmpeg-muxed transport stream: PAT on PID 0, PMT on 0x1000, H.264 on
