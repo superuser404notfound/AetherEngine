@@ -274,7 +274,7 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 
 **The frame chain** (`FrameChain`, AE#957) is what the line-art scaler runs on. It turns the 4:2:0 frame into a half-float RGB texture, runs its stages, and turns the result back into the input's format at the target size, all in one command buffer.
 
-- A chain whose stages all leave the picture alone (`FrameChainStage.isIdentity`, today `PassThroughStage`) at its own size runs as one kernel with no RGB texture. One per-pixel stage may join them (`FrameChainStage.fusedToneMap`, today `ToneMapStage`): the kernel then runs that stage's arithmetic on each sample, rounded to half as the two passes store it. On an A12 Apple TV the RGB texture cost most of the 10 ms the two passes took per 4K frame. No playback path builds such a chain yet: line art changes the picture and the size, so it keeps the two passes. The one kernel is the fast path for chains that only convert, and the benchmark times it.
+- A chain whose stages all leave the picture alone (`FrameChainStage.isIdentity`, today `PassThroughStage`) at its own size runs as one kernel with no RGB texture. One per-pixel stage may join them (`FrameChainStage.fusedToneMap`, today [`ToneMapStage`](#hdr10-tone-map)): the kernel then runs that stage's arithmetic on each sample, rounded to half as the two passes store it. On an A12 Apple TV the RGB texture cost most of the 10 ms the two passes took per 4K frame. Line art changes the picture and the size, so it keeps the two passes. The one kernel is the fast path for chains that only convert or tone map, and the benchmark times both.
 - That kernel is `frameChainRoundTripWide` when the width and the picture's x origin are multiples of 4: it reads and writes four luma samples per texel and folds the colour arithmetic, 2.7 ms per 4K frame on the A12. Otherwise `frameChainRoundTrip`, one sample per access, 4.0 ms.
 - Every other chain keeps the two passes: a stage reads its neighbours from that texture.
 - Both paths give the same picture: luma unchanged, chroma within one code value.
@@ -288,9 +288,11 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 
 - The last stage that declares a volume sets the chain's. A dither or LUT stage after a tone mapper declares nothing and keeps the tone mapper's volume.
 - `FrameChain.attach(from:to:)` gives every output buffer its attachments: the source's, minus the geometry keys (the output is the picture region alone, so a clean aperture would crop it again), then the declared HDR10 metadata. The HDR10 probe calls it. `FrameUpscaler` runs the same step on every rung, with `.unchanged` when it built no chain.
-- `PassThroughStage` and `LineArtStage` declare nothing. `ToneMapStage` declares the mapped metadata (below).
+- `PassThroughStage` and `LineArtStage` declare nothing. `ToneMapStage` declares the mapped metadata ([HDR10 tone map](#hdr10-tone-map)).
 
-**Tone map** (`ToneMapStage`, `BT2390ToneCurve`, AE#957). The BT.2390 EETF (ITU-R BT.2390, section 5.4.1) from the source's peak to a lower target peak, on the PQ-coded RGB of an HDR10 frame. No playback path builds it yet: only the HDR10 probe's `chain+tonemap` mode and the benchmark do.
+### HDR10 tone map
+
+`ToneMapStage` and `BT2390ToneCurve` (AE#957) are a [frame chain](#low-resolution-upscaling) stage: the BT.2390 EETF (ITU-R BT.2390, section 5.4.1) from the source's peak to a lower target peak, on the PQ-coded RGB of an HDR10 frame. No playback path builds it yet: only the HDR10 probe's `chain+tonemap` mode and the benchmark do.
 
 - Below the knee the picture is unchanged to the code value. From the knee, a Hermite spline rolls the rest of the source range off into the target's top. Values above the source peak land on the target peak.
 - The knee is at 1.5 times the target minus 0.5 on the curve's scale (PQ of the target over PQ of the source peak). A 1000 nit source to a 600 nit target starts rolling off at 464 nit.

@@ -10,7 +10,7 @@ the public-API contract.
 
 ## [Unreleased]
 
-### Changed
+### Added
 
 - **A BT.2390 tone map stage for the frame chain, timed by `aetherctl bench` (#957).** Groundwork for HDR
   tone mapping to a display's peak. The stage maps an HDR10 picture from its source peak to a lower target

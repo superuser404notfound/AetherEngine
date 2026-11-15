@@ -189,7 +189,7 @@ struct FrameChainTests {
         let curve = try #require(BT2390ToneCurve(sourcePeakNits: 1000, targetPeakNits: 600))
         let master = HDR10StaticMetadata(maxCLL: 1000, maxFALL: 400, masteringPeakNits: 1000, masteringMinNits: 0.005)
         let input = try ChainFrames.gradient(width, 180, tenBit: true)
-        // Luma 240...720 of 1023: from about 6 nit, below the 463 nit knee, to about 990 nit, above it.
+        // Luma 240...720 of 1023: from about 6 nit, below the 464 nit knee, to about 990 nit, above it.
         let fused = try chain(width, 180, stages: [ToneMapStage(curve: curve, source: master), PassThroughStage()])
         let twoPass = try chain(width, 180, stages: [ToneMapStage(curve: curve, source: master)], fusesRoundTrip: false)
         let twoMaps = try chain(width, 180, stages: [ToneMapStage(curve: curve, source: master),

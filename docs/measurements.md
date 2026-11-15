@@ -429,7 +429,7 @@ So the sampler is free, wide accesses halve the memory cost, and the arithmetic 
 
 Measured on an Apple TV 4K (A12, tvOS 27.2) on 2026-11-14. The answer first: **the BT.2390 tone map fits 4K at 60 fps on the A12, inside the one round-trip kernel.** No frame-rate gate is needed for a chain of the tone map alone. As its own pass between the two passes through RGB it does not fit.
 
-Current rule: [architecture-software.md › Low-resolution upscaling](architecture-software.md#low-resolution-upscaling), under "Tone map".
+Current rule: [architecture-software.md › HDR10 tone map](architecture-software.md#hdr10-tone-map).
 
 **Benchmark.** `AetherEngine.runPerFrameBenchmarks`, 4K P010, 300 runs per case, a 1000 nit master to a 600 nit target:
 
