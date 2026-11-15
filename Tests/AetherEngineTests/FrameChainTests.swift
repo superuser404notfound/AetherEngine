@@ -433,6 +433,23 @@ struct FrameToneMapperTests {
         #expect(Self.metadata(of: output) == plan.curve.outputMetadata(from: Self.master))
     }
 
+    /// A frame whose own metadata gives another peak rebuilds the curve, and the status follows it.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957AFrameWithItsOwnPeakRepublishesTheStatus() throws {
+        let stage = FrameToneMapper(plan: try plan(), frameInterval: 1.0 / 24)
+        let events = EventBox()
+        stage.onEvent = { events.append($0) }
+        #expect(stage.process(try frame(), pts: .zero, carriesHDR10Plus: false) != nil)
+        #expect(stage.process(try frame(), pts: .zero, carriesHDR10Plus: false) != nil)
+        let brighter = HDR10StaticMetadata(maxCLL: 1500, maxFALL: 400, masteringPeakNits: 4000, masteringMinNits: 0.005)
+        #expect(stage.process(try frame(metadata: brighter), pts: .zero, carriesHDR10Plus: false) != nil)
+        #expect(stage.delivered == VideoProcessingStatus(stages: [.toneMap], sourcePeakNits: 1500, sourcePeak: .maxCLL,
+                                                         targetPeakNits: 600))
+        #expect(events.count(where: { if case .processed = $0 { true } else { false } }) == 2,
+                "the first frame and the rebuild, not every frame")
+    }
+
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func issue957WhatTheStageDoesNotApplyToPassesThrough() throws {
@@ -471,7 +488,7 @@ struct FrameToneMapperTests {
         #expect(stage.disabledReason?.hasPrefix("over budget") == true)
         #expect(stage.process(input, pts: .invalid, carriesHDR10Plus: false) == nil)
         #expect(events.count(where: { if case .disabled = $0 { true } else { false } }) == 1)
-        #expect(events.count(where: { if case .firstFrame = $0 { true } else { false } }) == 1)
+        #expect(events.count(where: { if case .processed = $0 { true } else { false } }) == 1)
     }
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)

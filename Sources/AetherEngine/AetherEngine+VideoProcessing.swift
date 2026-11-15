@@ -6,6 +6,22 @@ import AetherLibavutil
 /// load; the published status follows the stage's own events.
 extension AetherEngine {
 
+    /// Whether the load settles the panel before it decides the route. AE#348's pre-flight gate runs
+    /// beside a VOD load, so the panel can still be switching where the route is chosen. Only an opted-in
+    /// HDR10 load gives up that overlap, as a source that may take the dual-layer route does.
+    nonisolated static func videoProcessingSettlesPanelFirst(processingOn: Bool, effectiveFormat: VideoFormat) -> Bool {
+        processingOn && (effectiveFormat == .hdr10 || effectiveFormat == .hdr10Plus)
+    }
+
+    /// Whether the display takes the mapped picture: an HDR10 format on a panel the load has settled and
+    /// routes as HDR. An unsettled panel is no answer, because one left in SDR would tone map the mapped
+    /// picture a second time.
+    nonisolated static func videoProcessingDisplayTakesHDR10(
+        effectiveFormat: VideoFormat, panelRoutingSettled: Bool, routingPanelHDR: Bool
+    ) -> Bool {
+        (effectiveFormat == .hdr10 || effectiveFormat == .hdr10Plus) && panelRoutingSettled && routingPanelHDR
+    }
+
     func videoProcessingRouteDecision(
         options: LoadOptions, videoStream: UnsafeMutablePointer<AVStream>?, dvProfile: Int?,
         displayTakesHDR10: Bool, wirelessAirPlayRoute: Bool, demuxedAudioLive: Bool
@@ -59,8 +75,8 @@ extension AetherEngine {
             Task { @MainActor in
                 guard let self, let host, self.softwareHost === host else { return }
                 switch event {
-                case let .firstFrame(status):
-                    self.activeVideoProcessing = VideoProcessingStatus.afterFirstFrame(
+                case let .processed(status):
+                    self.activeVideoProcessing = VideoProcessingStatus.afterProcessedFrame(
                         status, current: self.activeVideoProcessing)
                 case let .disabled(reason: reason, cause: cause, stats: _):
                     self.latchVideoProcessingDisabled(reason: reason, anyFrameRate: cause == .hdr10Plus, plan: plan)
@@ -68,7 +84,7 @@ extension AetherEngine {
             }
         }
         if let delivered = stage.delivered {
-            activeVideoProcessing = VideoProcessingStatus.afterFirstFrame(delivered, current: activeVideoProcessing)
+            activeVideoProcessing = VideoProcessingStatus.afterProcessedFrame(delivered, current: activeVideoProcessing)
         }
         if let disabled = stage.disabled {
             latchVideoProcessingDisabled(reason: disabled.reason, anyFrameRate: disabled.cause == .hdr10Plus, plan: plan)

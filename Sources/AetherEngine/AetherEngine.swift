@@ -6295,17 +6295,21 @@ public final class AetherEngine: ObservableObject {
         sourceSoftwareOnlyForUpscale = sourceUpscalePlan != nil && !useSoftwarePath
         if sourceUpscalePlan != nil { useSoftwarePath = true }
         // #957: the same place and the same reason as the upscale route. The two never both take a source:
-        // one wants SDR, the other HDR10.
+        // one wants SDR, the other HDR10. The route reads the settled panel, so a load that may take it
+        // settles the panel here (AE#348's gate otherwise still runs beside a VOD load).
+        if !panelRoutingSettled, Self.videoProcessingSettlesPanelFirst(
+               processingOn: options.videoProcessing != nil, effectiveFormat: effectiveFormat) {
+            try await settlePanelRouting(ownsProbe: true)
+        }
         let processingDecision = options.videoProcessing == nil
             ? VideoProcessingRouteDecision.notTaken(.preferenceOff)
             : videoProcessingRouteDecision(
                 options: options,
                 videoStream: probeOpened ? probe.stream(at: probe.videoStreamIndex) : nil,
                 dvProfile: detectedDVProfileNum,
-                // The display takes HDR10, and the panel routes as HDR once the load has settled it: a
-                // panel left in SDR would tone map the mapped picture again.
-                displayTakesHDR10: (effectiveFormat == .hdr10 || effectiveFormat == .hdr10Plus)
-                    && (!panelRoutingSettled || routingPanelHDR),
+                displayTakesHDR10: Self.videoProcessingDisplayTakesHDR10(
+                    effectiveFormat: effectiveFormat, panelRoutingSettled: panelRoutingSettled,
+                    routingPanelHDR: routingPanelHDR),
                 wirelessAirPlayRoute: wirelessAirPlayRoute,
                 demuxedAudioLive: SessionOptionCorrection.isDemuxedAudioLive(
                     isLive: options.isLive,

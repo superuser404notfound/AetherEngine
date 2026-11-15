@@ -313,7 +313,7 @@ With `LoadOptions.videoProcessing` (#957), `load()` asks `VideoProcessingRouteDe
 - HDR10: PQ, not Dolby Vision, no HDR10+ known at load, 8 or 10-bit 4:2:0,
 - the stream declares a mastering display or MaxCLL before its first packet (container, `hvcC` or `av1C`, read by `HDR10StaticMetadataSEI.declared(by:)`, the same values the decoder starts from),
 - a curve exists: the source peak is above the target, and the target is not below a third of it on the PQ scale,
-- the display takes HDR10, and the panel routes as HDR once the load has settled it,
+- the display takes HDR10, and the panel routes as HDR once the load has settled it. A load with the option on and an HDR10 format waits for the panel switch before it decides, so it gives up AE#348's overlap of the switch with the first segments. An unsettled panel never counts as HDR,
 - OS 26 or later, not a wireless AirPlay route, and not a live session with demuxed audio.
 
 A title whose processing gave up earlier in this process (`VideoProcessingFailureMemory`) is not taken again: at that frame rate or a faster one after an overrun or failures, at any rate after HDR10+.

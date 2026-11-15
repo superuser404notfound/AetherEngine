@@ -17,8 +17,8 @@ the public-API contract.
   the target plays on the software host, every frame runs the BT.2390 tone map, and the frame tells the
   display the target, so it does not tone map a second time. The cost is the software path's (no AVPlayer
   PiP, the picture stays on this device over AirPlay, E-AC-3 Atmos as its channel bed). Dolby Vision,
-  HDR10+, HLG, SDR, a title at or below the target and one with no declared metadata keep their route; the
-  load logs one `[VideoProcessing]` line saying why. `$activeVideoProcessing` reports what runs. Falling
+  HDR10+, HLG, SDR, a panel the load settles in SDR, a title at or below the target and one with no
+  declared metadata keep their route; the load logs one `[VideoProcessing]` line saying why. `$activeVideoProcessing` reports what runs. Falling
   behind, failing, or HDR10+ in the stream switches it off, and a session it alone moved goes back to the
   native path. On the A12 Apple TV a 4K60 HDR10 title fits. `aetherctl play --tone-map <nits>` runs it.
 

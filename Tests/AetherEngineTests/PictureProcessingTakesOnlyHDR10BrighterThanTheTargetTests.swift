@@ -85,6 +85,27 @@ struct PictureProcessingTakesOnlyHDR10BrighterThanTheTargetTests {
                 == "source peak 1000 nit is at or below the 1000 nit target")
     }
 
+    /// AE#348's gate runs beside a VOD load, so the panel may not be settled where the route is chosen. An
+    /// opted-in HDR10 load settles it first, and an unsettled or SDR panel never takes the route.
+    @Test func issue957TheRouteReadsOnlyASettledHDRPanel() {
+        #expect(AetherEngine.videoProcessingSettlesPanelFirst(processingOn: true, effectiveFormat: .hdr10))
+        #expect(AetherEngine.videoProcessingSettlesPanelFirst(processingOn: true, effectiveFormat: .hdr10Plus))
+        #expect(!AetherEngine.videoProcessingSettlesPanelFirst(processingOn: false, effectiveFormat: .hdr10),
+                "the option off keeps the overlap")
+        #expect(!AetherEngine.videoProcessingSettlesPanelFirst(processingOn: true, effectiveFormat: .sdr))
+        #expect(!AetherEngine.videoProcessingSettlesPanelFirst(processingOn: true, effectiveFormat: .dolbyVision))
+
+        func takes(_ format: VideoFormat, settled: Bool, hdr: Bool) -> Bool {
+            AetherEngine.videoProcessingDisplayTakesHDR10(effectiveFormat: format, panelRoutingSettled: settled,
+                                                          routingPanelHDR: hdr)
+        }
+        #expect(!takes(.hdr10, settled: false, hdr: false), "an unsettled panel is no answer")
+        #expect(!takes(.hdr10, settled: true, hdr: false), "a panel left in SDR would map the picture again")
+        #expect(takes(.hdr10, settled: true, hdr: true))
+        #expect(!takes(.sdr, settled: true, hdr: true))
+        #expect(Self.decide(displayTakesHDR10: takes(.hdr10, settled: true, hdr: false)) == .notTaken(.displayNotHDR10))
+    }
+
     @Test func issue957ARebuildKeepsThePlanUntilTheProcessingDisabledItself() throws {
         let plan = try Self.plan()
         let on = VideoProcessingRouteDecision.forRebuild(sessionPlan: plan, optionOn: true, disabled: nil)
@@ -122,10 +143,10 @@ struct PictureProcessingTakesOnlyHDR10BrighterThanTheTargetTests {
     @Test func issue957TheStatusKeepsWhatRanAndAddsTheDisable() throws {
         let plan = try Self.plan()
         let ran = VideoProcessingStatus(stages: [.toneMap], sourcePeakNits: 1200, sourcePeak: .maxCLL, targetPeakNits: 600)
-        #expect(VideoProcessingStatus.afterFirstFrame(ran, current: nil) == ran)
+        #expect(VideoProcessingStatus.afterProcessedFrame(ran, current: nil) == ran)
         let disabled = VideoProcessingStatus.afterDisable(reason: "HDR10+", current: ran, plan: plan)
         #expect(disabled.sourcePeakNits == 1200 && disabled.sourcePeak == .maxCLL && disabled.disabledReason == "HDR10+")
-        #expect(VideoProcessingStatus.afterFirstFrame(ran, current: disabled) == disabled, "a disable is not undone")
+        #expect(VideoProcessingStatus.afterProcessedFrame(ran, current: disabled) == disabled, "a disable is not undone")
         let early = VideoProcessingStatus.afterDisable(reason: "failures", current: nil, plan: plan)
         #expect(early.stages == [.toneMap] && early.sourcePeakNits == 1000 && early.targetPeakNits == 600)
     }

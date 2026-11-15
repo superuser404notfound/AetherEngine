@@ -25,7 +25,9 @@ final class FrameToneMapper: @unchecked Sendable {
     }
 
     enum Event: Sendable {
-        case firstFrame(VideoProcessingStatus)
+        /// The first processed frame, and every later one whose curve differs from the last published
+        /// (its own metadata rebuilt the chain).
+        case processed(VideoProcessingStatus)
         case disabled(reason: String, cause: DisableCause, stats: Stats)
     }
 
@@ -58,7 +60,7 @@ final class FrameToneMapper: @unchecked Sendable {
         return _disabledReason.map { ($0, _disabledCause) }
     }
 
-    /// What the first processed frame ran, nil before it.
+    /// What the last published frame ran (the first processed one, or one that rebuilt the curve), nil before it.
     var delivered: VideoProcessingStatus? { stateLock.lock(); defer { stateLock.unlock() }; return _delivered }
 
     var stats: Stats { stateLock.lock(); defer { stateLock.unlock() }; return _stats }
@@ -191,11 +193,11 @@ final class FrameToneMapper: @unchecked Sendable {
         _stats.meanMs = totalMs / Double(_stats.framesProcessed)
         _stats.maxMs = max(_stats.maxMs, ms)
         let frames = _stats.framesProcessed
-        let first = _delivered == nil
-        if first { _delivered = status }
+        let changed = _delivered != status
+        if changed { _delivered = status }
         let handler = _onEvent
         stateLock.unlock()
-        if first { handler?(.firstFrame(status)) }
+        if changed { handler?(.processed(status)) }
 
         let windowMean = recentMs.reduce(0, +) / Double(recentMs.count)
         if frames % Self.budgetWindow == 0, timingLinesLogged < Self.timingLines {

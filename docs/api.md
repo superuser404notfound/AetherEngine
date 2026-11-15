@@ -1783,7 +1783,7 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
 `$activeVideoProcessing` is published on the first processed frame, not when the load decides the route. nil while no processing runs, and cleared with the session.
 
 - It names the stages that run (`.toneMap`), the source peak the tone map starts from and which value set it (`sourcePeak`: `.mastering`, or `.maxCLL` when that is lower), and the target.
-- The source peak is the frame's own: a frame whose HDR10 metadata differs from the container's rebuilds the curve, logged as `[VideoProcessing] chain rebuilt ...`.
+- The source peak is the frame's own: a frame whose HDR10 metadata differs from the container's rebuilds the curve, logged as `[VideoProcessing] chain rebuilt ...`, and the status is republished with the new peak.
 - **Republished with `disabledReason` set** when the processing switches itself off (see [`videoProcessing`](#videoprocessing)). Frames are then delivered as decoded.
 
 ### Background behaviour

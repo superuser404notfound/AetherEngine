@@ -2077,8 +2077,9 @@ public struct VideoProcessingStatus: Sendable, Equatable {
                   targetPeakNits: plan.curve.targetPeakNits, disabledReason: disabledReason)
     }
 
-    /// A processed frame publishes what ran, unless a disable was already published.
-    static func afterFirstFrame(_ delivered: VideoProcessingStatus, current: VideoProcessingStatus?) -> VideoProcessingStatus {
+    /// A processed frame publishes what ran (the first one, and one that rebuilt the curve), unless a
+    /// disable was already published.
+    static func afterProcessedFrame(_ delivered: VideoProcessingStatus, current: VideoProcessingStatus?) -> VideoProcessingStatus {
         if let current, current.disabledReason != nil { return current }
         return delivered
     }
