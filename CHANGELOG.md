@@ -10,7 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Live AC-3 follows a change from 2.0 to 5.1 on the same stream.** A channel with 2.0 ads and a 5.1
+  programme on one PID stayed 2.0 when playback started on an ad, because the `dac3` box in the init
+  segment was written once from the first frame. When the AC-3 or E-AC-3 layout changes, the next segment
+  now starts at a keyframe with a new init built from a frame in the new layout.
 
 ## [7.68.0] - 2026-11-15
 

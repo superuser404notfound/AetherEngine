@@ -528,6 +528,7 @@ Notes:
 | `VODSegmentCutter.swift` | Native path: decode-order, keyframe-gated VOD segment cutter (the IRAP opens its segment, #92). |
 | `PlanBoundaryAxis.swift` | Which axis a container stamps its index entries on, and so which packet timestamp the cutter gate may compare with a plan boundary: decode for a mov/mp4 sample table, presentation for a Matroska Cue (#358, AE#561). |
 | `VideoConfigRecord.swift` | The `hvcC` / `avcC` config record and the framing question that hangs off it (#365). See note. |
+| `AC3FrameLayout.swift` | The AC-3 / E-AC-3 header fields the fMP4 `dac3` / `dec3` box is built from (sample rate, bsid, `acmod`, LFE, substreams), so a live layout change on the same PID gets a new init. |
 | `H264SPS.swift` | Hand-written H.264 SPS parser (SSAI ad-creative coded dimensions / codec config, and the slice context `H264FieldPairJoiner` reads field headers with). |
 | `H264FieldPairJoiner.swift` | AE#1070: joins the two fields of a field-coded (PAFF) H.264 frame into one packet between the Demuxer and `HLSSegmentProducer`, so the native route muxes one sample per frame. |
 | `H264CompositionOffsetRepair.swift` | Rebuilds the presentation axis of an MP4 whose writer dropped `ctts` while the bitstream still reorders pictures (#409, HEVC #699). See note. |

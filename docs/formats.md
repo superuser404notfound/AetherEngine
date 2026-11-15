@@ -1667,6 +1667,15 @@ With a fixed 4 s lead instead, the buffer runs dry before every 10 s segment and
 
 Measured through `aetherctl play --live` on a live-paced synthetic channel, median of 5: the stream analysis went from 58.7 s (32 MB, three requests, because the reader reconnects at the end of the 30 s fixture and the pass runs on to its 60 s cap) to 2.5 s (1.6 MB, one request), with both tracks. With audio that starts 5 s late it takes 4.9 s, and with a join 3 s into a 10 s GOP 7.6 s, the same as those channels without the silent program.
 
+### Live AC-3 that changes layout
+
+Some channels carry AC-3 2.0 during ads and 5.1 during the programme on the same PID. The fMP4 `dac3` / `dec3` box (the audio track's configuration) is written once per init segment, from one parsed frame.
+
+- On a live source the producer compares each stream-copied AC-3 / E-AC-3 frame with the layout of the current init: sample rate, bsid, `acmod`, LFE, and the E-AC-3 substreams.
+- On a change it cuts at the next keyframe, marks the segment with `#EXT-X-DISCONTINUITY` and gives it a versioned `#EXT-X-MAP` primed with a frame in the new layout, the same rotation as the SSAI program switch. The log line is `audio layout change`.
+- Until that keyframe, the frames in the new layout stay in the segment on the old init.
+- A bridged track is untouched: its encoder output keeps one layout.
+
 ## Known limitations
 
 Things that work today but have a documented edge case, or are deferred behind an upstream dependency.
