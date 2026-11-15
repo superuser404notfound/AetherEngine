@@ -103,6 +103,11 @@ struct BT2390ToneCurveRollsHighlightsIntoTheTargetTests {
         #expect(set.mode.runsChain && !set.mode.setsMetadata && !set.mode.pulses)
         let fallback = try HDR10ProbeSettings.parse(mode: "chain+tonemap", metadata: nil).get()
         #expect(fallback.targetPeakNits == HDR10ProbeSettings.defaultTargetPeakNits)
+        // Only values the host set stand in for a frame without metadata, never the probe's defaults.
+        #expect(!set.metadataGiven && !fallback.metadataGiven)
+        let standIn = try HDR10ProbeSettings.parse(mode: "chain+tonemap", metadata: "maxcll=1000,maxfall=400,peak=1000",
+                                                   target: "600").get()
+        #expect(standIn.metadataGiven && standIn.metadata.masteringPeakNits == 1000)
         for bad in ["0", "abc", "20000"] {
             #expect(throws: HDR10ProbeSettings.ParseError.self) {
                 _ = try HDR10ProbeSettings.parse(mode: "chain+tonemap", metadata: nil, target: bad).get()

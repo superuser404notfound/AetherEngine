@@ -51,6 +51,9 @@ struct HDR10ProbeSettings: Equatable, Sendable {
     var metadata: HDR10StaticMetadata
     /// `chain+tonemap`'s target peak in nit.
     var targetPeakNits: Double = Self.defaultTargetPeakNits
+    /// True when `AETHER_HDR10_PROBE_META` was set. `chain+tonemap` then maps a frame that carries no HDR10
+    /// metadata as if it carried these values, so a test clip without any can still time the kernel.
+    var metadataGiven = false
 
     static let modeVariable = "AETHER_HDR10_PROBE"
     static let metadataVariable = "AETHER_HDR10_PROBE_META"
@@ -93,7 +96,7 @@ struct HDR10ProbeSettings: Equatable, Sendable {
             return .success(HDR10ProbeSettings(mode: mode, metadata: .probeDefault, targetPeakNits: targetPeakNits))
         }
         return HDR10StaticMetadata.parse(metadata).map {
-            HDR10ProbeSettings(mode: mode, metadata: $0, targetPeakNits: targetPeakNits)
+            HDR10ProbeSettings(mode: mode, metadata: $0, targetPeakNits: targetPeakNits, metadataGiven: true)
         }
     }
 }
@@ -271,9 +274,10 @@ final class HDR10ProbeStage: @unchecked Sendable {
         guard picture.width % 2 == 0, picture.height % 2 == 0 else {
             return .failure(Note(message: "picture \(picture.width)x\(picture.height) is odd", counts: false))
         }
-        var toneMap: (curve: BT2390ToneCurve, source: HDR10StaticMetadata, from: ToneMapSourcePeak)?
+        var toneMap: (curve: BT2390ToneCurve, source: HDR10StaticMetadata, from: String)?
         if settings.mode == .chainToneMap {
-            switch Self.toneMapCurve(for: input, targetPeakNits: settings.targetPeakNits) {
+            switch Self.toneMapCurve(for: input, targetPeakNits: settings.targetPeakNits,
+                                     standIn: settings.metadataGiven ? settings.metadata : nil) {
             case let .success(found): toneMap = found
             case let .failure(note): return .failure(note)
             }
@@ -302,7 +306,7 @@ final class HDR10ProbeStage: @unchecked Sendable {
                 var line = "[HDR10Probe] chain built for \(picture.width)x\(picture.height)"
                 if let toneMap, case .hdr10(let out) = built.outputColorVolume {
                     line += String(format: ", tone map %g nit (%@) to %g nit, knee at %.0f nit, out ",
-                                   toneMap.curve.sourcePeakNits, toneMap.from.rawValue, toneMap.curve.targetPeakNits,
+                                   toneMap.curve.sourcePeakNits, toneMap.from, toneMap.curve.targetPeakNits,
                                    BT2390ToneCurve.nits(pq: toneMap.curve.kneeStart * toneMap.curve.sourcePeakPQ))
                         + Self.describe(out) + (built.isRoundTripOnly ? ", one kernel" : ", two passes")
                 }
@@ -317,18 +321,19 @@ final class HDR10ProbeStage: @unchecked Sendable {
         #endif
     }
 
-    /// The curve for `chain+tonemap` from the frame's own HDR10 metadata; a frame it does not apply to is no
-    /// failure (it passes through).
-    private static func toneMapCurve(for input: CVPixelBuffer, targetPeakNits: Double)
-        -> Result<(curve: BT2390ToneCurve, source: HDR10StaticMetadata, from: ToneMapSourcePeak), Note> {
+    /// The curve for `chain+tonemap` from the frame's own HDR10 metadata, else from `standIn` (the probe's
+    /// values, when set); a frame it does not apply to is no failure (it passes through). `from` names the
+    /// value that set the peak, with "probe stand-in" when the frame had none.
+    private static func toneMapCurve(for input: CVPixelBuffer, targetPeakNits: Double, standIn: HDR10StaticMetadata?)
+        -> Result<(curve: BT2390ToneCurve, source: HDR10StaticMetadata, from: String), Note> {
         let transfer = CVBufferCopyAttachment(input, kCVImageBufferTransferFunctionKey, nil) as? String
         guard transfer == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String else {
             return .failure(Note(message: "tone map: the frame is not PQ", counts: false))
         }
-        let source = HDR10StaticMetadata(
+        let own = HDR10StaticMetadata(
             masteringDisplayColorVolume: CVBufferCopyAttachment(input, kCVImageBufferMasteringDisplayColorVolumeKey, nil) as? Data,
             contentLightLevel: CVBufferCopyAttachment(input, kCVImageBufferContentLightLevelInfoKey, nil) as? Data)
-        guard let source, let peak = ToneMapSourcePeak.choose(masteringPeakNits: source.masteringPeakNits,
+        guard let source = own ?? standIn, let peak = ToneMapSourcePeak.choose(masteringPeakNits: source.masteringPeakNits,
                                                                maxCLL: source.maxCLL) else {
             return .failure(Note(message: "tone map: the frame carries no HDR10 metadata", counts: false))
         }
@@ -337,7 +342,7 @@ final class HDR10ProbeStage: @unchecked Sendable {
                                                  + "(the target must be lower, and not below a third of it in PQ)",
                                                  peak.nits, targetPeakNits), counts: false))
         }
-        return .success((curve, source, peak.from))
+        return .success((curve, source, own == nil ? "probe stand-in, " + peak.from.rawValue : peak.from.rawValue))
     }
 
     private func notePassThrough(_ message: String) {
