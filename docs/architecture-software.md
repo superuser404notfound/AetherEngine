@@ -299,7 +299,8 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 - Black is not mapped (source and target black are 0, as on an OLED).
 - The source peak is MaxCLL when it is known and below the mastering peak, else the mastering peak (`ToneMapSourcePeak`). No curve is built when the target is at or above it.
 - The stage declares the mapped metadata: the target as the mastering peak, the source's mastering black, and MaxCLL and MaxFALL through the same curve.
-- The shader computes both sides of the knee and picks one, so its cost does not depend on the picture. On a GPU it matches the CPU curve to within a quarter of a 10-bit code, and the one kernel matches the two passes to within one code.
+- The shader computes both sides of the knee and picks one, so its cost does not depend on the picture. The spline is one cubic per component, its coefficients worked out once on the CPU (`FrameChainToneMapParams`). On a GPU it matches the CPU curve to within a quarter of a 10-bit code, and the one kernel matches the two passes to within one code.
+- On the A12 Apple TV at 4K the one-kernel tone map takes 5.3 ms per frame (GPU 4.0 ms), and 4K60 played with no dropped frame. As its own pass between the two passes it takes 16.9 ms, more than a 60 fps frame. Numbers: [measurements.md › Tone map at 4K60 on the A12](measurements.md#tone-map-at-4k60-on-the-a12-ae957).
 
 ### Dolby Vision Profile 7 FEL
 

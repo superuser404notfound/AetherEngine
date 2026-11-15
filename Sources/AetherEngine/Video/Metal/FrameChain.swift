@@ -531,18 +531,16 @@ enum FrameChainShaderSource {
         float kr; float kb;
     };
 
-    // AE#957: BT2390ToneCurve.map on each PQ-coded component. Both sides of the knee are computed and one is
-    // picked, so the cost does not depend on the picture. Below the knee the value comes back unchanged.
+    // AE#957: BT2390ToneCurve.map on each PQ-coded component, its spline as one cubic (FrameChainToneMapParams).
+    // Both sides of the knee are computed and one is picked, so the cost does not depend on the picture.
+    // Below the knee the value comes back unchanged.
     struct FrameChainToneMapParams {
-        float sourcePeakPQ; float rcpSourcePeakPQ; float kneeStart; float rcpRollOff; float maxLum;
+        float kneePQ; float xScale; float xOffset; float c0; float c1; float c2; float c3;
     };
     inline float3 frameChainToneMap(float3 e, constant FrameChainToneMapParams &t) {
-        float3 e1 = saturate(e * t.rcpSourcePeakPQ);
-        float3 x = saturate((e1 - t.kneeStart) * t.rcpRollOff);
-        float3 x2 = x * x, x3 = x2 * x;
-        float3 p = (2.0 * x3 - 3.0 * x2 + 1.0) * t.kneeStart + (x3 - 2.0 * x2 + x) * (1.0 - t.kneeStart)
-                 + (3.0 * x2 - 2.0 * x3) * t.maxLum;
-        return select(p * t.sourcePeakPQ, e, e1 < t.kneeStart);
+        float3 x = saturate(fma(e, float3(t.xScale), float3(-t.xOffset)));
+        float3 p = fma(fma(fma(float3(t.c3), x, float3(t.c2)), x, float3(t.c1)), x, float3(t.c0));
+        return select(p, e, e < t.kneePQ);
     }
     // The tone map as its own pass over the RGB texture, for a chain that keeps the two passes.
     kernel void frameChainToneMap(constant FrameChainToneMapParams &t [[buffer(1)]],

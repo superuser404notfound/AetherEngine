@@ -103,20 +103,32 @@ enum ToneMapSourcePeak: String, Equatable, Sendable {
     }
 }
 
-/// Layout matches `FrameChainToneMapParams` in `FrameChainShaderSource`: the curve's numbers, with the
-/// divisions done once here.
+/// Layout matches `FrameChainToneMapParams` in `FrameChainShaderSource`. The roll-off is BT.2390's Hermite
+/// spline expanded into one cubic in the spline's own coordinate and scaled to PQ, so the shader spends one
+/// fused multiply-add on the coordinate and three on the cubic per component. On the A12 the chain is
+/// limited by arithmetic: written out term by term, the curve took 4.5 ms of GPU time per 4K frame.
 struct FrameChainToneMapParams: Equatable {
-    var sourcePeakPQ: Float
-    var rcpSourcePeakPQ: Float
-    var kneeStart: Float
-    var rcpRollOff: Float
-    var maxLum: Float
+    /// The knee in PQ: values below it pass unchanged.
+    var kneePQ: Float
+    /// The spline's coordinate is `saturate(e * xScale - xOffset)`.
+    var xScale: Float
+    var xOffset: Float
+    /// The roll-off in PQ: `((c3 * x + c2) * x + c1) * x + c0`.
+    var c0: Float
+    var c1: Float
+    var c2: Float
+    var c3: Float
 
     init(_ curve: BT2390ToneCurve) {
-        sourcePeakPQ = Float(curve.sourcePeakPQ)
-        rcpSourcePeakPQ = Float(1 / curve.sourcePeakPQ)
-        kneeStart = Float(curve.kneeStart)
-        rcpRollOff = Float(1 / (1 - curve.kneeStart))
-        maxLum = Float(curve.maxLum)
+        let ks = curve.kneeStart, peak = curve.sourcePeakPQ, m = curve.maxLum
+        let rollOff = 1 - ks
+        kneePQ = Float(ks * peak)
+        xScale = Float(1 / (peak * rollOff))
+        xOffset = Float(ks / rollOff)
+        // (2t^3 - 3t^2 + 1) ks + (t^3 - 2t^2 + t)(1 - ks) + (3t^2 - 2t^3) m, collected by power of t.
+        c0 = Float(ks * peak)
+        c1 = Float(rollOff * peak)
+        c2 = Float((-3 * ks - 2 * rollOff + 3 * m) * peak)
+        c3 = Float((2 * ks + rollOff - 2 * m) * peak)
     }
 }

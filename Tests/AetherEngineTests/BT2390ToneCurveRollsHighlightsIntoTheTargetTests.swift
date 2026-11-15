@@ -87,14 +87,22 @@ struct BT2390ToneCurveRollsHighlightsIntoTheTargetTests {
         #expect(HDR10StaticMetadata(masteringDisplayColorVolume: nil, contentLightLevel: Data([1])) == nil)
     }
 
-    @Test func issue957TheShaderGetsTheCurvesNumbers() throws {
-        let curve = try #require(BT2390ToneCurve(sourcePeakNits: 4000, targetPeakNits: 800))
-        let params = FrameChainToneMapParams(curve)
-        #expect(params.sourcePeakPQ == Float(curve.sourcePeakPQ))
-        #expect(abs(params.rcpSourcePeakPQ * params.sourcePeakPQ - 1) < 1e-6)
-        #expect(abs(params.rcpRollOff * (1 - params.kneeStart) - 1) < 1e-6)
-        #expect(params.maxLum == Float(curve.maxLum))
-        #expect(MemoryLayout<FrameChainToneMapParams>.size == 5 * MemoryLayout<Float>.size)
+    /// The shader's cubic is the same curve: evaluated the shader's way in Float, it stays within a tenth of
+    /// a 10-bit code of the reference everywhere, and below the knee it is not used.
+    @Test(arguments: [(1000.0, 600.0), (4000.0, 800.0), (10_000.0, 100.0)])
+    func issue957TheShadersCubicIsTheSameCurve(source: Double, target: Double) throws {
+        let curve = try #require(BT2390ToneCurve(sourcePeakNits: source, targetPeakNits: target))
+        let t = FrameChainToneMapParams(curve)
+        var worst: Float = 0
+        for i in 0 ... 1023 {
+            let e = Float(i) / 1023
+            let x = min(max(e * t.xScale - t.xOffset, 0), 1)
+            let p = ((t.c3 * x + t.c2) * x + t.c1) * x + t.c0
+            let mapped = e < t.kneePQ ? e : p
+            worst = max(worst, abs(mapped - Float(curve.map(pq: Double(e)))) * 1023)
+        }
+        #expect(worst < 0.1, "max \(worst) codes")
+        #expect(MemoryLayout<FrameChainToneMapParams>.size == 7 * MemoryLayout<Float>.size)
     }
 
     @Test func issue957TheProbesToneMapModeReadsItsTarget() throws {
