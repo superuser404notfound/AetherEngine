@@ -7,6 +7,14 @@ import AetherLibavutil
 /// (bwdif) can deinterlace it. tvOS AVPlayer does not deinterlace, so 1080i broadcast otherwise combs.
 enum VideoRoutingPolicy {
 
+    /// HEVC Dolby Vision profiles whose base layer is IPT-PQ-c2 and has no colour of its own: Profile 5,
+    /// and Profile 20, Dolby Vision on MV-HEVC (3D). Profile 20's base view is a Profile 5 base view
+    /// with a Profile 5 RPU (`dovi_tool` reads the RPU of a real sample as 5), and its second view
+    /// travels in NAL units of its own layer, so everything that holds for 5 holds for 20.
+    static func hevcDolbyVisionHasIPTBase(_ dvProfile: Int?) -> Bool {
+        dvProfile == 5 || dvProfile == 20
+    }
+
     /// Field orders that indicate interlaced content warranting software deinterlacing.
     static let interlacedFieldOrders: Set<AVFieldOrder> = [
         AV_FIELD_TT, AV_FIELD_BB, AV_FIELD_TB, AV_FIELD_BT
@@ -191,7 +199,7 @@ enum VideoRoutingPolicy {
         canHardwareDecode: () -> Bool
     ) -> Bool {
         switch codecID {
-        case AV_CODEC_ID_HEVC where dvProfile == 5:
+        case AV_CODEC_ID_HEVC where hevcDolbyVisionHasIPTBase(dvProfile):
             return false
         case AV_CODEC_ID_H264, AV_CODEC_ID_HEVC, AV_CODEC_ID_AV1:
             return !canHardwareDecode()
@@ -288,7 +296,7 @@ enum VideoRoutingPolicy {
         if presentsDolbyVisionBaseLayer { return false }
         switch codecID {
         case AV_CODEC_ID_HEVC:
-            return dvProfile == 5
+            return hevcDolbyVisionHasIPTBase(dvProfile)
         case AV_CODEC_ID_AV1:
             return dvProfile == 10 && dvBlCompatID == 0
         default:

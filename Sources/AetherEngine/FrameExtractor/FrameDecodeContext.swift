@@ -79,7 +79,7 @@ final class FrameDecodeContext: @unchecked Sendable {
         ColorAttachments.isHDRTransfer(trc)
     }
 
-    /// True when the stream is Dolby Vision Profile 5 (HEVC) or Profile 10.0 (AV1) - the
+    /// True when the stream is Dolby Vision Profile 5 or 20 (HEVC) or Profile 10.0 (AV1), the
     /// no-base-layer profiles whose decoded planes are IPT-PQ-C2, not standard YCbCr. Read
     /// from the dvcC/dvvC configuration record (`AVDOVIDecoderConfigurationRecord`). Profiles
     /// 7 / 8.x carry HDR10/HLG base layers FFmpeg decodes correctly, so they are excluded.
@@ -92,7 +92,7 @@ final class FrameDecodeContext: @unchecked Sendable {
             let record = raw.withMemoryRebound(to: AVDOVIDecoderConfigurationRecord.self, capacity: 1) { $0.pointee }
             let profile = Int(record.dv_profile)
             let compat = Int(record.dv_bl_signal_compatibility_id)
-            if profile == 5 { return true }             // HEVC P5: IPT-PQ-c2, no base
+            if VideoRoutingPolicy.hevcDolbyVisionHasIPTBase(profile) { return true } // HEVC P5 / P20: IPT-PQ-c2
             if profile == 10 && compat == 0 { return true } // AV1 P10.0: no base
             return false
         }

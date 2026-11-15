@@ -35,7 +35,7 @@ AetherEngine is a video and audio player engine for iOS, tvOS, macOS and visionO
 ## Highlights
 
 - **Plays nearly everything:** MKV, MP4, WebM, MPEG-TS, AVI, WMV, DVD and Blu-ray ISOs and folders, on-demand MPEG-DASH, and every codec FFmpeg knows. [Full list](docs/features.md)
-- **HDR done right:** HDR10, HDR10+, HLG, and Dolby Vision Profiles 5, 7, 8 and AV1 Profile 10. On Apple TV the TV really switches into the matching HDR mode.
+- **HDR done right:** HDR10, HDR10+, HLG, and Dolby Vision Profiles 5, 7, 8, 20 (3D) and AV1 Profile 10. On Apple TV the TV really switches into the matching HDR mode.
 - **Dolby Atmos:** E-AC-3 Atmos is passed through untouched, to HDMI receivers and to AirPods with spatial audio.
 - **Lossless height channels from TrueHD and DTS:X** (the overhead speakers of a Blu-ray Atmos or DTS:X mix), as an optional component.
 - **Audio shaping:** dialogue lift, night mode and a loudness target for quiet films, all opt-in.
