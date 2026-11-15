@@ -178,7 +178,7 @@ struct ProbeHarnessView: View {
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, log: say)
             case "avpulse":
                 await host.playAVPulse(arm.url, seconds: arm.seconds, log: say)
-            case "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse":
+            case "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse", "chaintonemap":
                 await playEngine(arm, log: say)
             default:
                 say("unknown mode \(arm.mode), skipped")
