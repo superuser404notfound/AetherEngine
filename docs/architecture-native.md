@@ -60,7 +60,7 @@ This path handles the codecs AVPlayer's HLS-fMP4 pipeline reliably accepts:
 - progressive H.264,
 - AV1, on devices with a hardware AV1 decoder.
 
-Interlaced H.264 goes to the software path, which can deinterlace it (#107). Atmos passthrough, the Dolby Vision (DV) HDMI handshake, and HDR10 / HDR10+ tone-mapping by the system all live on this path.
+Interlaced H.264 goes to the software path, which can deinterlace it (#107). The exception is an AirPlay receiver that shows video: then it stays here, and field-coded frames are joined into one sample each (`H264FieldPairJoiner`, AE#1070). Atmos passthrough, the Dolby Vision (DV) HDMI handshake, and HDR10 / HDR10+ tone-mapping by the system all live on this path.
 
 ```
 Source URL ──► Demuxer ──► [FelCurveLookahead] ──► HLSSegmentProducer ──► SegmentCache
