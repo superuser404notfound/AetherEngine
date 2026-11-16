@@ -655,9 +655,8 @@ final class MP4SegmentMuxer {
             Self.replaceExtradata(videoStream.pointee.codecpar, with: cropFree)
             // The sample entry states the coded height, and movenc turns the crop side data into a
             // `clap` of 3840x2160, so AVFoundation hides the padding lines the decoder now hands out.
-            // Both were verified on device together.
             videoStream.pointee.codecpar.pointee.height = 2160 + Int32(HEVCConformanceCrop.paddingLines)
-            Self.setBottomCrop(videoStream.pointee.codecpar, lines: HEVCConformanceCrop.paddingLines)
+            Self.setTVOSPaddingClap(videoStream.pointee.codecpar, lines: HEVCConformanceCrop.paddingLines)
         }
         if video.stereo == .multiview {
             // movenc writes `lhvC` (the second layer's parameter sets, which the extradata carries after
@@ -1416,9 +1415,16 @@ final class MP4SegmentMuxer {
         return HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: bytes)
     }
 
-    /// Replaces any crop side data with a bottom crop of `lines`; movenc writes it as `clap`. A failed
-    /// allocation only leaves the padding lines visible, so it does not fail the session.
-    private static func setBottomCrop(_ codecpar: UnsafeMutablePointer<AVCodecParameters>, lines: Int) {
+    /// Replaces any crop side data with one that makes movenc write the `clap` tvOS needs to hide
+    /// `lines` padding lines at the bottom. A failed allocation only leaves the padding lines visible,
+    /// so it does not fail the session.
+    ///
+    /// tvOS applies the clap's vertical offset with the opposite sign to the spec and to macOS. For a
+    /// bottom crop of 16 the spec offset is -8, which an Apple TV (AppleTV14,1, measured with a test
+    /// pattern over HLS and MP4) shows as lines 16 to 2175: 16 lines of picture lost at the top, 16 of
+    /// padding at the bottom. +8 shows lines 0 to 2159 there, so the side data states a TOP crop, which
+    /// movenc writes as +8. macOS would show this file 16 lines low, which is why it is tvOS only.
+    private static func setTVOSPaddingClap(_ codecpar: UnsafeMutablePointer<AVCodecParameters>, lines: Int) {
         av_packet_side_data_remove(codecpar.pointee.coded_side_data, &codecpar.pointee.nb_coded_side_data,
                                    AV_PKT_DATA_FRAME_CROPPING)
         // Four little-endian UInt32 in movenc's order: top, bottom, left, right.
@@ -1427,7 +1433,7 @@ final class MP4SegmentMuxer {
             AV_PKT_DATA_FRAME_CROPPING, 16, 0),
               let raw = item.pointee.data else { return }
         memset(raw, 0, 16)
-        raw[4] = UInt8(lines)
+        raw[0] = UInt8(lines)
     }
 
     /// Replace codecpar.extradata using av_malloc + AV_INPUT_BUFFER_PADDING_SIZE pad.

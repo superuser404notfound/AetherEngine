@@ -348,6 +348,8 @@ On the pulldown clip, 587 of 606 frame steps came out at exactly 41.7 ms, where 
 
 Without the window the decoder hands out all 2176 lines. So the sample entry states the coded height, and a `clap` box (clean aperture, the container's own crop) of 3840x2160 hides the 16 padding lines. The device played this combination in the same test series.
 
+The `clap` carries a vertical offset of +8, not the -8 the spec asks for. tvOS applies that offset with the opposite sign to the spec and to macOS. Measured on an Apple TV (AppleTV14,1) with a test pattern, over HLS and from an MP4: -8 shows lines 16 to 2175, so 16 lines of picture go missing at the top and 16 padding lines show at the bottom. +8 shows exactly lines 0 to 2159. The same file would sit 16 lines low on macOS, which is another reason the repair stays on tvOS.
+
 The repair is fail-closed. Only a 4:2:0 base-layer SPS of exactly 3840x2176 with a bottom crop of 16 lines and no other crop is rewritten. Other platforms keep the window, since only the Apple TV failed on it.
 
 #### H.264 VOD with changing parameter sets

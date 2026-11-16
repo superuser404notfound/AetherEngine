@@ -154,7 +154,7 @@ struct HEVCConformanceCropTests {
         func get() -> Data { lock.withLock { bytes } }
     }
 
-    @Test("The init segment carries the crop-free SPS, 2176 lines and a clap of 2160; so does the sample")
+    @Test("The init segment carries the crop-free SPS, 2176 lines and a tvOS-signed clap of 2160; so does the sample")
     func muxerWritesCropFreeStreamWithClap() throws {
         var source: UnsafeMutablePointer<AVCodecParameters>? = try codecpar(extradata: hvcC(vps: realVPS, sps: cropped, pps: realPPS))
         defer { avcodec_parameters_free(&source) }
@@ -186,7 +186,13 @@ struct HEVCConformanceCropTests {
         }
         let fragment = try Data(contentsOf: path)
         let initSegment = initial.get()
-        #expect(initSegment.range(of: Data("clap".utf8)) != nil)
+        // 3840x2160 with a vertical offset of +8: the sign tvOS needs, the opposite of the spec's.
+        let clapAt = try #require(initSegment.range(of: Data("clap".utf8)))
+        let clapWords = (0..<8).map { index in
+            initSegment[clapAt.upperBound + index * 4 ..< clapAt.upperBound + index * 4 + 4]
+                .reduce(Int32(0)) { $0 << 8 | Int32($1) }
+        }
+        #expect(clapWords == [3840, 1, 2160, 1, 0, 1, 8, 1])
         #expect(initSegment.range(of: Data(cropFree)) != nil)
         #expect(initSegment.range(of: Data(cropped)) == nil)
 
@@ -201,7 +207,7 @@ struct HEVCConformanceCropTests {
         let cropWords = (0..<4).map { index in
             (0..<4).reduce(UInt32(0)) { $0 | UInt32(crop.pointee.data[index * 4 + $1]) << (8 * $1) }
         }
-        #expect(cropWords == [0, 16, 0, 0])
+        #expect(cropWords == [16, 0, 0, 0])
         var written: UnsafeMutablePointer<AVPacket>? = try #require(try result.readPacket())
         defer { trackedPacketFree(&written) }
         let writtenBytes = Array(UnsafeBufferPointer(start: written!.pointee.data, count: Int(written!.pointee.size)))
