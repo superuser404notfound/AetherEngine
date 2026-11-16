@@ -1428,16 +1428,14 @@ private final class MLScaler: @unchecked Sendable {
         }
     }
 
-    /// The pass's destination without its margin, with its edge band rescaled where there is no margin.
+    /// The pass's destination without its margin, with its edge band rescaled on every side (AE#846).
     private func finishOutput(_ destination: CVPixelBuffer, original: CVPixelBuffer) throws -> CVPixelBuffer {
         var output = destination
         if let croppedPool {
             output = try pooledBuffer(croppedPool)
             try copyPlanes(from: destination, to: output, origin: crop)
         }
-        if pad.x == 0 || pad.y == 0 {
-            try rescaleEdges(of: output, from: original, columns: pad.x == 0, rows: pad.y == 0)
-        }
+        try rescaleEdges(of: output, from: original)
         return output
     }
 
@@ -1472,13 +1470,7 @@ private final class MLScaler: @unchecked Sendable {
         mlTimed = true
         let t1 = DispatchTime.now().uptimeNanoseconds
         defer { times.edge = elapsedMs(since: t1) }
-        var output = destination
-        if let croppedPool {
-            output = try pooledBuffer(croppedPool)
-            try copyPlanes(from: destination, to: output, origin: crop)
-        }
-        try rescaleEdges(of: output, from: original)
-        return output
+        return try finishOutput(destination, original: original)
     }
 }
 
