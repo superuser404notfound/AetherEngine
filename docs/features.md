@@ -176,6 +176,7 @@ How to wire it: [guide.md › Picture in Picture](guide.md#picture-in-picture). 
 ## Background audio
 
 - **iOS:** audio keeps playing when the app goes to the background. The native AVPlayer stays alive; the software path drops video and keeps decoding audio (`backgroundPlaybackEnabled` / `pictureInPictureActive`).
+- **What the app has to provide:** the `audio` entry in `UIBackgroundModes` and a playback audio session. The engine only asks AVFoundation to keep going (the native player's `audiovisualBackgroundPlaybackPolicy` is `.continuesIfPossible` while `backgroundPlaybackEnabled` is on, `.automatic` when it is off). Without the background mode, iOS still suspends the app and the audio stops.
 - A paused session survives quick app switches for a grace window (`backgroundTeardownGraceSeconds`, default 15 s) before the wedge-safe teardown runs.
 - **tvOS:** tears down immediately (wedge-safe), unless a PiP window is active. PiP keeps the pipeline and the loopback server alive, and on the software path it keeps decoding video too, because the window needs frames.
 - A host waits for the published `isSessionReady` before any corrective action.

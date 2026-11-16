@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **Native video on iOS can keep its sound in the background (AE#1080).** The engine kept a playing native
+  session alive when the app left the foreground, but the AVPlayer inside still had the `.automatic`
+  background policy, and under it iOS pauses any item that carries video. The native player now uses
+  `.continuesIfPossible` while `backgroundPlaybackEnabled` is on and goes back to `.automatic` when it is
+  off. The host app still needs the `audio` background mode. tvOS is unchanged. Thanks to nulltuple for
+  the report.
+
 - **DASH on the software path no longer freezes the picture at every subsegment (AE#1079).** The read gate
   stopped reading at 4 s of audio lead or 256 parked video packets. The DASH source interleaves whole
   subsegments, so the next video could sit behind a whole audio subsegment, or the next audio behind a

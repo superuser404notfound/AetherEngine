@@ -342,6 +342,7 @@ extension AetherEngine {
         let host = NativeAVPlayerHost()
         #endif
         host.pictureInPictureActive = pictureInPictureActive
+        host.backgroundAudioAllowed = backgroundPlaybackEnabled
         host.onVideoPresentationRecovery = { [weak self, weak host] action, position in
             guard let self, let host, self.nativeHost === host,
                   self.state == .playing, !self.pictureInPictureActive,

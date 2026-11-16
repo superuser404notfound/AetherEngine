@@ -346,6 +346,25 @@ final class NativeAVPlayerHost {
             }
         }
     }
+    /// AE#1080: whether the host app wants this player's audio to outlive a trip to the background.
+    /// Under the default `.automatic` policy iOS pauses any item that carries video once the app
+    /// leaves the foreground, PiP aside, so the engine's keepalive kept a session nobody could hear.
+    /// The policy grants no background time by itself: the app still needs the `audio` background
+    /// mode and a playback audio session.
+    var backgroundAudioAllowed = false {
+        didSet {
+            #if os(iOS)
+            avPlayer.audiovisualBackgroundPlaybackPolicy = Self.backgroundPlaybackPolicy(
+                allowed: backgroundAudioAllowed)
+            #endif
+        }
+    }
+
+    nonisolated static func backgroundPlaybackPolicy(allowed: Bool)
+        -> AVPlayerAudiovisualBackgroundPlaybackPolicy {
+        allowed ? .continuesIfPossible : .automatic
+    }
+
     private var statusObservation: NSKeyValueObservation?
     /// One-shot guard; route capability check runs after first .playing, not readyToPlay -- early sampling false-positived the downmix warning on stereo-idle sinks (issue #24).
     private var didSampleSettledRoute = false
