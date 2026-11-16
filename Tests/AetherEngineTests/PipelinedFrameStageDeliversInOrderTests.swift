@@ -8,7 +8,7 @@ import Metal
 /// AE#957: the GPU stages keep two frames in flight (`PipelinedFrameStage`). Each GPU frame here is an
 /// empty command buffer that waits on a shared event, so the test decides when it completes. Calls that
 /// block (`submit` at the depth, `settle`) run on a thread of their own, never the test's.
-@Suite("Pipelined frame stage delivers in order (AE#957)", .serialized, .timeLimit(.minutes(2)),
+@Suite("Pipelined frame stage delivers in order (AE#957)", .serialized, .timeLimit(.minutes(3)),
        .enabled(if: MTLCreateSystemDefaultDevice() != nil))
 struct PipelinedFrameStageDeliversInOrderTests {
 

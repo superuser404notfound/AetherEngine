@@ -147,7 +147,7 @@ final class PipelinedFrameStage: @unchecked Sendable {
         if undelivered.wait(timeout: .now() + Self.settleTimeout) == .timedOut {
             lock.lock(); let left = entries.count; lock.unlock()
             EngineLog.emit("[FramePipeline] settle: \(left) frame(s) still in flight after "
-                           + "\(Int(Self.settleTimeout)) s", category: .swPlayback)
+                           + "\(Self.settleTimeout) s", category: .swPlayback)
         }
     }
 
