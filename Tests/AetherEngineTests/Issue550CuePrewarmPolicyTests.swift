@@ -25,4 +25,22 @@ struct Issue550CuePrewarmPolicyTests {
         #expect(!HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: true, isSourceSeekable: true))
         #expect(!HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: true, isSourceSeekable: false))
     }
+
+    @Test("DASH random-access points thin to the minimum length, never off a declared SAP (AE#1075)")
+    func dashCoalescing() {
+        // The irregular-GOP fixture's first SAPs: the absolute hls rule kept 49.75 -> 52.0 (2.25 s),
+        // whose keyframe the audio lead pushed into the next segment.
+        let saps = [0, 5.25, 10.75, 19.75, 21.25, 29.75, 34.25, 41.25, 49.75, 52.0, 60.5]
+        let kept = HLSVideoEngine.coalescedRandomAccessStarts(saps, minimumSeconds: 4.51)
+        #expect(kept == [0, 5.25, 10.75, 19.75, 29.75, 41.25, 49.75, 60.5])
+        #expect(Set(kept).isSubset(of: Set(saps)))
+        #expect(zip(kept, kept.dropFirst()).allSatisfy { $1 - $0 >= 4.51 })
+        #expect(HLSVideoEngine.coalescedRandomAccessStarts([1, 2], minimumSeconds: 4).isEmpty)
+    }
+
+    @Test("the DASH minimum is the target length, or the audio lead plus the boundary backoff when longer")
+    func dashMinimumSegment() {
+        #expect(HLSVideoEngine.dashMinimumSegmentSeconds(interleaveLeadSeconds: 2) == HLSVideoEngine.targetSegmentDuration)
+        #expect(HLSVideoEngine.dashMinimumSegmentSeconds(interleaveLeadSeconds: 10) == 10.5)
+    }
 }

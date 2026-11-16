@@ -111,7 +111,8 @@ final class DASHSourceOpener: @unchecked Sendable {
             "[DASH] AE#859: \(selected.count) representation(s) of "
             + "\(manifest.adaptationSets.reduce(0) { $0 + $1.representations.count }) laid out as one "
             + "fragmented MP4: \(layout.pieces.count) subsegments, \(layout.totalSize) bytes, "
-            + "header \(layout.header.count) bytes; " + tracks.joined(separator: "; "),
+            + "header \(layout.header.count) bytes, "
+            + "\(layout.randomAccessStartsSeconds.count) declared video SAPs; " + tracks.joined(separator: "; "),
             category: .demux)
         Self.noteManifest(manifestURL)
         return DASHVirtualMP4Reader(layout: layout, sources: readers)
@@ -233,6 +234,7 @@ final class DASHSourceOpener: @unchecked Sendable {
             throw DASHSourceError.cancelled
         }
         return (reader, .init(initialization: initialization, index: index,
-                              indexOffset: indexRange.lowerBound, language: rep.language))
+                              indexOffset: indexRange.lowerBound, language: rep.language,
+                              isVideo: rep.kind == .video))
     }
 }

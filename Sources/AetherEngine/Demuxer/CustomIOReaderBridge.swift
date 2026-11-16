@@ -23,6 +23,14 @@ final class CustomIOReaderBridge: AVIOProvider, @unchecked Sendable {
 
     var isDASHSource: Bool { reader is DASHVirtualMP4Reader }
 
+    var dashRandomAccessStartsSeconds: [Double] {
+        (reader as? DASHVirtualMP4Reader)?.randomAccessStartsSeconds ?? []
+    }
+
+    var dashInterleaveLeadSeconds: Double {
+        (reader as? DASHVirtualMP4Reader)?.interleaveLeadSeconds ?? 0
+    }
+
     /// What the reader reports pulling from the origin. A remote disc image reads through the
     /// engine's `HTTPDiscIOReader`, which counts; before, every custom source reported 0, so a disc
     /// session showed no source bytes and no software-path throughput at all. A host's own reader

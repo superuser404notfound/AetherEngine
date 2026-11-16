@@ -112,6 +112,15 @@ The plan needs the source's keyframe positions, read from the container's keyfra
 
 The uniform fallback anchors segment 0 at the content start, so a title that starts late does not advertise empty leading segments.
 
+**Declared boundaries come first.** Two sources say where their random-access points are, and the plan is cut on those instead of on the index (`buildSegmentedSourcePlan`):
+
+- **HLS VOD ingest:** the playlist's segment starts, summed from `EXTINF` (#268).
+- **MPEG-DASH:** the video `sidx`, which marks each subsegment that starts with a SAP (a random-access point) and gives its time (AE#1075). Only SAP types 1 and 2 count (closed GOP). If one subsegment lacks such a SAP, the source declares nothing and the plan falls back as above.
+
+Each boundary is pulled up to 0.5 s below its declared time. The declared time and the container timestamp can differ by rounding, and a boundary that lands past its keyframe would open the segment one GOP late.
+
+DASH needs one more rule. In the virtual MP4, an audio subsegment that starts just before a video one is read whole before it, so audio runs ahead of video by up to one audio subsegment. A plan segment shorter than that loses its keyframe: the audio crosses the next boundary first, and the keyframe lands in the following segment. So `coalescedRandomAccessStarts` drops a SAP closer to the previous kept one than the target length, or the longest audio subsegment plus the backoff, whichever is larger. On an irregular-GOP fixture with 4 s audio subsegments, `segverify` found 35 of 35 segments independent this way, 27 of 30 without the rule, and 25 of 40 with the uniform fallback.
+
 ### Cutting segments at runtime
 
 Every segment starts on its own random-access point and never depends on the segment before it. So a fresh decode at a boundary (rebuffer recovery) shows no corruption (#92).

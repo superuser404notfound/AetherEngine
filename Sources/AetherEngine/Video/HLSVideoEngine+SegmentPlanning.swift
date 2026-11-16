@@ -41,7 +41,8 @@ extension HLSVideoEngine {
     /// only for the fragments it parses, so the seek indexes the one fragment at the midpoint. Measured
     /// on a 10 min SegmentBase source behind an origin with 80 ms latency and 4 MB/s, 5 runs per arm:
     /// the seek fetched about 5.7 MB in 13 extra requests, readyToPlay moved from 4.25 s to 6.2 s, and
-    /// the plan was the same uniform-stride fallback either way (2 IRAPs with the seek, 1 without).
+    /// the plan was the same uniform-stride fallback either way (2 IRAPs with the seek, 1 without). The
+    /// plan for such a source comes from its sidx instead, see `coalescedRandomAccessStarts`.
     static func cuePrewarmMayRun(hasSegmentedReader: Bool, isSourceSeekable: Bool,
                                  isDASHSource: Bool = false) -> Bool {
         !hasSegmentedReader && !isDASHSource && isSourceSeekable
@@ -301,6 +302,31 @@ extension HLSVideoEngine {
     static func segmentedPlanBoundaryBackoff(shortestSegmentSeconds: Double) -> Double {
         guard shortestSegmentSeconds > 0 else { return 0 }
         return min(0.5, shortestSegmentSeconds / 2)
+    }
+
+    /// A DASH source's declared random-access points thinned so no plan segment is shorter than
+    /// `minimumSeconds` (AE#1075). Every kept point is still a declared SAP, so no boundary moves off a
+    /// keyframe.
+    ///
+    /// The minimum is the larger of the target segment length and the audio's read-order lead plus the
+    /// boundary backoff. The hls muxer's absolute rule (first point at or after `(N+1) * target`) allows
+    /// a segment of any length after a long one, and in the virtual file a segment shorter than the
+    /// audio's lead loses its keyframe: the audio crosses the next boundary first, the muxer moves on,
+    /// and the keyframe lands in the following segment. Measured on an irregular-GOP fixture with 4 s
+    /// audio subsegments: segverify found 27 of 30 segments independent with the absolute rule (the
+    /// three failures were the 2.25 s and 3.75 s segments), 30 of 30 with this one.
+    static func coalescedRandomAccessStarts(_ starts: [Double], minimumSeconds: Double) -> [Double] {
+        guard starts.first == 0 else { return [] }
+        var kept: [Double] = [0]
+        for start in starts.dropFirst() where start - kept[kept.count - 1] >= minimumSeconds {
+            kept.append(start)
+        }
+        return kept
+    }
+
+    /// The shortest plan segment a DASH source may get: see `coalescedRandomAccessStarts`.
+    static func dashMinimumSegmentSeconds(interleaveLeadSeconds: Double) -> Double {
+        Swift.max(targetSegmentDuration, interleaveLeadSeconds + segmentedPlanBoundaryBackoff(shortestSegmentSeconds: .infinity))
     }
 
     /// Plan built from a segmented source's own boundaries (AE#268: the HLS VOD ingest's EXTINF sums).

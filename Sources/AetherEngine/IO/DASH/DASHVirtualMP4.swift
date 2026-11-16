@@ -32,6 +32,15 @@ struct DASHVirtualLayout: Sendable {
     let totalSize: Int64
     /// Per source: its own track_ID to the virtual file's.
     let trackIDMaps: [[UInt32: UInt32]]
+    /// AE#1075: the video representation's random-access points as its sidx declares them, in seconds
+    /// from the first one. Empty unless EVERY subsegment starts with a closed-GOP SAP (type 1 or 2),
+    /// because one subsegment without one would put a plan boundary where no keyframe is.
+    var randomAccessStartsSeconds: [Double] = []
+    /// AE#1075: the longest subsegment of any other representation. Pieces are interleaved by START
+    /// time, so an audio subsegment that starts just before a video one is read whole before it: audio
+    /// can run this far ahead of the video in read order, and a plan segment shorter than that loses
+    /// its keyframe to the next segment because the audio has already cut past it.
+    var interleaveLeadSeconds: Double = 0
 
     /// One representation's parsed head.
     struct Source: Sendable {
@@ -41,6 +50,8 @@ struct DASHVirtualLayout: Sendable {
         var indexOffset: Int64
         /// ISO 639-2/T code from the manifest, written into a track that says `und`.
         var language: String?
+        /// The representation is the video one, whose sidx declares the plan's random-access points.
+        var isVideo = false
     }
 
     static func build(sources: [Source], durationSeconds: Double?) throws -> DASHVirtualLayout {
@@ -141,8 +152,28 @@ struct DASHVirtualLayout: Sendable {
             sidxBytes += box
         }
 
+        let video = sources.firstIndex(where: \.isVideo)
         return DASHVirtualLayout(header: ftyp + moov + sidxBytes, pieces: pieces, totalSize: total,
-                                 trackIDMaps: maps)
+                                 trackIDMaps: maps,
+                                 randomAccessStartsSeconds: video.map { randomAccessStarts(indexes[$0]) } ?? [],
+                                 interleaveLeadSeconds: indexes.indices.filter { $0 != video }
+                                    .flatMap { s in indexes[s].references.map { Double($0.duration) / Double(indexes[s].timescale) } }
+                                    .max() ?? 0)
+    }
+
+    /// The SAP times of `index` relative to the first, or empty when a subsegment does not start with a
+    /// SAP of type 1 or 2. Type 3 and up (open GOP, gradual refresh) leave pictures the producer cannot
+    /// decode at a cut, so they do not count.
+    static func randomAccessStarts(_ index: SegmentIndex) -> [Double] {
+        var times: [Double] = []
+        times.reserveCapacity(index.references.count)
+        for ref in index.references {
+            guard let sap = ref.sapSeconds else { return [] }
+            if let last = times.last, sap <= last { return [] }
+            times.append(sap)
+        }
+        guard let first = times.first else { return [] }
+        return times.map { $0 - first }
     }
 
     /// Index of the piece holding virtual byte `offset`, nil inside the header or past the end.
@@ -366,6 +397,9 @@ struct SegmentIndex {
         var size: Int64
         var duration: UInt32
         var startSeconds: Double
+        /// Presentation time of the SAP this subsegment starts with (its earliest presentation time
+        /// plus `SAP_delta_time`), nil unless `starts_with_SAP` is set with SAP type 1 or 2.
+        var sapSeconds: Double? = nil
     }
 
     var referenceID: UInt32
@@ -428,8 +462,14 @@ struct SegmentIndex {
                 throw DASHSourceError.malformedIndex("hierarchical sidx (reference_type 1) is not supported")
             }
             let duration = MP4Box.u32(b, p + 4)
+            let sapWord = MP4Box.u32(b, p + 8)
+            let startsWithSAP = sapWord & 0x8000_0000 != 0
+            let sapType = (sapWord >> 28) & 0x7
+            let sapDelta = UInt64(sapWord & 0x0FFF_FFFF)
             refs.append(Reference(offset: offset, size: Int64(sizeWord), duration: duration,
-                                  startSeconds: Double(time) / Double(timescale)))
+                                  startSeconds: Double(time) / Double(timescale),
+                                  sapSeconds: startsWithSAP && (sapType == 1 || sapType == 2)
+                                    ? Double(time + sapDelta) / Double(timescale) : nil))
             offset += Int64(sizeWord)
             time += UInt64(duration)
             p += 12
