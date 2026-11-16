@@ -5619,6 +5619,7 @@ public final class AetherEngine: ObservableObject {
                 && (probe.stream(at: resolvedInitialAudio).map {
                     AACAudioSpecificConfig.coreMediaRejects(UnsafePointer($0.pointee.codecpar))
                 } ?? false)
+            let containerUnreadable = !Self.avPlayerReadsAudioContainer(probeOpened ? probe.containerFormatName : nil)
             // AE#946: AVPlayer times every fixed-blocksize FLAC frame by STREAMINFO's max_blocksize, so a
             // stream whose frames are smaller runs its clock past the real length or fails. Peeked only
             // when AVPlayer would otherwise get the stream.
@@ -5626,7 +5627,8 @@ public final class AetherEngine: ObservableObject {
                 && Self.audioOnlyUsesAVPlayer(
                     codecID: audioCodecID, isCustomSource: isCustomSource,
                     flacBlocksTooSmall: flacBlocksTooSmall, flacFramesMistimed: false,
-                    flacSeeksMisplaced: flacSeeksMisplaced, preferred: options.preferredDecodePath)
+                    flacSeeksMisplaced: flacSeeksMisplaced, containerUnreadable: containerUnreadable,
+                    preferred: options.preferredDecodePath)
                 ? Self.firstFLACFrameBlockSize(demuxer: probe, streamIndex: resolvedInitialAudio)
                 : nil
             let flacDeclaredMax = probe.stream(at: resolvedInitialAudio)
@@ -5640,17 +5642,19 @@ public final class AetherEngine: ObservableObject {
                 codecID: audioCodecID, isCustomSource: isCustomSource,
                 flacBlocksTooSmall: flacBlocksTooSmall, flacFramesMistimed: flacFramesMistimed,
                 flacSeeksMisplaced: flacSeeksMisplaced, aacLayoutInPCE: aacLayoutInPCE,
+                containerUnreadable: containerUnreadable,
                 preferred: options.preferredDecodePath)
             // Named only when it decided the route (AVPlayer otherwise), so a host can tell its
             // preference arrived.
             let hostAskedSoftware = !useNativeAudio && Self.audioOnlyUsesAVPlayer(
                 codecID: audioCodecID, isCustomSource: isCustomSource,
                 flacBlocksTooSmall: flacBlocksTooSmall, flacFramesMistimed: flacFramesMistimed,
-                flacSeeksMisplaced: flacSeeksMisplaced, aacLayoutInPCE: aacLayoutInPCE, preferred: .automatic)
+                flacSeeksMisplaced: flacSeeksMisplaced, aacLayoutInPCE: aacLayoutInPCE,
+                containerUnreadable: containerUnreadable, preferred: .automatic)
             let mistimedNote = flacFramesMistimed
                 ? " (FLAC frames carry \(flacFrameBlockSize ?? 0) samples, STREAMINFO declares \(flacDeclaredMax ?? 0), AE#946)"
                 : ""
-            EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")\(mistimedNote)\(flacSeeksMisplaced ? " (raw FLAC, CoreMedia misplaces its seeks, AE#946)" : "")\(aacLayoutInPCE ? " (AAC layout in a PCE, CoreMedia refuses it, AE#1047)" : "")\(hostAskedSoftware ? " (host asked for the software path, #461)" : "")", category: .engine)
+            EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")\(mistimedNote)\(flacSeeksMisplaced ? " (raw FLAC, CoreMedia misplaces its seeks, AE#946)" : "")\(aacLayoutInPCE ? " (AAC layout in a PCE, CoreMedia refuses it, AE#1047)" : "")\(containerUnreadable && Self.avPlayerCanDecodeAudio(audioCodecID) ? " (container \(probe.containerFormatName ?? "?") is not one AVPlayer opens)" : "")\(hostAskedSoftware ? " (host asked for the software path, #461)" : "")", category: .engine)
             // A preserved video NativeAVPlayerHost from a native->native reload must be released before an audio
             // session; otherwise the old AVPlayer stays alive in currentAVPlayer and the volume setter writes into it.
             if nativeHost != nil {

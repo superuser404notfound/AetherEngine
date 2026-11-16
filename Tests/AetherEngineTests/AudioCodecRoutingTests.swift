@@ -51,4 +51,20 @@ struct AudioCodecRoutingTests {
                 codecID: AV_CODEC_ID_FLAC, isCustomSource: false, flacBlocksTooSmall: false, flacFramesMistimed: true, flacSeeksMisplaced: false, preferred: preferred) == false)
         }
     }
+
+    /// The codec check alone sent MP2 in Matroska to AVPlayer, which answered "Cannot Open" and left
+    /// the clock at 0. A whitelisted codec in a container AVFoundation does not read goes to FFmpeg.
+    @Test("containers AVFoundation reads keep AVPlayer, the others go to FFmpeg")
+    func containerGate() {
+        for name in ["mov,mp4,m4a,3gp,3g2,mj2", "mp3", "aac", "ac3", "eac3", "flac", "wav", "aiff", "caf"] {
+            #expect(AetherEngine.avPlayerReadsAudioContainer(name), "\(name)")
+        }
+        for name in ["matroska,webm", "ogg", "mpegts", "asf", "w64", "dts"] {
+            #expect(!AetherEngine.avPlayerReadsAudioContainer(name), "\(name)")
+        }
+        #expect(AetherEngine.avPlayerReadsAudioContainer(nil))
+        #expect(!AetherEngine.audioOnlyUsesAVPlayer(
+            codecID: AV_CODEC_ID_MP2, isCustomSource: false, flacBlocksTooSmall: false, flacFramesMistimed: false,
+            flacSeeksMisplaced: false, containerUnreadable: true, preferred: .automatic))
+    }
 }
