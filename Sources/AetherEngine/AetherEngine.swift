@@ -4977,13 +4977,7 @@ public final class AetherEngine: ObservableObject {
         // the branches that return before it); it must not persist into loadedOptions where a later
         // host-initiated reload would resurrect a stale session snapshot.
         loadedOptions.subtitleSessionCarryover = nil
-        isLive = options.isLive
-        isSequentialOrigin = !options.isLive && options.sequentialOrigin
-        // nativeRemoteHLS: DVR window is unbounded (AVPlayer clamps seeks to its real seekable range);
-        // an over-wide published bound only affects range width, not seek landing.
-        liveWindow = options.isLive
-            ? LiveWindow(windowSeconds: options.nativeRemoteHLS ? .greatestFiniteMagnitude : options.dvrWindowSeconds)
-            : nil
+        adoptSessionLiveness(from: options)
         state = .loading
         // AE#464 round 2: park the position THIS load is rebuilding toward before the clock that held
         // it is cleared below, so a reload raised while this one is still in flight has something
@@ -8940,6 +8934,22 @@ public final class AetherEngine: ObservableObject {
         } else {
             displayCriteria.reset()
         }
+    }
+
+    /// The liveness a session takes from its `LoadOptions`: `isLive`, `isSequentialOrigin` and a fresh
+    /// `liveWindow`. `load` adopts it, and so does every rebuild that runs `stopInternal` and then
+    /// reopens on `loadedOptions` (`reloadWithAudioOverride`), because `stopInternal` clears all three.
+    /// Before that rebuild adopted it, a live session came back from an audio-track switch with
+    /// `isLive == false` and no live window: `startRecording` refused it with `.notLive` until the next
+    /// `load`, and the DVR range stopped publishing.
+    func adoptSessionLiveness(from options: LoadOptions) {
+        isLive = options.isLive
+        isSequentialOrigin = !options.isLive && options.sequentialOrigin
+        // nativeRemoteHLS: DVR window is unbounded (AVPlayer clamps seeks to its real seekable range);
+        // an over-wide published bound only affects range width, not seek landing.
+        liveWindow = options.isLive
+            ? LiveWindow(windowSeconds: options.nativeRemoteHLS ? .greatestFiniteMagnitude : options.dvrWindowSeconds)
+            : nil
     }
 
     /// - Parameter resetDisplayCriteria: When `true` (default), release
