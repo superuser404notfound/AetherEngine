@@ -133,8 +133,8 @@ AetherEngine follows [Semantic Versioning](https://semver.org). Every `public` d
 ## Used by
 
 <!-- used-by:start -->
-- [Sodalite](https://github.com/superuser404notfound/Sodalite): native Jellyfin client for Apple TV.
-- [AetherPlayer](https://github.com/superuser404notfound/AetherPlayer): native macOS media player.
+- [Sodalite](https://github.com/superuser404notfound/Sodalite): native Jellyfin client for Apple TV, iPhone, iPad and Mac.
+- [AetherPlayer](https://github.com/superuser404notfound/AetherPlayer): native media player for Mac, iPhone and iPad.
 - [NowSeen](https://discord.com/invite/7AFh3Hy8p4): IPTV / Manifest app for tvOS.
 - [KSKPix](https://ksktech.dev/kskpix): KSKPix is a premium IPTV player for Live TV, Movies & Series.
 - [Syravo](https://syravo.app): Xtream Codes, Jellyfin and radio client for iPhone, iPad and Apple TV.
