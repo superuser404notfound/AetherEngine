@@ -767,13 +767,17 @@ final class MP4SegmentMuxer {
 
         // Before the AE#561 sanitizer, which walks the sample as the length-prefixed chain the
         // record declares. A packet with no start code is written as it came.
+        var convertedFromAnnexB = false
         if convertsAnnexBVideoSamples, streamIndex == videoOutputStreamIndex {
-            _ = AnnexBSampleConverter.convertToLengthPrefixed(packet, removeUHDPaddingCrop: removesUHDPaddingCrop)
-        } else if removesUHDPaddingCrop, streamIndex == videoOutputStreamIndex,
-                  let prefixSize = videoNALLengthPrefixSize, let data = packet.pointee.data, packet.pointee.size > 0,
-                  let cropFree = HEVCConformanceCrop.removingUHDPaddingCrop(
-                      fromLengthPrefixed: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)),
-                      prefixSize: prefixSize) {
+            convertedFromAnnexB = AnnexBSampleConverter.convertToLengthPrefixed(
+                packet, removeUHDPaddingCrop: removesUHDPaddingCrop)
+        }
+        // A packet the converter left alone (no start code) is length-prefixed already.
+        if !convertedFromAnnexB, removesUHDPaddingCrop, streamIndex == videoOutputStreamIndex,
+           let prefixSize = videoNALLengthPrefixSize, let data = packet.pointee.data, packet.pointee.size > 0,
+           let cropFree = HEVCConformanceCrop.removingUHDPaddingCrop(
+               fromLengthPrefixed: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)),
+               prefixSize: prefixSize) {
             // An hev1 or Matroska source can repeat its SPS in the sample; the decoder would read the
             // window back from there.
             _ = AnnexBSampleConverter.replacePayload(packet, with: cropFree)
