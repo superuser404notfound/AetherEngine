@@ -101,6 +101,18 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
         }
     }
 
+    /// Reads the keyframe for `index` ahead of AVKit's request. With `buildsFragment` it also builds
+    /// the fragment, which for a JPEG rendition is the decode, tone map and encode a request would
+    /// otherwise wait for. Never stands a neighbour in: a miss is nil, and the ladder counts it.
+    func prefetch(at index: Int, buildsFragment: Bool) -> Data? {
+        queue.sync {
+            guard !shutDown, entries.indices.contains(index) else { return nil }
+            guard let payload = cache.payload(for: index) ?? readLocked(at: index) else { return nil }
+            if buildsFragment, !shutDown { _ = buildLocked(at: index) }
+            return payload
+        }
+    }
+
     /// A keyframe already read, without the queue: a scrub must not wait behind a read in flight.
     func cachedKeyframePayload(at index: Int) -> Data? {
         guard !shutDown, entries.indices.contains(index) else { return nil }

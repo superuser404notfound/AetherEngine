@@ -59,6 +59,43 @@ struct IFrameRenditionTests {
         #expect(r.fragment(at: 2) == Data("key2000@2:8.0".utf8))
     }
 
+    @Test("a prefetched keyframe answers the later request without another read")
+    func prefetchFeedsRequest() {
+        let rec = Recorder()
+        let (r, dir) = make(rec); defer { r.shutdown(); try? FileManager.default.removeItem(at: dir) }
+        #expect(r.prefetch(at: 2, buildsFragment: false) == Data("key2000".utf8))
+        #expect(r.fragment(at: 2) == Data("key2000@2:8.0".utf8))
+        #expect(rec.reads == [2000])
+    }
+
+    @Test("a prefetch builds the fragment only when asked, and never stands a neighbour in")
+    func prefetchBuildsOnRequest() {
+        let rec = Recorder()
+        rec.failing = [3000]
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iframe-prefetch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let builds = Recorder()
+        let entries = (0..<5).map {
+            IFrameRendition.Entry(startPts: Int64($0) * 1000, startSeconds: Double($0) * 4, durationSeconds: 4)
+        }
+        let r = IFrameRendition(
+            entries: entries, cache: IFramePayloadCache(directory: dir, byteLimit: 1 << 20),
+            readPayload: rec.read,
+            buildFragment: { payload, _, entry in
+                _ = builds.read(entry)
+                return IFrameFragmentBuilder.Output(initSegment: Data("init".utf8), fragment: payload)
+            })
+        defer { r.shutdown() }
+        _ = r.prefetch(at: 1, buildsFragment: false)
+        #expect(builds.reads.isEmpty)
+        _ = r.prefetch(at: 2, buildsFragment: true)
+        #expect(builds.reads == [2000])
+        #expect(r.prefetch(at: 3, buildsFragment: true) == nil)
+        #expect(builds.reads == [2000])
+        #expect(r.prefetch(at: 9, buildsFragment: true) == nil)
+    }
+
     @Test("a second request for the same index reads the source once")
     func cachesPayload() {
         let rec = Recorder()

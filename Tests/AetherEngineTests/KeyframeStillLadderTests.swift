@@ -32,6 +32,37 @@ struct KeyframeStillLadderTests {
         #expect(Set(seconds) == Set(stride(from: 0.0, to: 600.0, by: 30.0).map { ($0 / 4).rounded(.down) * 4 }))
     }
 
+    @Test("a served I-frame rendition reads every segment near the playhead before any coarse rung")
+    func fineWindowFirst() {
+        var cached = Set<Int>()
+        var order: [Int] = []
+        while order.count < 7, let next = KeyframeStillLadder.nextRung(
+            segmentStarts: starts, totalSeconds: 600, playheadSeconds: 302, fineWindowSegments: 3,
+            isCached: { cached.contains($0) }, isResident: { _ in false }) {
+            order.append(next)
+            cached.insert(next)
+        }
+        // The playhead's own segment, then outward, ahead before behind.
+        #expect(order == [75, 76, 74, 77, 73, 78, 72])
+        let after = KeyframeStillLadder.nextRung(
+            segmentStarts: starts, totalSeconds: 600, playheadSeconds: 302, fineWindowSegments: 3,
+            isCached: { cached.contains($0) }, isResident: { _ in false })
+        #expect(after.map { starts[$0] } == 360)
+    }
+
+    @Test("the window stops at the ends of the plan")
+    func fineWindowClipsToPlan() {
+        var cached = Set<Int>()
+        var order: [Int] = []
+        while order.count < 3, let next = KeyframeStillLadder.nextRung(
+            segmentStarts: starts, totalSeconds: 600, playheadSeconds: 0, fineWindowSegments: 2,
+            isCached: { cached.contains($0) }, isResident: { _ in false }) {
+            order.append(next)
+            cached.insert(next)
+        }
+        #expect(order == [0, 1, 2])
+    }
+
     @Test("resident segments are not read")
     func skipsResident() {
         let next = KeyframeStillLadder.nextRung(

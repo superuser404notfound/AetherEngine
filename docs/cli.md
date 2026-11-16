@@ -600,6 +600,7 @@ Other lines `play` prints:
 | `--subtitle-delay-reach SECONDS`, `--subtitle-advance-reach SECONDS` | Set `maximumSubtitleDelaySeconds` / `maximumSubtitleAdvanceSeconds` before the load (0 to 600), after `--subtitle-offset-reach` (AE#1031). | engine default |
 | `--preserve-ass-markup` | `LoadOptions.preserveASSMarkup`. | off |
 | `--skip-attachments` | `LoadOptions.skipsContainerAttachments` (AE#956). | off |
+| `--iframes` | `LoadOptions.serveIFramePlaylist` (AE#682) on a full session, where the still ladder prefetches into the rendition. | off |
 
 **Audio**
 
@@ -1013,6 +1014,8 @@ Nothing binds a render surface in a CLI run, so the absolute drop level belongs 
 - The reader makes one long-lived unranged GET, no ranged probes and no tail read.
 - A seek lands only inside the resident span that reaches the producer's frontier; every other target is rejected (AE#958).
 - On VOD it needs `--declared-duration S`, which fills `LoadOptions.declaredDurationSeconds`. The duration estimate normally comes from the tail read, which this shape skips.
+
+**`--iframes`** sets `LoadOptions.serveIFramePlaylist` (AE#682). `serve --iframes` only lists the rendition; `play` also runs the 1 Hz still ladder that reads into it. The log says `[StillLadder] reading through the I-frame rendition`. To see the effect, add `--served-url`, wait about 45 s, and `curl` `iframe<N>.mp4` next to the printed URL: an index near the playhead is answered from the cache in about a millisecond, one far from it pays the read (and for HDR the tone map).
 
 **`--skip-attachments`** sets `LoadOptions.skipsContainerAttachments` (AE#956). A Matroska source then opens without reading its attached files (the fonts of its ASS subtitles). The observable is the open itself. Against a throttled origin and an MKV that carries fonts, the time to the first `[AetherEngine]` load line drops by the fonts' transfer time, and the `[AVIOReader]` byte counts drop by their size.
 
