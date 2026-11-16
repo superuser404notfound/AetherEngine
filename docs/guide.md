@@ -902,6 +902,21 @@ player.setAudioShaping(AudioShaping(loudnessTargetLUFS: -23))   // raise quiet f
 
 Details in [api.md › Audio shaping](api.md#audio-shaping).
 
+### Even loudness across a music queue
+
+```swift
+var options = LoadOptions(audioOnly: true)
+options.normalizationGainDB = track.normalizationGain   // e.g. -7.9, or +4.2 for a quiet master
+try await player.load(url: url, options: options)
+```
+
+**This plays every track at the loudness your server measured.** Pass the track's ReplayGain or normalization gain on each load. Unlike `volume` it can lift a quiet track, with a -1 dBFS limiter so the lift does not clip, and it works on both audio-only hosts without moving a track between them.
+
+- `setNormalizationGain(_:)` changes it mid-track, for a setting the listener toggles.
+- `normalizationGainReport` says what was applied and how hard the limiter worked. Read it before the next load to log the finished track.
+
+Details in [api.md › Track loudness on audio-only sessions](api.md#track-loudness-on-audio-only-sessions).
+
 ### Stereo downmix for a 2.1 system
 
 ```swift

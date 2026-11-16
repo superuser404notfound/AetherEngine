@@ -12,6 +12,15 @@ the public-API contract.
 
 ### Added
 
+- **Track loudness on audio-only sessions, lifts included (Sodalite#242).** `LoadOptions.normalizationGainDB`
+  applies a track's ReplayGain or a server's normalization gain, and `setNormalizationGain(_:)` changes it
+  mid-track. `volume` stops at 1.0, so a quiet master could only be left quiet; this runs inside the engine
+  behind a -1 dBFS lookahead limiter. On the AVPlayer audio host it is an `MTAudioProcessingTap` on the item,
+  so no track moves to the FFmpeg host for it; there it runs in the decoder. `normalizationGainReport` gives
+  the applied gain, host, stage and limiter work, and the engine logs it when a track is torn down. Measured
+  with `aetherctl audio --gain 8` on a sine peaking at -5.7 dBFS: 3.3 dB of limiting on both hosts, exactly
+  what -1 dBFS takes off +2.3.
+
 - **`aetherctl bench` times the upscale stage (#957).** Every picture-quality stage should come with its
   measured cost, and the upscaler had none in the benchmark. Five new cases run the stage playback builds:
   480p and 720p through VT super resolution and MetalFX, 720p through MetalFX alone, and 1080p line art

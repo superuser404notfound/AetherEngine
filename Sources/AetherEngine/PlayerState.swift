@@ -1126,6 +1126,15 @@ public struct LoadOptions: Sendable, Equatable {
     /// it is carried. Change it mid-session with `AetherEngine.setAudioShaping(_:)`.
     public var audioShaping: AudioShaping = AudioShaping()
 
+    /// Sodalite#242: a loudness correction for an `audioOnly` session, in dB (clamped to
+    /// `NormalizationGainReport.gainRange`); nil (default) is none. Meant for a track's ReplayGain or
+    /// a server's measured normalization gain. Unlike `volume` it can lift: the engine applies it
+    /// with a -1 dBFS limiter behind it, inside the AVPlayer item through an audio tap on the native
+    /// audio host and in the decoder on the FFmpeg one, so the track stays on its host.
+    /// `AetherEngine.normalizationGainReport` says what was applied. Video sessions ignore it.
+    /// Change it mid-track with `AetherEngine.setNormalizationGain(_:)`.
+    public var normalizationGainDB: Double? = nil
+
     /// Teletext caption page for `dvb_teletext` subtitle decode. nil (default) = libzvbi auto-detect
     /// (`txt_page=subtitle`); an explicit page (e.g. 801 for AU) targets channels whose caption page
     /// libzvbi does not flag as a subtitle page. Only affects teletext streams (#107).
@@ -1268,6 +1277,7 @@ public struct LoadOptions: Sendable, Equatable {
         teletextPage: Int? = nil,
         audioDelaySeconds: Double = 0,
         audioShaping: AudioShaping = AudioShaping(),
+        normalizationGainDB: Double? = nil,
         deinterlaceMode: DeinterlaceMode = .auto,
         deinterlaceFieldRate: DeinterlaceFieldRate = .field,
         preferredDecodePath: DecodePath = .automatic,
@@ -1340,6 +1350,8 @@ public struct LoadOptions: Sendable, Equatable {
         self.teletextPage = teletextPage
         self.audioDelaySeconds = audioDelaySeconds
         self.audioShaping = audioShaping.clamped
+        self.normalizationGainDB = normalizationGainDB.flatMap {
+            $0.isFinite ? NormalizationGainProcessor.clampedGainDB($0) : nil }
         self.deinterlaceMode = deinterlaceMode
         self.deinterlaceFieldRate = deinterlaceFieldRate
         self.preferredDecodePath = preferredDecodePath
