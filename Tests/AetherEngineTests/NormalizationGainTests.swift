@@ -155,15 +155,17 @@ struct NormalizationGainTests {
         var peak: Float = 0
         while let sample = output.copyNextSampleBuffer() {
             guard let block = CMSampleBufferGetDataBuffer(sample) else { continue }
-            var length = 0
-            var pointer: UnsafeMutablePointer<CChar>?
-            CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
-                                        dataPointerOut: &pointer)
-            guard let pointer else { continue }
-            pointer.withMemoryRebound(to: Float.self, capacity: length / 4) { floats in
-                for i in 0 ..< length / 4 { peak = max(peak, abs(floats[i])) }
+            // Copy rather than take the data pointer: a block buffer can be several segments, and
+            // the pointer only covers the first. Reading totalLength through it ran off the end on a
+            // loaded CI runner and measured garbage (an inf peak).
+            var floats = [Float](repeating: 0, count: CMBlockBufferGetDataLength(block) / 4)
+            let status = floats.withUnsafeMutableBytes { bytes in
+                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes.count, destination: bytes.baseAddress!)
             }
+            #expect(status == kCMBlockBufferNoErr)
+            for value in floats { peak = max(peak, abs(value)) }
         }
+        #expect(reader.status == .completed, "reader ended \(reader.status.rawValue): \(String(describing: reader.error))")
         return 20 * log10(Double(peak))
     }
 

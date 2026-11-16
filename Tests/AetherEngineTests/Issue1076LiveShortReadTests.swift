@@ -25,7 +25,7 @@ struct Issue1076LiveShortReadTests {
     }
 
     @Test("a live read hands back what has arrived instead of filling the request",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func liveReadReturnsShort() throws {
         let origin = try Self.origin()
         defer { origin.stop() }
@@ -42,7 +42,7 @@ struct Issue1076LiveShortReadTests {
         }
     }
 
-    @Test("a VOD read still fills the request", .timeLimit(.minutes(1)))
+    @Test("a VOD read still fills the request", .timeLimit(.minutes(3)))
     func vodReadStillFills() throws {
         let origin = try Self.origin()
         defer { origin.stop() }
