@@ -45,6 +45,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+RequestHeaders.swift` | `updateRequestHeaders(_:)` (AE#792): swaps a live session's request headers (a rotated bearer token) without a rebuild. |
 | `AetherEngine+SoftwarePathEscalation.swift` | AE#561: the rung under every native recovery. Moves a session AVPlayer refuses on its merits onto the software host. |
 | `AetherEngine+StereoFallback.swift` | Rebuilds a 3D session AVPlayer refuses at startup once in 2D (`stereoPresentation = .mono`). |
+| `AetherEngine+Normalization.swift` | `setNormalizationGain(_:)`, `normalizationGainReport` and `NormalizationGainReport`: the per-track loudness gain on audio-only sessions (Sodalite#242). |
 | `AetherEngine+AudioDelay.swift` | `setAudioDelay(_:)` / `audioDelaySeconds` (AE#464): the viewer's lip-sync nudge as a live setting, placed per route by `AudioDelayPolicy`. |
 | `AetherEngine+AudioMenu.swift` | AE#1049: names every audio track for the master's audio group and answers a pick in AVKit's audio menu with `selectAudioTrack`. |
 | `AetherEngine+AudibleReadback.swift` | Logs once per load what AVFoundation resolved from the audio the engine served (AE#458). Read-only: it never selects an option. |
@@ -126,6 +127,13 @@ Notes:
 | `AudioShapingMatrix.swift` | The cap, the centre lift and the LFE level as one libswresample remix matrix. |
 | `AudioShapingGraph.swift` | The libavfilter graph after the remix: dialoguenhance + pan on stereo, acompressor, alimiter, aformat. Runs on its own sample counter so its latency never reaches the timeline. |
 | `LoudnessNormalizer.swift` | The loudness target (AE#1036): BS.1770 integrated loudness over what has played, and the bounded, latency-free gain toward the target, applied in front of the graph. |
+
+### `Audio/Normalization/`
+
+| File | What it does |
+| --- | --- |
+| `NormalizationGainProcessor.swift` | The track gain and a 5 ms lookahead limiter at -1 dBFS on Float32 PCM, interleaved or planar, with its statistics (Sodalite#242). The FFmpeg audio host runs it in `AudioDecoder`. |
+| `NormalizationTap.swift` | The same processor inside an `AVPlayerItem` through an `MTAudioProcessingTap` on its `AVAudioMix`, for `AudioAVPlayerHost`. |
 
 ### `Audio/Spatial/`
 

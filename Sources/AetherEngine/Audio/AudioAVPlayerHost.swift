@@ -74,6 +74,23 @@ final class AudioAVPlayerHost {
 
     private var lastRate: Float = 1.0
 
+    // MARK: - Normalization (Sodalite#242)
+
+    /// The track's loudness correction in dB, nil for none. Set before `load`; change it on a running
+    /// item with `setNormalizationGain(_:)`.
+    var normalizationGainDB: Double?
+    /// The tap carrying the gain on the current item, nil when none is installed.
+    private var normalizationTap: NormalizationTap?
+    /// Why the tap could not be installed, for the report; nil when it is (or nothing was asked).
+    private var normalizationTapRefusal: String?
+    /// The part of the gain `avPlayer.volume` carries when there is no tap: a cut, never a lift.
+    private var volumeFallbackFactor: Float = 1
+    /// The host's volume as the engine set it, before the fallback factor.
+    private var hostVolume: Float = 1
+    /// Bumped by every `load` and `stop`, so a load that awaited the asset's tracks can tell a newer
+    /// one replaced it and must not put its item back on the shared player.
+    private var loadToken: UInt64 = 0
+
     /// Start-position seconds stashed at load(); performed once readyToPlay, then cleared.
     private var pendingSeek: Double?
 
@@ -131,8 +148,18 @@ final class AudioAVPlayerHost {
         } else {
             asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
         }
+        loadToken &+= 1
+        let token = loadToken
         let item = AVPlayerItem(asset: asset)
         AudioRatePolicy.apply(to: item)
+        // Sodalite#242: the mix has to be on the item before AVPlayer renders a sample of it, or the
+        // first moments of a lifted track play at the source level.
+        await installNormalization(on: item, asset: asset)
+        guard token == loadToken else {
+            EngineLog.emit("[AudioAVPlayerHost] load superseded while preparing normalization; item dropped",
+                           category: .swPlayback)
+            return
+        }
         // externalMetadata is unavailable on macOS (package builds there for tests/aetherctl).
         #if !os(macOS)
         item.externalMetadata = pendingExternalMetadata
@@ -402,6 +429,7 @@ final class AudioAVPlayerHost {
     }
 
     func stop() {
+        loadToken &+= 1
         teardownObservers()
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
@@ -424,8 +452,106 @@ final class AudioAVPlayerHost {
     }
 
     var volume: Float {
-        get { avPlayer.volume }
-        set { avPlayer.volume = newValue }
+        get { hostVolume }
+        set {
+            hostVolume = newValue
+            avPlayer.volume = newValue * volumeFallbackFactor
+        }
+    }
+
+    // MARK: - Normalization
+
+    /// Builds the tap for `item`, or, when the asset has no audio track to bind it to or MediaToolbox
+    /// refuses one, lets `avPlayer.volume` carry the cut part of the gain.
+    private func installNormalization(on item: AVPlayerItem, asset: AVURLAsset) async {
+        normalizationTap = nil
+        normalizationTapRefusal = nil
+        setVolumeFallback(nil)
+        guard let gain = normalizationGainDB.map(NormalizationGainProcessor.clampedGainDB) else { return }
+        let track: AVAssetTrack?
+        do {
+            track = try await asset.loadTracks(withMediaType: .audio).first
+        } catch {
+            track = nil
+            normalizationTapRefusal = "audio track did not load (\(error.localizedDescription))"
+        }
+        attachTap(gainDB: gain, item: item, track: track)
+    }
+
+    private func attachTap(gainDB: Double, item: AVPlayerItem, track: AVAssetTrack?) {
+        guard let track else {
+            if normalizationTapRefusal == nil { normalizationTapRefusal = "asset has no audio track" }
+            setVolumeFallback(gainDB)
+            return
+        }
+        guard let tap = NormalizationTap(gainDB: gainDB) else {
+            normalizationTapRefusal = "MTAudioProcessingTapCreate failed"
+            setVolumeFallback(gainDB)
+            return
+        }
+        normalizationTap = tap
+        normalizationTapRefusal = nil
+        setVolumeFallback(nil)
+        item.audioMix = tap.audioMix(for: track)
+        EngineLog.emit(String(format: "[AudioAVPlayerHost] normalization tap installed, gain %+.1f dB", gainDB),
+                       category: .swPlayback)
+    }
+
+    /// nil clears the fallback; a gain puts its cut part (never a lift) on `avPlayer.volume`.
+    private func setVolumeFallback(_ gainDB: Double?) {
+        volumeFallbackFactor = gainDB.map { Float(pow(10, min(0, $0) / 20)) } ?? 1
+        avPlayer.volume = hostVolume * volumeFallbackFactor
+        if let gainDB {
+            EngineLog.emit(String(format: "[AudioAVPlayerHost] normalization without a tap (%@): "
+                                  + "volume carries %+.1f dB of %+.1f dB", normalizationTapRefusal ?? "-",
+                                  min(0, gainDB), gainDB), category: .swPlayback)
+        }
+    }
+
+    /// Change the gain on the running item. A tap already in place ramps to it; otherwise one is
+    /// installed on the item now.
+    func setNormalizationGain(_ gainDB: Double?) {
+        normalizationGainDB = gainDB
+        let clamped = gainDB.map(NormalizationGainProcessor.clampedGainDB)
+        if let tap = normalizationTap {
+            // Kept at 0 dB rather than removed: swapping the mix mid-item can drop a buffer.
+            tap.context.setGainDB(clamped ?? 0)
+            return
+        }
+        guard let item = playerItem else { return }
+        guard let clamped else {
+            setVolumeFallback(nil)
+            return
+        }
+        let track = item.tracks.lazy.compactMap(\.assetTrack).first { $0.mediaType == .audio }
+        attachTap(gainDB: clamped, item: item, track: track)
+    }
+
+    /// What normalization did on the current item; nil when none was asked for and none ran.
+    var normalizationReport: NormalizationGainReport? {
+        let requested = normalizationGainDB.map(NormalizationGainProcessor.clampedGainDB)
+        if let tap = normalizationTap {
+            let stats = tap.context.statistics
+            switch tap.context.preparation {
+            case .unsupported(let format):
+                return NormalizationGainReport(requestedDB: requested ?? 0, appliedDB: 0, host: .avPlayer,
+                                               stage: .none, statistics: stats,
+                                               note: "tap got a format it does not read (\(format))")
+            case .pending, .running:
+                let ran = (stats?.frames ?? 0) > 0
+                let note: String? = !ran ? "tap has not processed audio yet"
+                    : avPlayer.isExternalPlaybackActive ? "external playback active, the receiver may render the source"
+                    : nil
+                return NormalizationGainReport(requestedDB: requested ?? 0, appliedDB: ran ? tap.context.gainDB : 0,
+                                               host: .avPlayer, stage: ran ? .tap : .none, statistics: stats,
+                                               note: note)
+            }
+        }
+        guard let requested else { return nil }
+        let applied = min(0, requested)
+        return NormalizationGainReport(requestedDB: requested, appliedDB: applied, host: .avPlayer,
+                                       stage: applied < 0 ? .volume : .none, statistics: nil,
+                                       note: normalizationTapRefusal)
     }
 
     // MARK: - Internal

@@ -2351,6 +2351,7 @@ extension AetherEngine {
         try checkLoadCurrent(generation)
         let host = AudioPlaybackHost()
         host.audioShaping = loadedOptions.audioShaping
+        host.normalizationGainDB = loadedOptions.normalizationGainDB
         self.audioHost = host
         startNowPlayingPublisher(.audioFFmpeg, sessionCenter: nil)
         applyDesiredVolume(to: host)
@@ -2482,6 +2483,7 @@ extension AetherEngine {
         // No detached hop: AudioAVPlayerHost.load is MainActor + replaceCurrentItem-based (no blocking I/O), and the host is SHARED. Detaching opened a reorder window where a superseded load A's body ran after successor B, putting A's item back on the shared AVPlayer.
         try checkLoadCurrent(generation)
         recordStartupCheckpoint(.sessionConstructed)   // #361, past the guard above
+        host.normalizationGainDB = loadedOptions.normalizationGainDB   // Sodalite#242
         try await host.load(url: url, startPosition: startPosition, httpHeaders: httpHeaders)
         // Superseded: don't tear the shared host down (successor may be using it); just unwind before play()/state writes.
         try checkLoadCurrent(generation)

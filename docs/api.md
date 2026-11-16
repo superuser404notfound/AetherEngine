@@ -1283,6 +1283,7 @@ A settings screen reads `AetherEngine.displayCapabilities` instead of guessing f
 | `$activeAudioTrackIndex` | The selected track's id. On `.remoteBypass`, the enabled item track's. |
 | `selectAudioTrack(index:)` | Session-preserving reload. `index` is `TrackInfo.id`. See [Switching audio tracks](#switching-audio-tracks). |
 | `audioShaping`, `setAudioShaping(_:)`, `$audioShapingState` | Shape the session's audio before it reaches the output (AE#923). See [Audio shaping](#audio-shaping). |
+| `normalizationGainDB`, `setNormalizationGain(_:)`, `normalizationGainReport` | Per-track loudness gain on audio-only sessions, lift included. See [Track loudness on audio-only sessions](#track-loudness-on-audio-only-sessions). |
 | `installAudioTap(channels:)`, `removeAudioTap()`, `audioTapHasDeliverySource`, `AetherEngine.audioTapFormat` | Opt-in decoded PCM, mono Float32 48 kHz with source-PTS stamps, off the render path. `channels` is an `AudioTapChannels`: `.downmix` (default) or `.dialogue` (the centre channel alone). See [the audio tap contract](#the-audio-tap-ends-with-its-session). |
 
 **`$audioTracks` on `.remoteBypass`** lists the audio tracks AVPlayer built for the item, normally just the one playing. They are read from their format descriptions:
@@ -1327,6 +1328,18 @@ Values are clamped, and read back clamped. The default shapes nothing and leaves
 - **`$audioShapingState`** publishes an `AudioShapingState`: `.off` (nothing asked, or the rebuild that carries a new value is still on the way), `.applied`, or `.unavailable` (AVPlayer owns the audio on `.remoteBypass` and the native audio-only host, or the session plays no audio).
 
 See [Audio shaping](formats.md#audio-shaping) for what each setting does to the signal.
+
+### Track loudness on audio-only sessions
+
+`LoadOptions.normalizationGainDB` applies a fixed gain in dB to an `audioOnly` session: the track's ReplayGain, or a server's measured normalization gain (Jellyfin's `NormalizationGain`). nil (the default) applies none. Video sessions ignore it.
+
+- **It can lift.** `volume` stops at 1.0, so a quiet track could only be turned down before. This gain runs inside the engine with a -1 dBFS lookahead limiter behind it (`NormalizationGainReport.ceilingDBFS`), so a lift cannot clip.
+- **The track stays on its host.** On the AVPlayer audio host the gain runs in an `MTAudioProcessingTap` on the item. On the FFmpeg audio host it runs in the decoder, ahead of `audioShaping`.
+- **Clamped** to `NormalizationGainReport.gainRange`, -30 to +18 dB.
+- **The limiter delays the audio by 5 ms.** A track starts 5 ms later than without the gain, and the FFmpeg host pushes the held tail out at the end.
+- **`setNormalizationGain(_:)`** changes it on the running track. The gain ramps to the new value over one audio buffer, no rebuild. nil turns it off; a tap already on the item stays at 0 dB until the track ends.
+- **`normalizationGainReport`** returns a `NormalizationGainReport`: the gain asked for and applied, the host, the stage (`.tap`, `.decoder`, `.volume`, `.none`), the limiter's largest reduction in dB (`limiterMaxReductionDB`) and the share of played audio it was reducing (`limitingShare`, 0 to 1). Between tracks it holds the last session's figures, captured at teardown, which also writes them to the log. Read it before loading the next track to log the finished one.
+- **Where less is applied.** If AVPlayer gives the tap no audio track to bind to, `volume` carries the cut part of the gain and a lift is dropped (`stage == .volume`, `appliedDB` below `requestedDB`, `note` says why).
 
 ## Subtitles
 

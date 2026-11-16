@@ -178,6 +178,7 @@ final class AudioPlaybackHost {
 
         let aDec = AudioDecoder()
         aDec.shaping = audioShaping
+        aDec.normalizationGainDB = normalizationGainDB
         try aDec.open(stream: aStream)
         self.audioDecoder = aDec
         self.audioStreamIndex = resolvedAudioIdx
@@ -370,6 +371,27 @@ final class AudioPlaybackHost {
     /// #660: held here, not only on the output, because the engine sets it before `load()` builds one.
     /// AE#923: the host's audio shaping, handed to the decoder when the session opens.
     var audioShaping = AudioShaping()
+
+    /// Sodalite#242: the track's loudness correction in dB, nil for none. Live: reaches the running
+    /// decoder, which ramps to it over one buffer.
+    var normalizationGainDB: Double? {
+        didSet { audioDecoder?.normalizationGainDB = normalizationGainDB }
+    }
+
+    /// What the normalization stage did over this session.
+    var normalizationStatistics: NormalizationGainProcessor.Statistics? { audioDecoder?.normalizationStatistics }
+
+    var normalizationReport: NormalizationGainReport? {
+        let stats = normalizationStatistics
+        guard let requested = normalizationGainDB.map(NormalizationGainProcessor.clampedGainDB) else {
+            // Cleared mid-session: the stage ran and stays at 0 dB.
+            guard stats != nil else { return nil }
+            return NormalizationGainReport(requestedDB: 0, appliedDB: 0, host: .ffmpeg, stage: .decoder,
+                                           statistics: stats, note: nil)
+        }
+        return NormalizationGainReport(requestedDB: requested, appliedDB: requested, host: .ffmpeg,
+                                       stage: .decoder, statistics: stats, note: nil)
+    }
 
     var volume: Float = 1.0 {
         didSet { audioOutput?.volume = volume }

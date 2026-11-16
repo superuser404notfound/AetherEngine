@@ -1309,11 +1309,12 @@ Activates two subtitle tracks at once on one source (primary + secondary) and pr
 
 Plays a source through the audio-only pipeline (`LoadOptions.audioOnly`) and reports which host took it: bare AVPlayer, or the FFmpeg renderer path. It exercises the same dispatch a music host sees.
 
-**Usage:** `aetherctl audio [--seconds N] <url>`
+**Usage:** `aetherctl audio [--seconds N] [--gain DB] <url>`
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `--seconds N` | Run length. See [Shared flags](#shared-flags). | 10 |
+| `--gain DB` | Sets `LoadOptions.normalizationGainDB` and prints `normalizationGainReport` before stopping, e.g. `requested=+8.0 applied=+8.0 host=AVPlayer stage=tap limiter=3.3 dB 97.2%`. | off |
 
 **Exit codes**
 

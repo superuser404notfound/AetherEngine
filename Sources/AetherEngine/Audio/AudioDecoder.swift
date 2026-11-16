@@ -6,6 +6,7 @@ import AetherLibavformat
 import AetherLibavcodec
 import AetherLibavutil
 import AetherLibswresample
+import os
 
 /// FFmpeg software audio decoder: compressed AVPackets -> multichannel interleaved Float32 PCM in CMSampleBuffers
 /// for AVSampleBufferAudioRenderer. Uses libswresample to interleaved Float32 at source rate/channels (up to 7.1)
@@ -55,6 +56,54 @@ final class AudioDecoder: @unchecked Sendable {
     /// AE#923. Set before `open`; a change mid-session arrives as a new decoder or a re-anchor.
     var shaping = AudioShaping()
     private var shapingGraph: AudioShapingGraph?
+
+    /// Sodalite#242: the track's loudness correction in dB, nil for none. Can change mid-session; the
+    /// processor ramps to the new value over one buffer. Runs ahead of the shaping graph.
+    var normalizationGainDB: Double? {
+        get { normalization.withLock { $0.gainDB } }
+        set {
+            let processor = normalization.withLock { state -> NormalizationGainProcessor? in
+                state.gainDB = newValue
+                return state.processor
+            }
+            processor?.setGainDB(newValue ?? 0)
+        }
+    }
+
+    /// What the normalization stage did over the session, nil if it never ran.
+    var normalizationStatistics: NormalizationGainProcessor.Statistics? {
+        normalization.withLock { state in
+            guard let current = state.processor?.statistics else {
+                return state.carried.frames > 0 ? state.carried : nil
+            }
+            return state.carried.merged(with: current)
+        }
+    }
+
+    private struct NormalizationState {
+        var gainDB: Double?
+        var processor: NormalizationGainProcessor?
+        /// Figures of processors a format change replaced.
+        var carried = NormalizationGainProcessor.Statistics()
+    }
+    private let normalization = OSAllocatedUnfairLock(initialState: NormalizationState())
+
+    /// The processor for the current output format, built on first use once a gain is set, rebuilt
+    /// when the format changes. Decode thread only.
+    private func normalizationProcessor() -> NormalizationGainProcessor? {
+        let rate = Double(sampleRate)
+        let width = Int(channels)
+        return normalization.withLock { state in
+            if let processor = state.processor, processor.sampleRate == rate, processor.channels == width {
+                return processor
+            }
+            guard state.gainDB != nil || state.processor != nil, rate > 0, width > 0 else { return nil }
+            if let old = state.processor { state.carried = state.carried.merged(with: old.statistics) }
+            let processor = NormalizationGainProcessor(gainDB: state.gainDB ?? 0, sampleRate: rate, channels: width)
+            state.processor = processor
+            return processor
+        }
+    }
 
     func open(stream: UnsafeMutablePointer<AVStream>) throws {
         guard let codecpar = stream.pointee.codecpar else {
@@ -231,6 +280,11 @@ final class AudioDecoder: @unchecked Sendable {
         // Re-anchor the gapless clock to the post-seek PTS on the next emitted buffer.
         clock.reset()
         shapingGraph?.reset()
+        // The limiter's delay line holds pre-seek audio; the next buffer builds a fresh one.
+        normalization.withLock { state in
+            if let old = state.processor { state.carried = state.carried.merged(with: old.statistics) }
+            state.processor = nil
+        }
         #if DEBUG
         _loggedZeroConvert = false
         #endif
@@ -260,6 +314,25 @@ final class AudioDecoder: @unchecked Sendable {
                 appendFrameToPending(f)
                 if pendingSampleCount >= Self.minSamplesPerBuffer {
                     if let sampleBuffer = emitPending() { results.append(sampleBuffer) }
+                }
+            }
+        }
+        // Sodalite#242: the limiter's delay line holds the last few ms; silence pushes them out.
+        if let processor = normalization.withLock({ $0.processor }), swrContext != nil {
+            let frames = processor.lookaheadFrames
+            var tail = [Float](repeating: 0, count: frames * Int(channels))
+            tail.withUnsafeMutableBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                processor.process(interleaved: base, frames: frames)
+                if let graph = shapingGraph {
+                    graph.process(base, frames: frames, pts: nil) { planes, count, pts in
+                        appendShaped(planes, count: count, pts: pts)
+                    }
+                } else {
+                    base.withMemoryRebound(to: UInt8.self, capacity: buffer.count * 4) {
+                        pendingBytes.append($0, count: buffer.count * 4)
+                    }
+                    pendingSampleCount += frames
                 }
             }
         }
@@ -374,6 +447,11 @@ final class AudioDecoder: @unchecked Sendable {
         }
         #endif
         guard convertedSamples > 0 else { return }
+        if let processor = normalizationProcessor() {
+            tempBuffer.withMemoryRebound(to: Float.self, capacity: Int(convertedSamples) * Int(channels)) {
+                processor.process(interleaved: $0, frames: Int(convertedSamples))
+            }
+        }
         if let graph = shapingGraph {
             // The graph runs on its own sample count; the pts rides along in samples and comes back
             // with the output sample it belongs to (see AudioShapingGraph, Timing).

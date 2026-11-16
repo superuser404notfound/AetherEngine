@@ -2468,6 +2468,8 @@ public final class AetherEngine: ObservableObject {
     /// gates whether this is the active backend.
     var audioAVPlayerHost: AudioAVPlayerHost?
     var audioAVPlayerActive = false
+    /// Sodalite#242: the last torn-down audio-only session's normalization figures.
+    var lastNormalizationGainReport: NormalizationGainReport?
     var audioNativeCancellables = Set<AnyCancellable>()
 
     /// Periodic memory diagnostic (30 s). Emits grep-friendly lines:
@@ -2800,6 +2802,9 @@ public final class AetherEngine: ObservableObject {
 
     /// AE#923: the narrow write for `setAudioShaping`, for the same reason as the delay above.
     func setLoadedAudioShaping(_ shaping: AudioShaping) { loadedOptions.audioShaping = shaping }
+
+    /// Sodalite#242: the narrow write for `setNormalizationGain`, same reason as the delay above.
+    func setLoadedNormalizationGain(_ gainDB: Double?) { loadedOptions.normalizationGainDB = gainDB }
 
     /// AE#464 round 2: the fourth narrow write, and the one that makes a session-preserving reload
     /// preserve the session's transport. `autoplay` describes a MOUNT, and a rebuild is not a mount;
@@ -9109,6 +9114,8 @@ public final class AetherEngine: ObservableObject {
 
         // Clear audioHost so music<->video handoffs start from a clean slate; the engine is a process-wide
         // singleton and a lingering host would keep the old synchronizer alive under the next session.
+        // Sodalite#242: the figures die with the hosts, so they are kept (and logged) first.
+        captureNormalizationGainReport()
         audioCancellables.removeAll()
         audioHost?.stop()
         audioHost = nil
