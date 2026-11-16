@@ -1662,10 +1662,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
             //    load, and each reposition refetches a segment, so prewarming would buy the same
             //    uniform-stride plan for the price of two segment downloads at every session start.
             if !Self.cuePrewarmMayRun(hasSegmentedReader: dem.timeSeekableReader != nil,
-                                      isSourceSeekable: dem.isSourceSeekable) {
+                                      isSourceSeekable: dem.isSourceSeekable,
+                                      isDASHSource: dem.isDASHSource) {
                 EngineLog.emit(
                     dem.timeSeekableReader != nil
                         ? "[HLSVideoEngine] cue prewarm: skipped for a segmented source (no index to load, every reposition refetches a segment)"
+                        : dem.isDASHSource
+                        ? "[HLSVideoEngine] cue prewarm: skipped for a DASH source (fragmented, no stss to load, AE#1075)"
                         : "[HLSVideoEngine] cue prewarm: skipped for a forward-only source (the seek would be a linear read, "
                           + "and the prefix it consumes is the producer's only pass)"
                 )

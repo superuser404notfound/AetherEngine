@@ -99,6 +99,7 @@ A VOD playlist lists every segment before any of them exists, so the engine must
 The plan needs the source's keyframe positions, read from the container's keyframe index:
 
 - **MKV / MP4:** from a brief cue prewarm, a bounded seek that loads the index (Matroska Cues, or the MP4 `stss` sync-sample table).
+- **No prewarm** where the seek cannot load an index or would cost too much: a forward-only source (the seek would be a linear read of the producer's only pass, AE#550), a segmented HLS ingest (every reposition refetches a segment, #268), and an MPEG-DASH source (a fragmented MP4 with no `stss`, AE#1075). `cuePrewarmMayRun` holds that rule.
 - **MPEG-TS / M2TS:** these have no index, so only whatever `avformat_find_stream_info` plus that seek happened to scan.
 
 `keyframeIndexIsTrustworthy` runs three checks before trusting that index. If one fails, the engine uses a uniform-stride plan instead (boundaries at even intervals).

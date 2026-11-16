@@ -20,6 +20,13 @@ the public-API contract.
   40 ms latency, a prefetched thumbnail is served in about 1 ms against about 75 ms cold. Thanks to Harsh
   for the report.
 
+- **MPEG-DASH starts about 2 s sooner on a slow origin (#1075).** Before the segment plan, the native route
+  seeks to the middle of a file so libavformat loads its keyframe index. A DASH source has no such index (its
+  virtual MP4 is fragmented), so the seek only fetched the fragment there. It is skipped now. Measured on a
+  10 minute presentation behind an origin with 80 ms latency and 4 MB/s, `readyToPlay` moved from 6.2 s to
+  4.25 s, 13 fewer requests, with the same segment plan and the same seek landings. Thanks to nulltuple for
+  the report.
+
 ### Fixed
 
 - **No thin bright line around upscaled DVDs (#846).** Many DVDs carry a dark half-line in the outermost
