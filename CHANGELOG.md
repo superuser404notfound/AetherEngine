@@ -22,6 +22,11 @@ the public-API contract.
 
 ### Fixed
 
+- **No thin bright line around upscaled DVDs (#846).** Many DVDs carry a dark half-line in the outermost
+  rows and columns, which the ML pass sharpened into a bright line a few samples in. The outer 8 output samples
+  on every side are now a bilinear scale of the source, as they already were on axes without room for the
+  mirrored margin, so the edge looks as it does with upscaling off. Reported and diagnosed by classicjazz.
+
 - **Live AC-3 follows a change from 2.0 to 5.1 on the same stream.** A channel with 2.0 ads and a 5.1
   programme on one PID stayed 2.0 when playback started on an ad, because the `dac3` box in the init
   segment was written once from the first frame. When the AC-3 or E-AC-3 layout changes, the next segment

@@ -1100,9 +1100,7 @@ private final class MLScaler {
             output = try pooledBuffer(croppedPool)
             try copyPlanes(from: destination, to: output, origin: crop)
         }
-        if pad.x == 0 || pad.y == 0 {
-            try rescaleEdges(of: output, from: original, columns: pad.x == 0, rows: pad.y == 0)
-        }
+        try rescaleEdges(of: output, from: original)
         return output
     }
 }
@@ -1112,13 +1110,15 @@ private final class MLScaler {
 /// samples on each side and the scaled margin is cropped off again, so the ringing falls in the discarded part.
 let mlEdgePad = 16
 
-/// Where VT's size limit leaves no room for the margin (1280 wide at 1.5x), this many outer output samples
-/// (half in chroma) are a bilinear scale of the source instead. Past it the ringing stays within 4 code values.
+/// The outer output samples (half in chroma) on every side are a bilinear scale of the source. Where VT's size
+/// limit leaves no room for the margin (1280 wide at 1.5x) this hides the ringing, past it that stays within 4
+/// code values. Everywhere else it hides the dark half-lines at a DVD's frame edge, which the ML pass sharpens
+/// into a bright line three rows in (156 on a 126 field, AE#846); the band reaches past it.
 let mlEdgeBand = 8
 
 /// Rewrites the `mlEdgeBand` outer columns and/or rows of `output` with a bilinear scale of `source`.
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
-private func rescaleEdges(of output: CVPixelBuffer, from source: CVPixelBuffer, columns: Bool, rows: Bool) throws {
+private func rescaleEdges(of output: CVPixelBuffer, from source: CVPixelBuffer) throws {
     CVPixelBufferLockBaseAddress(source, .readOnly)
     CVPixelBufferLockBaseAddress(output, [])
     defer {
@@ -1136,25 +1136,34 @@ private func rescaleEdges(of output: CVPixelBuffer, from source: CVPixelBuffer, 
         let sStride = CVPixelBufferGetBytesPerRowOfPlane(source, plane)
         let dStride = CVPixelBufferGetBytesPerRowOfPlane(output, plane)
         guard w > 2 * band, h > 2 * band else { continue }
-        let fx = Double(sw) / Double(w), fy = Double(sh) / Double(h)
-        func write(_ x: Int, _ y: Int) {
-            let sx = min(max((Double(x) + 0.5) * fx - 0.5, 0), Double(sw - 1))
-            let sy = min(max((Double(y) + 0.5) * fy - 0.5, 0), Double(sh - 1))
-            let x0 = Int(sx), y0 = Int(sy), x1 = min(x0 + 1, sw - 1), y1 = min(y0 + 1, sh - 1)
-            let ax = sx - Double(x0), ay = sy - Double(y0)
-            for c in 0..<channels {
-                func v(_ px: Int, _ py: Int) -> Double { Double(s[py * sStride + px * channels + c]) }
-                let top = v(x0, y0) + (v(x1, y0) - v(x0, y0)) * ax
-                let bottom = v(x0, y1) + (v(x1, y1) - v(x0, y1)) * ax
-                d[y * dStride + x * channels + c] = UInt8((top + (bottom - top) * ay).rounded())
+        let xs = bilinearTaps(count: w, source: sw), ys = bilinearTaps(count: h, source: sh)
+        func write(row y: Int, columns: [Int]) {
+            let ty = ys[y]
+            let r0 = s + ty.i0 * sStride, r1 = s + ty.i1 * sStride, out = d + y * dStride
+            for x in columns {
+                let tx = xs[x]
+                let a0 = tx.i0 * channels, a1 = tx.i1 * channels
+                for c in 0..<channels {
+                    let top = Float(r0[a0 + c]) + (Float(r0[a1 + c]) - Float(r0[a0 + c])) * tx.a
+                    let bottom = Float(r1[a0 + c]) + (Float(r1[a1 + c]) - Float(r1[a0 + c])) * tx.a
+                    out[x * channels + c] = UInt8(top + (bottom - top) * ty.a + 0.5)
+                }
             }
         }
-        if rows {
-            for y in Array(0..<band) + Array((h - band)..<h) { for x in 0..<w { write(x, y) } }
-        }
-        if columns {
-            for y in 0..<h { for x in Array(0..<band) + Array((w - band)..<w) { write(x, y) } }
-        }
+        let all = Array(0..<w), sides = Array(0..<band) + Array((w - band)..<w)
+        for y in 0..<band { write(row: y, columns: all) }
+        for y in (h - band)..<h { write(row: y, columns: all) }
+        for y in band..<(h - band) { write(row: y, columns: sides) }
+    }
+}
+
+/// Source taps of a bilinear scale from `source` to `count` samples, centres aligned and clamped to the edge.
+private func bilinearTaps(count: Int, source: Int) -> [(i0: Int, i1: Int, a: Float)] {
+    let f = Double(source) / Double(count)
+    return (0..<count).map { i in
+        let p = min(max((Double(i) + 0.5) * f - 0.5, 0), Double(source - 1))
+        let i0 = Int(p)
+        return (i0, min(i0 + 1, source - 1), Float(p - Double(i0)))
     }
 }
 

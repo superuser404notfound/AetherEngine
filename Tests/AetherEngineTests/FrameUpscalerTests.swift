@@ -217,6 +217,24 @@ struct FrameUpscalerTests {
         }
     }
 
+    /// A DVD's dark half-line at the frame edge (AE#846, classicjazz): the ML pass sharpened it into a bright
+    /// overshoot three rows in (156 on a 126 field), seen as a thin line around the picture. The outer band is
+    /// a bilinear scale of the source now, so the line fades out as it does with upscaling off.
+    @Test(.enabled(if: UpscalerGate.mlAvailable))
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func darkEdgeLineGetsNoOvershoot() throws {
+        let up = try upscaler(try plan(720, 480, display: CGSize(width: 1440, height: 960), ml: [2]))
+        let input = try TestFrames.nv12(720, 480, y: 126, c: 128)
+        TestFrames.paintLuma(input) { x, y in y < 2 || x < 2 || y >= 478 || x >= 718 ? 16 : 126 }
+        let out = try #require(up.upscale(input))
+        CVPixelBufferLockBaseAddress(out, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(out, .readOnly) }
+        let p = CVPixelBufferGetBaseAddressOfPlane(out, 0)!.assumingMemoryBound(to: UInt8.self)
+        let s = CVPixelBufferGetBytesPerRowOfPlane(out, 0)
+        for i in Array(0..<16) + Array((960 - 16)..<960) { #expect(p[i * s + 720] <= 132, "row \(i): \(p[i * s + 720])") }
+        for i in Array(0..<16) + Array((1440 - 16)..<1440) { #expect(p[480 * s + i] <= 132, "column \(i): \(p[480 * s + i])") }
+    }
+
     /// The worst flat field for VT's edge ringing (near white, 1.5x) stays flat to the last sample.
     @Test(.enabled(if: UpscalerGate.mlAvailable))
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
