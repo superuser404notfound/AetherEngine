@@ -3053,6 +3053,18 @@ public final class Demuxer: @unchecked Sendable {
         (avioProvider as? CustomIOReaderBridge)?.isDASHSource ?? false
     }
 
+    /// AE#1075: a DASH source's declared video random-access points, seconds from the first. Empty for
+    /// every other source and for a DASH one whose sidx does not promise a SAP at every subsegment.
+    var dashRandomAccessStartsSeconds: [Double] {
+        (avioProvider as? CustomIOReaderBridge)?.dashRandomAccessStartsSeconds ?? []
+    }
+
+    /// AE#1075: how far audio can run ahead of video in a DASH source's read order, see
+    /// `DASHVirtualLayout.interleaveLeadSeconds`. 0 for every other source.
+    var dashInterleaveLeadSeconds: Double {
+        (avioProvider as? CustomIOReaderBridge)?.dashInterleaveLeadSeconds ?? 0
+    }
+
     /// Every engine seek target is an ABSOLUTE source PTS, while a `TimeSeekableIOReader` addresses
     /// elapsed media time (for HLS: the EXTINF sum in front of a segment). MPEG-TS carries an
     /// arbitrary PTS origin, so the two axes differ by that origin: ffmpeg writes 1.4 s by default and

@@ -1698,7 +1698,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // boundaries no keyframe sits on (a 4 s grid over a 10 s GOP is producible on one boundary
             // in five; a restart at any other one opens its gate a GOP late and skews every index
             // mapping until AVPlayer starves).
-            let declaredSegmentStarts = dem.timeSeekableReader?.segmentStartTimesSeconds ?? []
+            //
+            // AE#1075: a DASH source declares them too, in its video sidx, while its fragmented virtual
+            // MP4 leaves the keyframe index empty (only the fragments read so far are indexed). The sidx
+            // times are presentation times and the anchor below is the first indexed keyframe on the
+            // decode axis; a constant composition offset cancels in the differences, and the boundary
+            // backoff absorbs what does not.
+            let dashStarts = dem.timeSeekableReader == nil
+                ? Self.coalescedRandomAccessStarts(
+                    dem.dashRandomAccessStartsSeconds,
+                    minimumSeconds: Self.dashMinimumSegmentSeconds(interleaveLeadSeconds: dem.dashInterleaveLeadSeconds))
+                : []
+            let declaredSegmentStarts = dem.timeSeekableReader?.segmentStartTimesSeconds ?? dashStarts
             let segmentedAnchorPts: Int64 = keyframes.sorted().first
                 ?? (videoStream.pointee.start_time != Int64.min
                     ? max(0, videoStream.pointee.start_time) : 0)
@@ -1714,7 +1725,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 self.firstKeyframeSeconds = Double(segmentedAnchorPts)
                     * Double(videoTimeBase.num) / Double(videoTimeBase.den)
                 EngineLog.emit(
-                    "[HLSVideoEngine] segment plan: source-declared boundaries, "
+                    "[HLSVideoEngine] segment plan: source-declared boundaries"
+                    + (dashStarts.isEmpty ? ", " : " (DASH sidx SAPs, AE#1075), ")
                     + "\(plan.count) segments [anchorPts=\(segmentedAnchorPts) "
                     + "shortestSegment=\(String(format: "%.3f", plan.map { $0.durationSeconds }.min() ?? 0))s]",
                     category: .session

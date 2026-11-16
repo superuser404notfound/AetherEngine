@@ -209,13 +209,13 @@ struct DASHVirtualMP4Tests {
 
     static func layout() throws -> DASHVirtualLayout {
         func source(_ data: Data, _ head: (initialization: ClosedRange<Int64>, index: ClosedRange<Int64>),
-                    _ language: String?) -> DASHVirtualLayout.Source {
+                    _ language: String?, isVideo: Bool = false) -> DASHVirtualLayout.Source {
             .init(initialization: [UInt8](data[Int(head.initialization.lowerBound)...Int(head.initialization.upperBound)]),
                   index: [UInt8](data[Int(head.index.lowerBound)...Int(head.index.upperBound)]),
-                  indexOffset: head.index.lowerBound, language: language)
+                  indexOffset: head.index.lowerBound, language: language, isVideo: isVideo)
         }
         return try DASHVirtualLayout.build(sources: [
-            source(DASHFixture.video, DASHFixture.videoHead, nil),
+            source(DASHFixture.video, DASHFixture.videoHead, nil, isVideo: true),
             source(DASHFixture.audio1, DASHFixture.audioHead, "en"),
             source(DASHFixture.audio2, DASHFixture.audioHead, "de-DE"),
         ], durationSeconds: 12)
@@ -267,6 +267,41 @@ struct DASHVirtualMP4Tests {
                          DASHFixture.audioHead.index.upperBound].map { $0 + 1 }
         let mediaBytes = zip(sourceBytes, indexEnds).map { $0 - $1 }.reduce(0, +)
         #expect(layout.totalSize == Int64(layout.header.count) + mediaBytes)
+    }
+
+    @Test("the video sidx declares a SAP at every subsegment, and the audio sets the read-order lead (AE#1075)")
+    func declaredRandomAccess() throws {
+        let layout = try Self.layout()
+        #expect(layout.randomAccessStartsSeconds == [0, 2, 4, 6, 8, 10])
+        let audio = [UInt8](DASHFixture.audio1[Int(DASHFixture.audioHead.index.lowerBound)...Int(DASHFixture.audioHead.index.upperBound)])
+        let audioIndex = try SegmentIndex(bytes: audio, fileOffset: DASHFixture.audioHead.index.lowerBound)
+        let longest = audioIndex.references.map { Double($0.duration) / Double(audioIndex.timescale) }.max()
+        #expect(layout.interleaveLeadSeconds == longest)
+        #expect(layout.interleaveLeadSeconds > 2)
+    }
+
+    /// A one-level sidx (version 0, timescale 1000, earliest presentation time 500) with one
+    /// reference per entry: (duration in ms, SAP word).
+    static func sidx(_ refs: [(UInt32, UInt32)]) -> [UInt8] {
+        var payload = MP4Box.be32(1) + MP4Box.be32(1000) + MP4Box.be32(500) + MP4Box.be32(0)
+        payload += [0, 0] + MP4Box.be16(UInt16(refs.count))
+        for (duration, sap) in refs { payload += MP4Box.be32(100) + MP4Box.be32(duration) + MP4Box.be32(sap) }
+        return MP4Box.fullBox("sidx", version: 0, flags: 0, payload: payload)
+    }
+
+    @Test("SAP times read starts_with_SAP, the type and the delta; types 3 and up or a missing SAP declare nothing")
+    func sapParsing() throws {
+        // Type 1, type 2 with a 40 ms delta (leading pictures shown before the IDR), type 1.
+        let closed = try SegmentIndex(bytes: Self.sidx([(2000, 0x9000_0000), (2000, 0xA000_0028), (2000, 0x9000_0000)]), fileOffset: 0)
+        #expect(closed.references.map(\.sapSeconds) == [0.5, 2.54, 4.5])
+        #expect(DASHVirtualLayout.randomAccessStarts(closed).map { ($0 * 1000).rounded() } == [0, 2040, 4000])
+
+        let openGOP = try SegmentIndex(bytes: Self.sidx([(2000, 0x9000_0000), (2000, 0xB000_0000)]), fileOffset: 0)
+        #expect(openGOP.references[1].sapSeconds == nil)
+        #expect(DASHVirtualLayout.randomAccessStarts(openGOP).isEmpty)
+
+        let noSAP = try SegmentIndex(bytes: Self.sidx([(2000, 0x9000_0000), (2000, 0x1000_0000)]), fileOffset: 0)
+        #expect(DASHVirtualLayout.randomAccessStarts(noSAP).isEmpty)
     }
 
     @Test("libavformat reads the virtual file as three streams with the manifest's languages")
@@ -428,7 +463,10 @@ struct DASHOverHTTPTests {
         let plain = Demuxer()
         try plain.open(url: URL(string: "\(origin.baseURL)/media/v.mp4")!)
         defer { plain.close() }
+        #expect(dash.dashRandomAccessStartsSeconds == [0, 2, 4, 6, 8, 10])
+        #expect(dash.dashInterleaveLeadSeconds > 2)
         #expect(!plain.isDASHSource)
+        #expect(plain.dashRandomAccessStartsSeconds.isEmpty)
         #expect(HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: false,
                                                 isSourceSeekable: plain.isSourceSeekable,
                                                 isDASHSource: plain.isDASHSource))

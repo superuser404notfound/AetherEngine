@@ -29,6 +29,13 @@ the public-API contract.
 
 ### Fixed
 
+- **MPEG-DASH segments start on a keyframe, and seeks land where they were aimed (#1075).** A DASH
+  source has no keyframe index, so the native route laid its HLS segments on an even grid that ignored the
+  GOPs. Wherever a boundary missed a keyframe, the segment depended on the one before it and a seek landed
+  late. The plan now comes from the video `sidx`, which marks each subsegment that starts with a random-access
+  point. On a 5 minute presentation with keyframes 1.5 to 9 s apart, `segverify` found 35 of 35 segments
+  independent (25 of 40 before), and seeks to 15, 150 and 285 s landed exactly (151.83 and 288.33 s before).
+
 - **No thin bright line around upscaled DVDs (#846).** Many DVDs carry a dark half-line in the outermost
   rows and columns, which the ML pass sharpened into a bright line a few samples in. The outer 8 output samples
   on every side are now a bilinear scale of the source, as they already were on axes without room for the
