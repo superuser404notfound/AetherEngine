@@ -395,6 +395,7 @@ On-demand MPEG-DASH (AE#859): one static Period, each representation a single `S
 | `NativeAVPlayerHost.swift` | Native path: AVPlayer host bound to the loopback HLS-fMP4 URL. Awaits the real seek landing (deadline-bounded, first resume wins, #129) and hides the stale clock during a seek. |
 | `SoftwarePathEscalation.swift` | Native path, last rung: a CoreMedia-domain failure (AVPlayer refusing the media, not the source) is offered to the engine's own decoder once per session instead of ending it, since every recovery above reloads the same bytes (AE#561). |
 | `RemoteHLSMediaSelection.swift` | Remote-HLS bypass (#154): pure loopback→bypass reroute decision for non-live m3u8 sources (FFmpeg has no network), and legible `AVMediaSelectionGroup` → `subtitleTracks` mapping (synthetic ids from 200000). |
+| `SoftwareReadGateBudget.swift` | How far the software VOD demux loop reads ahead (audio lead target and parked-video packet cap), sized from a DASH source's subsegment interleave (AE#1079). |
 | `SoftwarePlaybackHost.swift` | Software path: runs the demux loop, decoders, renderer and synchronizer. |
 | `SoftwarePlaybackHost+AudioProducer.swift` | Software path: picks and builds the audio producer for the session's track. Every unavailable Atmos route falls back to the PCM decode (logged). |
 | `VideoSessionRetryPolicy.swift` | Software path: when to retry a refused video-session rebuild while the picture is on screen. Four quick attempts at keyframes, then one every 30 s, never a terminal error. |

@@ -42,6 +42,7 @@ final class DASHVirtualMP4Reader: IOReader, SourceTransferCounting, @unchecked S
     /// AE#1075: see `DASHVirtualLayout.randomAccessStartsSeconds`.
     var randomAccessStartsSeconds: [Double] { layout.randomAccessStartsSeconds }
     var interleaveLeadSeconds: Double { layout.interleaveLeadSeconds }
+    var videoSubsegmentSeconds: Double { layout.videoSubsegmentSeconds }
 
     var discImageProbeEnabled: Bool { false }
 

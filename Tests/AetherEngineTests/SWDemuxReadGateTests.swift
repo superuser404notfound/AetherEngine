@@ -58,6 +58,65 @@ struct SWDemuxReadGateTests {
             lastAudioPts: 104, clockSeconds: .nan) == false)
     }
 
+    // MARK: - Source interleave (AE#1079)
+
+    /// The DASH virtual MP4 interleaves whole subsegments by start time, so audio can sit a whole
+    /// audio subsegment ahead of the next video in read order, and video a whole video subsegment
+    /// ahead of the next audio. A 4 s lead or a 256-packet cap below that geometry froze the picture
+    /// (10 s audio, 4 s video) or stalled the clock (10 s video, 2 s audio) every subsegment.
+    @Test("an ordinary source keeps the 4 s lead and the 256-packet cap")
+    func ordinarySourceBudget() {
+        let budget = SoftwareReadGateBudget(audioReadLeadSeconds: 0, videoSubsegmentSeconds: 0, frameRate: 24)
+        #expect(budget.audioLeadSeconds == AudioLookaheadPolicy.targetLeadSeconds)
+        #expect(budget.parkedVideoCap == 256)
+    }
+
+    @Test("audio laid out ahead of video raises the lead by that interleave")
+    func audioAheadRaisesTheLead() {
+        let budget = SoftwareReadGateBudget(audioReadLeadSeconds: 10, videoSubsegmentSeconds: 4, frameRate: 60)
+        #expect(budget.audioLeadSeconds == AudioLookaheadPolicy.targetLeadSeconds + 10)
+        // The issue's state: empty FIFO, audio 10 s over the clock. It must keep reading now.
+        #expect(!SoftwarePlaybackHost.shouldHoldDemuxRead(
+            parkedCount: 0, parkedCap: budget.parkedVideoCap, clockArmed: true,
+            lastAudioPts: 110, clockSeconds: 100, targetLeadSeconds: budget.audioLeadSeconds))
+        #expect(SoftwarePlaybackHost.shouldHoldDemuxRead(
+            parkedCount: 0, parkedCap: budget.parkedVideoCap, clockArmed: true,
+            lastAudioPts: 114, clockSeconds: 100, targetLeadSeconds: budget.audioLeadSeconds))
+    }
+
+    @Test("a long video subsegment raises the cap so the whole subsegment parks before the next audio")
+    func longVideoSubsegmentRaisesTheCap() {
+        let budget = SoftwareReadGateBudget(audioReadLeadSeconds: 2, videoSubsegmentSeconds: 10, frameRate: 60)
+        // 10 s of 60 fps is 600 packets, more than 256 can hold.
+        #expect(budget.parkedVideoCap >= 600 + 256)
+        #expect(budget.audioLeadSeconds == AudioLookaheadPolicy.targetLeadSeconds + 2)
+    }
+
+    @Test("an unknown frame rate budgets for 60 fps, never for fewer packets")
+    func unknownFrameRate() {
+        let unknown = SoftwareReadGateBudget(audioReadLeadSeconds: 0, videoSubsegmentSeconds: 10, frameRate: nil)
+        let sixty = SoftwareReadGateBudget(audioReadLeadSeconds: 0, videoSubsegmentSeconds: 10, frameRate: 60)
+        #expect(unknown.parkedVideoCap == sixty.parkedVideoCap)
+        #expect(SoftwareReadGateBudget(audioReadLeadSeconds: 0, videoSubsegmentSeconds: 10, frameRate: .nan)
+            .parkedVideoCap == sixty.parkedVideoCap)
+    }
+
+    @Test("an absurd interleave is clamped, so a broken sidx cannot buy unbounded memory")
+    func interleaveIsClamped() {
+        let ceiling = SoftwareReadGateBudget.interleaveCeilingSeconds
+        let huge = SoftwareReadGateBudget(audioReadLeadSeconds: 600, videoSubsegmentSeconds: 600, frameRate: 60)
+        let atCeiling = SoftwareReadGateBudget(audioReadLeadSeconds: ceiling, videoSubsegmentSeconds: ceiling, frameRate: 60)
+        #expect(huge == atCeiling)
+        #expect(SoftwareReadGateBudget(audioReadLeadSeconds: -3, videoSubsegmentSeconds: .nan, frameRate: 60)
+            == SoftwareReadGateBudget(audioReadLeadSeconds: 0, videoSubsegmentSeconds: 0, frameRate: 60))
+    }
+
+    @Test("the parked wait measures the gate against the raised lead")
+    func waitUsesTheRaisedLead() {
+        #expect(abs(SoftwarePlaybackHost.parkedRendererWaitSeconds(
+            clockArmed: true, lastAudioPts: 114.012, clockSeconds: 100, rate: 1, targetLeadSeconds: 14) - 0.012) < 1e-9)
+    }
+
     // MARK: - Parked wait (audit PERF-110)
 
     @Test("a lead just over the target wakes when the gate opens, not before the floor")

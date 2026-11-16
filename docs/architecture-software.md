@@ -175,6 +175,8 @@ A seek closes the arm again. Why both conditions:
 
 **Parked video keeps flowing.** Parked video is decoded video that waits until the renderer has room. While video is parked, the loop's read waits at most `parkedVideoReadWaitSeconds` (20 ms) for the source, then hands parked video to the renderer again. The loop is the only thread that does that, so an unbounded wait on a slow source would let the renderer run dry ([measured](measurements.md#parked-video-read-wait)).
 
+**The read gate follows the source's interleave.** The gate assumes a source that interleaves audio and video tightly, within the 4 s lead and the 256-packet cap. A source that interleaves in larger pieces gets a gate sized from that geometry (`SoftwareReadGateBudget`, AE#1079). Otherwise the next piece of the other track sits behind a held read. Then the picture freezes while the sound plays on, or the clock stalls on a full queue. Only DASH reports its interleave today (the subsegment durations from its `sidx`, see [MPEG-DASH](formats.md#mpeg-dash-on-demand)). Every other source keeps 4 s and 256 packets.
+
 **The resume.** After such a pause the clock restarts through the video preroll, and a full layer counts as ready there (`SampleBufferRenderer.prerollSatisfied`).
 
 - Why: the frames already handed over sit at or behind the stopped clock, and nothing more fits until it runs. Without this rule the gate would wait out `AudioOutput.prerollTimeout`, and the clock would stand 2 s longer with the phase already back at `.playing`.

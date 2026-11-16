@@ -81,7 +81,8 @@ enum AudioLookaheadPolicy {
         clockArmed: Bool,
         preArmPacketsFed: Int,
         lastFedAudioPTS: Double,
-        clockSeconds: Double
+        clockSeconds: Double,
+        targetLeadSeconds: Double = targetLeadSeconds
     ) -> Verdict {
         guard clockArmed else {
             // Before arming the clock reads garbage, so lead is meaningless; feed a bounded

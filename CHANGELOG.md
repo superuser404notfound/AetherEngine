@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **DASH on the software path no longer freezes the picture at every subsegment (AE#1079).** The read gate
+  stopped reading at 4 s of audio lead or 256 parked video packets. The DASH source interleaves whole
+  subsegments, so the next video could sit behind a whole audio subsegment, or the next audio behind a
+  whole video one. With 10 s audio and 4 s video subsegments at 60 fps the picture froze for 3 to 5 s at
+  every audio subsegment while the sound played on. With 10 s video and 2 s audio the clock stalled at
+  10 s. The gate is now sized from the subsegment durations in the `sidx`. Other sources are unchanged.
+  Thanks to nulltuple for the analysis and the fixture.
+
 - **A live channel at a low bitrate opens in milliseconds instead of seconds (AE#1076).** The network reader
   held every live read until FFmpeg's whole 256 KB buffer was full. On a 0.5 Mbit/s HDHomeRun sub-channel
   that is 4 s per read: `open_input` took 1.7 to 2.9 s against 0.3 s on the main channels, and during
