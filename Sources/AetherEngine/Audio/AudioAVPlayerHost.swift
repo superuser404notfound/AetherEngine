@@ -527,6 +527,15 @@ final class AudioAVPlayerHost {
         attachTap(gainDB: clamped, item: item, track: track)
     }
 
+    /// visionOS has no external playback on AVPlayer.
+    private var externalPlaybackActive: Bool {
+        #if os(visionOS)
+        false
+        #else
+        avPlayer.isExternalPlaybackActive
+        #endif
+    }
+
     /// What normalization did on the current item; nil when none was asked for and none ran.
     var normalizationReport: NormalizationGainReport? {
         let requested = normalizationGainDB.map(NormalizationGainProcessor.clampedGainDB)
@@ -540,7 +549,7 @@ final class AudioAVPlayerHost {
             case .pending, .running:
                 let ran = (stats?.frames ?? 0) > 0
                 let note: String? = !ran ? "tap has not processed audio yet"
-                    : avPlayer.isExternalPlaybackActive ? "external playback active, the receiver may render the source"
+                    : externalPlaybackActive ? "external playback active, the receiver may render the source"
                     : nil
                 return NormalizationGainReport(requestedDB: requested ?? 0, appliedDB: ran ? tap.context.gainDB : 0,
                                                host: .avPlayer, stage: ran ? .tap : .none, statistics: stats,
