@@ -1041,7 +1041,10 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Master enable for background playback (iOS: PiP + background audio; tvOS: PiP keepalive). Default on.
-    public var backgroundPlaybackEnabled = true
+    /// On iOS it also picks the native AVPlayer's `audiovisualBackgroundPlaybackPolicy` (AE#1080).
+    public var backgroundPlaybackEnabled = true {
+        didSet { nativeHost?.backgroundAudioAllowed = backgroundPlaybackEnabled }
+    }
 
     /// Whether renderer paths activate the shared audio session during load and interruption recovery.
     /// Disable before loading when the host owns activation across several inline players.
