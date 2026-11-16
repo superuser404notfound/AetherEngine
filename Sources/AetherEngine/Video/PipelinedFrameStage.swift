@@ -71,6 +71,10 @@ final class PipelinedFrameStage: @unchecked Sendable {
     static let settleTimeout = 0.5
 
     let depth: Int
+    /// `settleTimeout` unless a test needs `settle()` to outlast a slow runner: the settle test holds a
+    /// frame for a 200 ms window and then releases it, and on a loaded CI runner that took past 0.5 s,
+    /// so `settle()` gave up first and the test read the timeout as an early return.
+    let settleTimeout: Double
     private let deliver: DecodedFrameHandler
     private let begin: (CVPixelBuffer, CMTime, Data?) -> Begun
     private let stamp: @Sendable () -> UInt64
@@ -103,11 +107,13 @@ final class PipelinedFrameStage: @unchecked Sendable {
     /// `deliver` is the decoder's own frame handler; `begin` runs on the submitting thread. `stamp` reads
     /// the generation a frame was decoded under, `isCurrent` says whether a generation is still live.
     init(depth: Int = defaultDepth,
+         settleTimeout: Double = PipelinedFrameStage.settleTimeout,
          stamp: @escaping @Sendable () -> UInt64 = { 0 },
          isCurrent: @escaping @Sendable (UInt64) -> Bool = { _ in true },
          deliver: @escaping DecodedFrameHandler,
          begin: @escaping (CVPixelBuffer, CMTime, Data?) -> Begun) {
         self.depth = max(1, depth)
+        self.settleTimeout = settleTimeout
         self.deliver = deliver
         self.begin = begin
         self.stamp = stamp
@@ -172,10 +178,10 @@ final class PipelinedFrameStage: @unchecked Sendable {
     /// Delivers every frame still in flight, then returns. Call it after a decoder flush or drain, never
     /// from the delivery itself.
     func settle() {
-        if undelivered.wait(timeout: .now() + Self.settleTimeout) == .timedOut {
+        if undelivered.wait(timeout: .now() + settleTimeout) == .timedOut {
             lock.lock(); let left = entries.count; lock.unlock()
             EngineLog.emit("[FramePipeline] settle: \(left) frame(s) still in flight after "
-                           + "\(Self.settleTimeout) s", category: .swPlayback)
+                           + "\(settleTimeout) s", category: .swPlayback)
         }
     }
 

@@ -152,7 +152,9 @@ struct PipelinedFrameStageDeliversInOrderTests {
     @Test func issue957SettleDeliversWhatIsInFlight() async throws {
         let gate = Gate()
         let delivered = Delivered()
-        let pipeline = PipelinedFrameStage(deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
+        // A long timeout: the test checks that settle waits for the release, not how long it waits.
+        let pipeline = PipelinedFrameStage(settleTimeout: 30,
+                                           deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
                                            begin: { _, pts, _ in gate.work(waitingFor: 1, output: Self.frame()) })
         let input = UncheckedSendable(Self.frame())
         let submitted = Self.onThread {
