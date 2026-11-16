@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Changed
+
+- **AVKit's scrub thumbnails near the playhead are ready before the scrub.** With `serveIFramePlaylist`,
+  every thumbnail used to be read from the source when AVKit asked for it, and for HDR also decoded, tone
+  mapped and encoded, so AVKit showed a grey placeholder for a moment per thumbnail. The still ladder now
+  reads every segment within two minutes of the playhead ahead of time while the link is idle, builds the
+  HDR JPEGs with it, and then fills in the rest of the title. Measured on a Mac against an origin with
+  40 ms latency, a prefetched thumbnail is served in about 1 ms against about 75 ms cold. Thanks to Harsh
+  for the report.
+
 ### Fixed
 
 - **Live AC-3 follows a change from 2.0 to 5.1 on the same stream.** A channel with 2.0 ads and a 5.1

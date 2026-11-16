@@ -301,6 +301,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// has nothing in flight. Guarded by `restartLock`, like the reader and builder below.
     private var stillLadderEligible = false
     private var stillLadderSource: (keyframes: IFrameRendition, builder: PreviewKeyframeBuilder)?
+    /// The ladder also fills a served I-frame rendition ahead of AVKit, through the rendition's own
+    /// reader and cache, so a scrub does not wait on a read (and a tone map) per thumbnail. Guarded
+    /// by `restartLock`.
+    private var iFramePrefetchActive = false
     /// Rung bookkeeping, guarded by `stillLadderLock`. `stillLadderComplete` only gates the log line.
     private let stillLadderLock = NSLock()
     private var stillLadderCached: Set<Int> = []
@@ -2709,7 +2713,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if iFrameRenditionVerdict == .served,
            let rendition = makeIFrameRendition(plan: plan, cache: segmentCache,
                                                sourceIsHDR: videoRange != .sdr || dvVariant != .none) {
+            restartLock.lock()
             iFrameRendition = rendition
+            iFramePrefetchActive = generatesBackgroundScrubPreviews
+            restartLock.unlock()
             prov.setIFrameSource(rendition)
             EngineLog.emit("[HLSVideoEngine] i-frame rendition: served segments=\(plan.count) "
                            + "format=\(rendition.format.logName)", category: .session)
@@ -3383,7 +3390,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard !busy, let started else { return }
 
         restartLock.lock()
-        let eligible = stillLadderEligible
+        let prefetching = iFramePrefetchActive
+        let eligible = stillLadderEligible || prefetching
+        let buildsJPEG: Bool
+        if prefetching, case .jpeg = iFrameRendition?.format { buildsJPEG = true } else { buildsJPEG = false }
         let plan = segmentPlan
         let segmentCache = cache
         restartLock.unlock()
@@ -3403,11 +3413,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
             secondsSinceLastRung: sinceLast)
         guard KeyframeStillLadder.linkIsIdle(link) else { return }
 
-        let resident = segmentCache?.residentIndexRanges() ?? []
+        // The rendition reads every I-frame off the source, resident or not, so nothing is skipped
+        // for it.
+        let resident = prefetching ? [] : segmentCache?.residentIndexRanges() ?? []
         let starts = plan.map(\.startSeconds)
+        let window = prefetching ? KeyframeStillLadder.iFrameWindowSegments : 0
         guard let index = KeyframeStillLadder.nextRung(
             segmentStarts: starts, totalSeconds: last.startSeconds + last.durationSeconds,
-            playheadSeconds: playhead, isCached: { skipped.contains($0) },
+            playheadSeconds: playhead, fineWindowSegments: window, isCached: { skipped.contains($0) },
             isResident: { idx in resident.contains { $0.contains(idx) } }) else {
             // Rungs inside the resident window were skipped, so a window that moves on can open
             // the ladder again: this only keeps the line to one per completion.
@@ -3422,6 +3435,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             return
         }
         guard let source = makeStillLadderSource(plan: plan) else { return }
+        // The JPEG fragment cache holds 128, so only the window around the playhead is built ahead.
+        let center = KeyframeStillLadder.planIndex(atOrBefore: playhead, in: starts) ?? 0
+        let buildsFragment = buildsJPEG && abs(index - center) <= window
 
         stillLadderLock.lock()
         stillLadderReadInFlight = true
@@ -3430,7 +3446,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         stillLadderLock.unlock()
         stillLadderQueue.async { [weak self] in
             let started = DispatchTime.now()
-            let payload = source.keyframes.keyframePayload(at: index)
+            let payload = source.keyframes.prefetch(at: index, buildsFragment: buildsFragment)
             guard let self else { return }
             let ms = Self.seconds(from: started, to: .now()) * 1000
             self.stillLadderLock.lock()
@@ -3460,7 +3476,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard !cached.isEmpty else { return nil }
         restartLock.lock()
         let plan = segmentPlan
-        let source = stillLadderSource
+        // A rendition-only ladder has no preview builder that is right for this session.
+        let source = stillLadderEligible ? stillLadderSource : nil
         restartLock.unlock()
         guard let source,
               let index = KeyframeStillLadder.answeringRung(
@@ -3486,7 +3503,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         restartLock.lock()
         defer { restartLock.unlock() }
         if let stillLadderSource { return stillLadderSource }
-        guard stillLadderEligible, let cfg = savedVideoConfig, !plan.isEmpty,
+        guard stillLadderEligible || iFramePrefetchActive, let cfg = savedVideoConfig, !plan.isEmpty,
               let directory = cache?.sessionDir.appendingPathComponent("still-ladder", isDirectory: true)
         else { return nil }
         let staging = directory.appendingPathComponent("staging", isDirectory: true)
@@ -3505,6 +3522,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
                                   durationSeconds: $0.durationSeconds)
         }
         let url = sourceURL
+        if iFramePrefetchActive, let rendition = iFrameRendition {
+            let made = (rendition, builder)
+            stillLadderSource = made
+            EngineLog.emit("[StillLadder] reading through the I-frame rendition (segments=\(plan.count), "
+                           + "window=\(KeyframeStillLadder.iFrameWindowSegments), format=\(rendition.format.logName))",
+                           category: .session)
+            return made
+        }
+        guard stillLadderEligible else { return nil }
         let keyframes = makeKeyframeRendition(
             config: cfg, entries: entries,
             cache: IFramePayloadCache(directory: directory.appendingPathComponent("payloads", isDirectory: true),
@@ -3621,6 +3647,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let ladder = stillLadderSource
         stillLadderSource = nil
         stillLadderEligible = false
+        iFramePrefetchActive = false
         closeUnusedCustomIFrameReader()
         savedVideoConfig = nil
         savedAudioConfig = nil
@@ -3741,7 +3768,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         return makeKeyframeRendition(
             config: cfg, entries: entries,
-            cache: IFramePayloadCache(directory: directory.appendingPathComponent("payloads", isDirectory: true)),
+            // With the ladder prefetching into it, this cache holds the rungs too, and the ladder then
+            // keeps no cache of its own.
+            cache: IFramePayloadCache(directory: directory.appendingPathComponent("payloads", isDirectory: true),
+                                      byteLimit: generatesBackgroundScrubPreviews
+                                          ? KeyframeStillLadder.payloadByteLimit : 64 * 1024 * 1024),
             format: format, buildFragment: buildFragment, custom: custom)
     }
 
@@ -3807,6 +3838,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private func tearDownIFrameRendition() {
         provider?.setIFrameSource(nil)
         guard let rendition = iFrameRendition else { return }
+        // The ladder read into this rendition's cache, which the shutdown deletes; it starts over on
+        // a reader of its own.
+        restartLock.lock()
+        iFramePrefetchActive = false
+        let ladderShared = stillLadderSource?.keyframes === rendition
+        if ladderShared { stillLadderSource = nil }
+        restartLock.unlock()
+        if ladderShared {
+            stillLadderLock.lock()
+            stillLadderCached.removeAll()
+            stillLadderFailures.removeAll()
+            stillLadderLock.unlock()
+        }
         DispatchQueue.global(qos: .utility).async { rendition.shutdown() }
     }
 

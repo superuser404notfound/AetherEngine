@@ -2375,7 +2375,7 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
    - `disk` opts into temporary files, with the existing safeguards for the volume and the multi-session budget. Disk can compete with tvOS flash I/O; choosing it is no performance recommendation.
    - `memory` uses the existing bounded purgeable-memory store. Played history in memory may disappear and then need a source seek.
    - Local files that bypass packet caching, live DVR, and native HLS are unchanged.
-4. **`generatesBackgroundScrubPreviews`.** Set false when the host shows no scrub previews; then no ladder step or ladder side reader is created. It is independent of `serveIFramePlaylist`. It does not turn off on-demand snapshots, held pictures across an item swap, or Dolby Vision compositor/reshaping. When true, all existing source eligibility and request-budget checks still apply.
+4. **`generatesBackgroundScrubPreviews`.** Set false when the host shows no scrub previews; then no ladder step or ladder side reader is created. With `serveIFramePlaylist` it also stops the rendition's prefetch (see [`serveIFramePlaylist`](#serveiframeplaylist)), so AVKit's thumbnails are then read only when AVKit asks. It does not turn off on-demand snapshots, held pictures across an item swap, or Dolby Vision compositor/reshaping. When true, all existing source eligibility and request-budget checks still apply.
 
 ### Live
 
@@ -2631,6 +2631,7 @@ Serves an I-frame rendition next to the master, so a stock `AVPlayerViewControll
 
 - One still per segment. An SDR source gets its own keyframes at full resolution. An HDR10, HLG or Dolby Vision source gets tone-mapped 640-pixel Motion JPEG stills, because AVKit shows no scrub thumbnail from a PQ or Dolby Vision keyframe.
 - Opens a second reader on the source.
+- Reads ahead while the link is idle. Every segment within 30 of the playhead's is read first, nearest first, then the coarse rungs of the still ladder. An HDR source's JPEG is built at the same time, so a thumbnail near the playhead is answered from the cache instead of after a read and a tone map. The prefetch runs under the still ladder's rules (15 s after the start, 30 s buffered, nothing else in flight on the origin, one read every 2 s) and stops with `generatesBackgroundScrubPreviews = false`. The ladder then shares the rendition's reader and cache instead of opening its own. The log says `[StillLadder] reading through the I-frame rendition`.
 - It is absent in these cases, and one log line says why:
   - live
   - sources whose segment boundaries are not keyframes (`planNotKeyframeAligned`)

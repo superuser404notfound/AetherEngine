@@ -773,7 +773,7 @@ if player.supportsCacheBackedStills {
 
 - Show the preview only when `supportsCacheBackedStills` is true.
 - A nil means "no image for this position yet", not an error. Show the time only.
-- A host on `AVPlayerViewController` sets `LoadOptions(serveIFramePlaylist: true)` instead and gets AVKit's own thumbnails.
+- A host on `AVPlayerViewController` sets `LoadOptions(serveIFramePlaylist: true)` instead and gets AVKit's own thumbnails. The engine reads the ones around the playhead ahead of time, so a scrub does not wait on each of them.
 - A host that shows no previews at all sets `generatesBackgroundScrubPreviews: false`. The engine then builds no set of preview images in idle time.
 
 Details in [api.md › Stills and thumbnails](api.md#stills-and-thumbnails).

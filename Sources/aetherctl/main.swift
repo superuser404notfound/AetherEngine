@@ -1119,6 +1119,9 @@ if first == "play" {
     // AE#956: LoadOptions.skipsContainerAttachments. Pair it with a throttled origin and an MKV that
     // carries fonts to see the open stop paying for them.
     let skipAttachments = takeFlag("--skip-attachments", from: &rest)
+    // AE#682: LoadOptions.serveIFramePlaylist on a full session, where the still ladder runs and
+    // fills the rendition ahead of AVKit (`[StillLadder] reading through the I-frame rendition`).
+    let playServesIFrames = takeFlag("--iframes", from: &rest)
     // #460: `--reload-applying <key>=<value>`, repeatable, with one shared delay. The delay is a
     // separate flag rather than teletext's `@ms` suffix because a header value can carry an `@`.
     // Default +20 s for the same reason the teletext switch uses it: the correction has to land on
@@ -1257,6 +1260,7 @@ if first == "play" {
                  assertDolbyVision: playAssertDV,
                  preserveASSMarkup: preserveASSMarkup,
                  skipAttachments: skipAttachments,
+                 serveIFrames: playServesIFrames,
                  dolbyVisionHandling: playDVHandling,
                  preferDualLayerDolbyVision: playPreferDualLayerDV,
                  dualLayerRoute: playFelOutput ? .avPlayerOutput : .softwareHost,
