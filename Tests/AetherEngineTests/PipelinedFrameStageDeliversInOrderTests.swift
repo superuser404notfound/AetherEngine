@@ -5,8 +5,9 @@ import CoreVideo
 import Metal
 @testable import AetherEngine
 
-/// AE#957: the GPU stages keep two frames in flight (`PipelinedFrameStage`). Each GPU frame here is an
-/// empty command buffer that waits on a shared event, so the test decides when it completes. Calls that
+/// AE#957: the GPU stages keep two frames in flight (`PipelinedFrameStage`). Each held frame here is a
+/// `.later` step the test resumes with an empty command buffer, so the test decides when a frame can
+/// complete. (A command buffer waiting on a shared event did not hold on GitHub's runner VMs.) Calls that
 /// block (`submit` at the depth, `settle`) run on a thread of their own, never the test's.
 @Suite("Pipelined frame stage delivers in order (AE#957)", .serialized, .timeLimit(.minutes(3)),
        .enabled(if: MTLCreateSystemDefaultDevice() != nil))
@@ -20,24 +21,23 @@ struct PipelinedFrameStageDeliversInOrderTests {
         var upscaled: [Bool] { lock.lock(); defer { lock.unlock() }; return items.map(\.upscaled) }
     }
 
-    /// A GPU frame held until `release(value)`; `complete` hands back `output` and records the hold time.
+    /// A GPU frame held until `release(value)`: a `.later` step that the release resumes with an empty
+    /// command buffer, in submit order. `complete` hands back `output` and records the hold time.
     private final class Gate: @unchecked Sendable {
-        let device: MTLDevice
         let queue: MTLCommandQueue
-        let event: MTLSharedEvent
-        init() {
-            device = MTLCreateSystemDefaultDevice()!
-            queue = device.makeCommandQueue()!
-            event = device.makeSharedEvent()!
-        }
+        init() { queue = MTLCreateSystemDefaultDevice()!.makeCommandQueue()! }
         private let lock = NSLock()
         private var holds: [Double] = []
+        private var released: UInt64 = 0
+        private var waiting: [(value: UInt64, next: PipelinedFrameStage.Begun,
+                               resume: @Sendable (PipelinedFrameStage.Begun) -> Void)] = []
         var holdTimes: [Double] { lock.lock(); defer { lock.unlock() }; return holds }
 
-        func work(waitingFor value: UInt64, output: CVPixelBuffer, fails: Bool = false) -> PipelinedFrameStage.Begun {
-            let cb = queue.makeCommandBuffer()!
-            cb.encodeWaitForEvent(event, value: value)
-            let work = EncodedGPUWork(commandBuffer: cb, keepAlive: ()) { _, _ in NSError(domain: "test", code: 1) }
+        /// GPU work that completes as soon as it is committed.
+        func gpu(output: CVPixelBuffer, fails: Bool = false) -> PipelinedFrameStage.Begun {
+            let work = EncodedGPUWork(commandBuffer: queue.makeCommandBuffer()!, keepAlive: ()) { _, _ in
+                NSError(domain: "test", code: 1)
+            }
             let out = UncheckedSendable(output)
             return .gpu(work) { [self] hold in
                 lock.lock(); holds.append(hold); lock.unlock()
@@ -45,7 +45,24 @@ struct PipelinedFrameStageDeliversInOrderTests {
             }
         }
 
-        func release(_ value: UInt64) { event.signaledValue = value }
+        func work(waitingFor value: UInt64, output: CVPixelBuffer, fails: Bool = false) -> PipelinedFrameStage.Begun {
+            let next = gpu(output: output, fails: fails)
+            return .later { [self] resume in
+                lock.lock()
+                guard value > released else { lock.unlock(); resume(next); return }
+                waiting.append((value, next, resume))
+                lock.unlock()
+            }
+        }
+
+        func release(_ value: UInt64) {
+            lock.lock()
+            released = max(released, value)
+            let ready = waiting.filter { $0.value <= value }
+            waiting.removeAll { $0.value <= value }
+            lock.unlock()
+            for w in ready { w.resume(w.next) }
+        }
     }
 
     private static func frame() -> CVPixelBuffer {
@@ -207,8 +224,7 @@ struct PipelinedFrameStageDeliversInOrderTests {
         try await waitFor { submitted.isSet }
         #expect(pipeline.inFlight == 2 && delivered.pts.isEmpty)
         // The step answers from another thread with GPU work, which completes in turn.
-        resume.call(gate.work(waitingFor: 1, output: upscaled.value))
-        gate.release(1)
+        resume.call(gate.gpu(output: upscaled.value))
         try await waitFor { delivered.pts.count == 2 }
         #expect(delivered.pts == [1, 2])
         #expect(delivered.upscaled == [true, false])
