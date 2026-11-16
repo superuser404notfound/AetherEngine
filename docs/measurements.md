@@ -455,6 +455,43 @@ Current rule: [architecture-software.md › HDR10 tone map](architecture-softwar
 - The output frames and the format description carried the stage's metadata: mastering peak 600, MaxCLL / MaxFALL 600 / 400.
 - In playback the chain's GPU time is about 1.5 ms above the benchmark's, with the decoder and the display on the same GPU.
 
+### Upscale stage on the A12 (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2.1) on 2026-11-15 with `AetherEngine.runPerFrameBenchmarks`, 300 runs per case, each to a 3840x2160 display. The answer first: **on the A12 only MetalFX alone and the line-art upscale rung fit a 23.976 fps frame, and nothing fits 59.94.** VT super resolution does not run there at all.
+
+| Case | Plan | Wall median (us) | GPU median (us) |
+|---|---|---|---|
+| `upscale: 720p to 2160p, MetalFX only` | 1280x720 -> MetalFX 3840x2160 | 19593 | 17154 |
+| `upscale: 1080p to 2160p, line art` | 1920x1080 -> line art 3840x2160 | 18920 | 16697 |
+| `upscale: 1080p to 2160p, line art with restore` | the same, with restore and clamp | 25239 | 22799 |
+| `upscale: 480p` and `720p to 2160p, automatic` | ML first | skipped | skipped |
+
+- The stage's budget is 90% of the frame interval: 37.5 ms at 23.976, 15.0 ms at 59.94. All three cases that ran fit 23.976; none fits 59.94.
+- VT super resolution reports support on the A12 (it offers 1.5x and 2x at 720p), then fails every pass with `VCPFrameSuperResolutionProcessor failed`, also after 10 s of retries. GitHub's macOS runner VMs behave the same way (`FrameUpscalerTests` gates its ML tests on a real pass).
+- Before the fix, playback of a 720p SDR clip with `upscalesLowResolutionVideo` failed three frames, switched the stage off and reloaded on the native path: no upscaling at all. Now the stage drops the ML pass and carries on with MetalFX alone ([architecture-software.md › Low-resolution upscaling](architecture-software.md#low-resolution-upscaling)). The same 20 s clip at 23.976 fps then played upscaled to the end, 0 dropped frames, at 28.9 to 30.3 ms per frame (26.2 to 27.6 ms GPU) over 48-frame windows.
+- Playback costs half again what the bench measures (29.5 against 19.6 ms): the GPU lowers its clock under a regular load that leaves it idle part of each frame, as `FrameUpscaler.budgetFraction` describes.
+- The frame chain cases in the same run matched the earlier A12 numbers within 3%.
+
+### Two frames in flight on the A12 (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2.1) on 2026-11-15, in playback through the HDR10 probe host. The answer first: **with two frames in flight, the upscaler holds the decoder's thread a third as long, and the GPU time per frame does not change.**
+
+Current rule: [architecture-software.md › Two frames in flight on the GPU](architecture-software.md#two-frames-in-flight-on-the-gpu).
+
+**Why two.** An experiment on the same device timed MetalFX 720p to 2160p back to back: 17.7 ms per frame one at a time, 9.9 ms with two command buffers in flight. A third gave nothing more.
+
+**Playback.** The 20 s 720p SDR clip at 23.976 fps with `upscalesLowResolutionVideo`, MetalFX alone (the device refuses VT super resolution), means of 48-frame windows:
+
+| Build | Decoder's thread per frame | GPU per frame | Dropped frames |
+|---|---|---|---|
+| One frame at a time | 28.9 to 30.3 ms | 26.2 to 27.6 ms | 0 |
+| Two in flight | 9.0 to 10.8 ms | 23.8 to 28.1 ms | 0 |
+
+- Encoding takes about 1 ms. The rest of the 9 to 10 ms is waiting for a free slot, when the decoder runs ahead.
+- The GPU time is the same, so the frames do not get cheaper. The decoder's thread is free sooner, and the budget, which counts that time, is a quarter used instead of three quarters.
+- A seek to 3 s while playing and a seek to 12 s while paused both landed on their target, the paused one with its frame on screen. The clip played to the end with 0 dropped frames and no `settle` timeout.
+- The picture processing tone map (1000 to 600 nit) on the 4K 23.976 fps pattern held the decoder's thread 1.3 to 1.5 ms per frame, 0 dropped frames. 4K60 is not measured through the pipeline: the 4K60 test clip declares no HDR10 metadata, so the route is not taken.
+
 ### Software channel layout mismatch
 
 Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.

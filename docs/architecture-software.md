@@ -264,13 +264,14 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 - `.lineArt`: Anime4K's 2x upscale and restore networks as Metal compute kernels (`LineArtShaderSource`), then a bilinear resample.
 - The stage returns nil whenever the original frame should go out instead. Its VideoToolbox session is built off the decode thread (about 4 s cold on Apple TV), and frames pass through unchanged until it is ready.
 
-**Budget.** Over a 48-frame window the stage's mean time must stay under 90% of the frame interval.
+**Budget.** Over a 48-frame window the stage's mean time must stay under 90% of the frame interval. The time counted is how long each frame holds the decoder's thread ([two frames in flight](#two-frames-in-flight-on-the-gpu)).
 
 - An overrun first drops one rung: MetalFX after an ML pass, or the line-art restore pass and then line art itself for the automatic scaler.
-- A further overrun, or three failures in a row, disables the stage for the session.
+- Three ML failures in a row drop the VideoToolbox pass: MetalFX alone to the same target (AE#957). If the pass never delivered a frame, `MLRefusalMemory` stops offering ML factors for the process. An A12 Apple TV on tvOS 27.2 reports VT super resolution and fails every pass ([measurements](measurements.md#upscale-stage-on-the-a12-ae957)).
+- A further overrun, or three failures in a row of anything else, disables the stage for the session.
 - If only the stage had put a URL VOD session on the software path, the session is then rebuilt on the native path (`upscaleDisableReturnsToNative`).
 
-`$activeUpscale` publishes what runs. See [api.md, `upscalesLowResolutionVideo`](api.md#upscaleslowresolutionvideo).
+`$activeUpscale` publishes what runs. See [api.md, `upscalesLowResolutionVideo`](api.md#upscaleslowresolutionvideo). To time each plan on a device, [`aetherctl bench`](cli.md#bench) runs the real stage (`UpscaleBenchmarkStage`) for 480p and 720p automatic, 720p MetalFX only, and both line-art rungs at 1080p.
 
 **The frame chain** (`FrameChain`, AE#957) is what the line-art scaler runs on. It turns the 4:2:0 frame into a half-float RGB texture, runs its stages, and turns the result back into the input's format at the target size, all in one command buffer.
 
@@ -325,7 +326,7 @@ A title whose processing gave up earlier in this process (`VideoProcessingFailur
 - A frame it does not apply to (not PQ, not 4:2:0, a peak at or below the target) goes out as decoded.
 - Upscaling and processing never both take a source: one wants SDR, the other HDR10.
 
-**Budget.** The upscaler's: over a 48-frame window the mean wall time must stay under 90% of the frame interval. There is no lighter rung, so an overrun, three failures in a row, or a frame carrying HDR10+ disables it for the session. A display applies HDR10+ to the picture it receives, so a mapped picture would be mapped twice.
+**Budget.** The upscaler's: over a 48-frame window the mean time a frame holds the decoder's thread must stay under 90% of the frame interval. There is no lighter rung, so an overrun, three failures in a row, or a frame carrying HDR10+ disables it for the session. A display applies HDR10+ to the picture it receives, so a mapped picture would be mapped twice.
 
 - If only the processing had put a URL VOD session on the software path, the session is then rebuilt on the native path, by the upscaler's rule (`upscaleDisableReturnsToNative`).
 
@@ -354,6 +355,27 @@ See [dolby-vision-fel.md, section 7](dolby-vision-fel.md#7-curve-fold-on-the-nat
   - The route stands down when AirPlay or an external display takes the picture.
 
 See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.4 The AVPlayer-output route](dolby-vision-fel.md#524-the-avplayer-output-route).
+
+### Two frames in flight on the GPU
+
+`PipelinedFrameStage` (AE#957) runs the per-frame GPU stages: the upscaler and the picture processing. It keeps up to two frames on the GPU at once, so the GPU does not sit idle between one frame and the next.
+
+- The decoder's frame handler encodes the frame's GPU work, commits it and returns. The frame goes to the renderer when its work has completed.
+- Frames leave in the order they were decoded. A frame that needs no GPU waits for the frames ahead of it. With nothing ahead, it goes out on the decoder's thread, as before.
+- The handler waits while two frames are undelivered. That is the back-pressure: the decoder never runs more than two frames ahead of the renderer.
+- After every decoder flush or drain (seek, error recovery, end of stream, a live seam) and in `stop()`, the host calls `settle()`. The frames still on the GPU reach the renderer before it flushes. `settle()` gives up after 0.5 s and logs `[FramePipeline] settle: ...`, because seek and stop call it on the main actor.
+- Each frame carries the generation its packet was read under, taken when the decoder hands it over, and goes out only while that generation is live (the AE#491 check). At delivery the demux loop may already read packets of the new position, so a check made only then would let a frame from before the seek through. A frame stale at hand-over never reaches the GPU.
+- A frame whose GPU work failed goes out as decoded.
+- The budget counts the time a frame holds the decoder's thread: waiting for a free slot, then encoding. In steady state that is the stage's cost per frame.
+- A frame that was in flight when its stage was rebuilt (an overrun rung, the ML fallback) is still delivered, but does not count against the new stage.
+- A completion only queues the frame's times, and the frame goes out at once. The stage counts them at its next frame, on the decoder's thread, so a completion never waits for the stage's lock.
+- The VideoToolbox super resolution pass runs off the decoder's thread too. The decoder's thread starts the pass and moves on. When VT answers, MetalFX is encoded and committed from VT's callback, so the next frame's ML pass (on the Neural Engine) overlaps this frame's MetalFX work (on the GPU).
+  - One ML pass at a time. The low-latency scaler numbers its frames, and the next frame's MetalFX work must be committed after this one's. So the decoder's thread waits for the pass before, and that wait counts in the budget: with ML slower than MetalFX, the budget measures the ML pass.
+  - The ML timeout (three frame intervals, at least 50 ms) is a timer. A pass that answers late keeps its buffers out of the pools until it does, as before.
+  - A stage replaced while its pass ran (the MetalFX-only fallback, a rebuild) delivers that frame as decoded.
+- `FrameChain.encode` and the upscaler's `encode` return the work uncommitted, because Metal takes a completion handler only before the commit. The synchronous `process` and `upscale` (tests, the probe) commit and wait; `upscale` also waits for an off-thread ML pass. The benchmark still runs the ML pass in line, so its wall time is one frame start to finish.
+
+On the A12, 720p to 2160p through MetalFX holds the decoder's thread about 9.5 ms per frame instead of 29.5 ms. Numbers: [measurements.md › Two frames in flight on the A12](measurements.md#two-frames-in-flight-on-the-a12-ae957).
 
 ### HDR10 pass-through probe
 

@@ -11,6 +11,8 @@
 #   DEVICE=... SEQ=control ./run_tv.sh          the pulse's control: AVPlayer with the 1000 and the 4000
 #                                               nit clip, steady and alternating, then the engine's pulse
 #   DEVICE=... SEQ=pace ./run_tv.sh             frame pacing: software vs chain at 23.976 and 59.94
+#   DEVICE=... SEQ=bench ./run_tv.sh            the per-frame benchmark on the device (ITER, default 300);
+#                                               the report is pulled next to the log as JSON
 #
 # Required: DEVICE, the Apple TV's name or identifier as `xcrun devicectl list devices` shows it. Use
 #           the identifier when another device on the network has the same name.
@@ -63,7 +65,19 @@ case "$SEQ" in
     ARMS="${SETUP_ARM}P|avplayer|$B/pattern_24.mp4|secs=15,P4|avplayer|$B/pattern_24_m4000.mp4|secs=15,AP|avpulse|$B/pattern_24.mp4|secs=48,SP|pulse|$B/pattern_24.mp4|secs=30" ;;
   pace)
     ARMS="S24|software|$B/pattern_24.mp4|secs=25,C24|chain|$B/pattern_24.mp4|secs=25,S60|software|$B/pattern_60.mp4|secs=25,C60|chain|$B/pattern_60.mp4|secs=25" ;;
-  *) echo "unknown SEQ=$SEQ (main|pulse|cp|control|pace)"; exit 1 ;;
+  bench)
+    # The per-frame benchmark (aetherctl bench) on the device; secs is the iteration count. Plays nothing.
+    ARMS="B|bench|$B/pattern_24.mp4|secs=${ITER:-300}" ;;
+  upscale)
+    # Playback with upscalesLowResolutionVideo on an SDR 720p clip (out/sdr_720p.mp4).
+    ARMS="U|upscale|$B/sdr_720p.mp4|secs=20" ;;
+  upscaleseek)
+    # Upscaled playback with a seek while playing, a seek while paused, then on to the end.
+    ARMS="US|upscaleseek|$B/sdr_720p.mp4|secs=30" ;;
+  tonemap)
+    # The engine's own tone map (LoadOptions.videoProcessing, 600 nit) on the 1000 nit pattern (the 4K60 clip declares no metadata, so the engine declines it).
+    ARMS="TM|tonemap|$B/pattern_24.mp4|secs=25" ;;
+  *) echo "unknown SEQ=$SEQ (main|pulse|cp|control|pace|bench|upscale|upscaleseek|tonemap)"; exit 1 ;;
 esac
 # Only the clips this sequence plays have to exist.
 # avpulse also plays the clip's _m4000 twin.
@@ -107,6 +121,11 @@ xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --
 xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer \
   --domain-identifier $BUNDLE --source Library/Caches/hdr10-log.txt --destination "${LOG%.log}.app.log" \
   >/dev/null 2>&1 || echo "(could not pull the app log)"
+if [[ "$SEQ" == bench ]]; then
+  xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer \
+    --domain-identifier $BUNDLE --source Library/Caches/bench.json --destination "${LOG%.log}.json" \
+    >/dev/null 2>&1 && echo "report: ${LOG%.log}.json" || echo "(could not pull bench.json)"
+fi
 echo "log: $LOG (+ ${LOG%.log}.app.log)"
 echo "--- what the engine attached and timed, and each arm's summary:"
 grep -h -E "\[HDR10Probe\]|output metadata over|HDR10 static metadata|summary" "${LOG%.log}.app.log" 2>/dev/null \

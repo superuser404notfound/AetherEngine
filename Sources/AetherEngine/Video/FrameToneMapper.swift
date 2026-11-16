@@ -6,8 +6,9 @@ import CoreVideo
 import Metal
 
 /// The per-frame picture processing stage (#957): a `FrameChain` with one `ToneMapStage`, which the chain
-/// fuses into its one-kernel round trip. Synchronous; `process` returns nil whenever the caller should
-/// deliver the original frame.
+/// fuses into its one-kernel round trip. Playback runs it through a `PipelinedFrameStage` (`begin`), two
+/// frames on the GPU at once; `process` is the same frame start to finish on the calling thread, nil
+/// whenever the caller should deliver the original frame.
 ///
 /// The curve starts from the frame's own HDR10 metadata and falls back to the plan's (the source's
 /// declaration) for a frame that carries none. A frame the stage does not apply to (not PQ, not 4:2:0, a
@@ -104,13 +105,27 @@ final class FrameToneMapper: @unchecked Sendable {
     }
 
     func process(_ input: CVPixelBuffer, pts: CMTime, carriesHDR10Plus: Bool) -> CVPixelBuffer? {
+        let start = DispatchTime.now().uptimeNanoseconds
+        switch begin(input, pts: pts, carriesHDR10Plus: carriesHDR10Plus) {
+        case .passThrough, .later: return nil
+        case let .ready(output): return output
+        case let .gpu(work, complete):
+            work.commandBuffer.commit()
+            work.commandBuffer.waitUntilCompleted()
+            return complete(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+        }
+    }
+
+    /// `process` without the commit and the wait (AE#957). The completion records the frame with the time
+    /// it held the caller's thread, which the overrun check compares with the frame interval.
+    func begin(_ input: CVPixelBuffer, pts: CMTime, carriesHDR10Plus: Bool) -> PipelinedFrameStage.Begun {
         processLock.lock()
         defer { processLock.unlock() }
-        guard !isDisabled else { return nil }
+        guard !isDisabled else { return .passThrough }
         if carriesHDR10Plus {
             disable(reason: "HDR10+ metadata in the stream (the display would map the mapped picture again)",
                     cause: .hdr10Plus)
-            return nil
+            return .passThrough
         }
         if pts.isNumeric {
             recentPTS = FrameUpscaler.recentPTS(recentPTS, adding: pts.seconds)
@@ -120,36 +135,53 @@ final class FrameToneMapper: @unchecked Sendable {
         let format = CVPixelBufferGetPixelFormatType(input)
         guard FrameChain.supportedFormats.contains(format) else {
             notePassThrough("pixel format \(format) is not 8 or 10-bit 4:2:0")
-            return nil
+            return .passThrough
         }
         let transfer = CVBufferCopyAttachment(input, kCVImageBufferTransferFunctionKey, nil) as? String
         guard transfer == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String else {
             notePassThrough("the frame is not PQ")
-            return nil
+            return .passThrough
         }
         let picture = FrameUpscaler.pictureRegion(of: input)
         guard picture.width % 2 == 0, picture.height % 2 == 0 else {
             notePassThrough("picture \(picture.width)x\(picture.height) is odd")
-            return nil
+            return .passThrough
         }
         let source = HDR10StaticMetadata(
             masteringDisplayColorVolume: CVBufferCopyAttachment(input, kCVImageBufferMasteringDisplayColorVolumeKey, nil) as? Data,
             contentLightLevel: CVBufferCopyAttachment(input, kCVImageBufferContentLightLevelInfoKey, nil) as? Data)
             ?? plan.source
 
-        let start = DispatchTime.now().uptimeNanoseconds
         do {
-            guard let built = try chain(for: source, width: picture.width, height: picture.height) else { return nil }
-            let (output, _) = try built.chain.process(input, picture: picture)
+            guard let built = try chain(for: source, width: picture.width, height: picture.height) else {
+                return .passThrough
+            }
+            let (output, work) = try built.chain.encode(input, picture: picture)
             built.chain.attach(from: input, to: output)
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
             lastPassThroughNote = nil
-            recordSuccess(ms, status: built.status)
-            return output
+            let delivered = UncheckedSendable(output)
+            let status = built.status
+            return .gpu(work) { [weak self] holdMs in
+                self?.complete(work, output: delivered.value, status: status, holdMs: holdMs)
+            }
         } catch {
             recordFailure(error)
+            return .passThrough
+        }
+    }
+
+    private func complete(_ work: EncodedGPUWork, output: CVPixelBuffer, status: VideoProcessingStatus,
+                          holdMs: Double) -> CVPixelBuffer? {
+        processLock.lock()
+        defer { processLock.unlock() }
+        do {
+            _ = try work.finish()
+        } catch {
+            if !isDisabled { recordFailure(error) }
             return nil
         }
+        if !isDisabled { recordSuccess(holdMs, status: status) }
+        return output
     }
 
     /// The chain for `source` at this size, built when either changed; nil (and a pass-through note) when

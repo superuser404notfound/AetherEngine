@@ -14,6 +14,19 @@ private enum UpscalerGate {
         return MTLCreateSystemDefaultDevice() != nil
     }
 
+    /// AE#957: the A12's plan (720p, VT 1.5x, then MetalFX to 2160p) builds: a VT session and MetalFX.
+    /// Enough for the tests that fake or fail every ML pass. GitHub's runner VMs report support and still
+    /// refuse some sessions ("Fail to create effect configuration" for 2x at 720p), so building decides.
+    static let mlStageBuilds: Bool = {
+        guard #available(macOS 26, iOS 26, tvOS 26, visionOS 26, *), gpuAvailable,
+              VTLowLatencySuperResolutionScalerConfiguration.isSupported,
+              let plan = UpscaleRouteDecision.makePlan(
+                  source: SourceGeometry(width: 1280, height: 720, sarNum: 1, sarDen: 1),
+                  display: CGSize(width: 3840, height: 2160), mlScaleFactors: { _, _ in [1.5] })
+        else { return false }
+        return FrameUpscaler(plan: plan, frameInterval: 1.0 / 24) != nil
+    }()
+
     /// `isSupported` is true on GitHub's macOS runner VMs, yet every real ML pass fails there, so one
     /// real pass decides.
     static let mlAvailable: Bool = {
@@ -42,7 +55,10 @@ struct FrameUpscalerTests {
     private static let uhd = CGSize(width: 3840, height: 2160)
 
     init() {
-        if #available(macOS 26, iOS 26, tvOS 26, visionOS 26, *) { FrameUpscaler.resetMetalFXCostMemoryForTesting() }
+        if #available(macOS 26, iOS 26, tvOS 26, visionOS 26, *) {
+            FrameUpscaler.resetMetalFXCostMemoryForTesting()
+            FrameUpscaler.resetMLRefusalMemoryForTesting()
+        }
     }
 
     private func plan(_ w: Int, _ h: Int, sar: (Int, Int) = (1, 1), display: CGSize = uhd, ml: [Float]) throws -> UpscalePlan {
@@ -560,10 +576,85 @@ struct FrameUpscalerTests {
         up.mlSubmitOverride = nil
         #expect(up.upscale(input) != nil)
 
+        // Any other ML error, three in a row, drops the ML pass (AE#957): MetalFX alone to the target.
+        // The pass worked before, so the device is not marked as refusing it.
         up.mlSubmitOverride = { _, done in done(NSError(domain: NSCocoaErrorDomain, code: 1)) }
         for _ in 0..<3 { #expect(up.upscale(input) == nil) }
-        #expect(up.isDisabled)
+        #expect(!up.isDisabled && up.isDegraded && up.plan.mlScale == nil)
+        #expect(!MLRefusalMemory.refused)
     }
+
+    /// AE#957: an A12 Apple TV on tvOS 27.2 reports VT super resolution and fails every pass. Three
+    /// failures switch the stage to MetalFX alone, from the source to the same target, and the process
+    /// stops offering ML factors, so the next plan starts without the pass.
+    @Test(.enabled(if: UpscalerGate.mlStageBuilds))
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957RefusedMLPassFallsBackToMetalFXOnly() throws {
+        defer { FrameUpscaler.resetMLRefusalMemoryForTesting() }
+        let p = try plan(1280, 720, ml: [1.5])
+        #expect(p.mlScale == 1.5 && p.needsMetalFX)
+        let up = try upscaler(p)
+        let events = EventLog()
+        up.onEvent = { events.add($0) }
+        let input = try TestFrames.nv12(1280, 720)
+        let refused = NSError(domain: "com.apple.VideoProcessing", code: -1)
+        up.mlSubmitOverride = { _, done in done(refused) }
+        for _ in 0..<FrameUpscaler.maxConsecutiveFailures { #expect(up.upscale(input) == nil) }
+        #expect(!up.isDisabled && up.isDegraded)
+        #expect(up.plan == FrameUpscaler.metalFXOnlyPlan(p))
+        #expect(up.plan.mlScale == nil && up.plan.targetWidth == 3840 && up.plan.targetHeight == 2160)
+        #expect(MLRefusalMemory.refused)
+        #expect(FrameUpscaler.mlScaleFactors(1280, 720).isEmpty)
+        #expect(events.degradedPlans == [FrameUpscaler.metalFXOnlyPlan(p)])
+        for _ in 0..<5 {
+            let out = try #require(up.upscale(input))
+            #expect(CVPixelBufferGetWidth(out) == 3840 && CVPixelBufferGetHeight(out) == 2160)
+        }
+        #expect(up.stats.failures == FrameUpscaler.maxConsecutiveFailures && up.stats.framesUpscaled == 5)
+    }
+
+    /// A stage already on its ML-only rung, because MetalFX overran here before, has nothing to fall back
+    /// to: failing ML passes still switch it off.
+    @Test(.enabled(if: UpscalerGate.mlStageBuilds))
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957RefusedMLPassDisablesWhenMetalFXOverranBefore() throws {
+        defer { FrameUpscaler.resetMLRefusalMemoryForTesting() }
+        MetalFXCostMemory.record(.init(width: 3840, height: 2160, frameInterval: 1.0 / 24, meanMs: 40))
+        let up = try upscaler(try plan(1280, 720, ml: [1.5]), frameInterval: 1.0 / 24)
+        up.mlSubmitOverride = { _, done in done(NSError(domain: "com.apple.VideoProcessing", code: -1)) }
+        let input = try TestFrames.nv12(1280, 720)
+        for _ in 0..<FrameUpscaler.maxConsecutiveFailures { _ = up.upscale(input) }
+        #expect(up.isDisabled && up.isDegraded)
+        #expect(!MLRefusalMemory.refused)
+    }
+    /// AE#957: through the pipeline the ML pass runs off the decoder's thread. `submit` returns before the
+    /// pass answers, the next frame's pass starts after it, and the frames leave upscaled and in order.
+    /// The fake pass answers after 100 ms without writing pixels, so a VM whose VT refuses every pass runs it.
+    @Test(.enabled(if: UpscalerGate.mlStageBuilds))
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957TheMLPassRunsOffTheDecodersThread() async throws {
+        // 0.1 s frames: the ML timeout (three intervals) stays well above the fake pass.
+        let up = try upscaler(try plan(1280, 720, ml: [1.5]), frameInterval: 0.1)
+        up.mlSubmitOverride = { _, done in
+            // VT's latency, played by a thread of its own (not a wait in the test).
+            Thread.detachNewThread { Thread.sleep(forTimeInterval: 0.1); done(nil) }
+        }
+        let frames = FrameLog()
+        let pipeline = PipelinedFrameStage(deliver: { buffer, pts, _ in frames.add(pts.value, width: CVPixelBufferGetWidth(buffer)) },
+                                           begin: { buffer, pts, _ in up.begin(buffer, pts: pts) })
+        let input = UncheckedSendable(try TestFrames.nv12(1280, 720))
+        Thread {
+            let t0 = Date()
+            pipeline.submit(input.value, pts: CMTime(value: 1, timescale: 10), hdr10Plus: nil)
+            frames.firstSubmitMs = Date().timeIntervalSince(t0) * 1000
+            for n in 2...3 { pipeline.submit(input.value, pts: CMTime(value: Int64(n), timescale: 10), hdr10Plus: nil) }
+        }.start()
+        try await waitFor(upTo: .seconds(10)) { frames.pts.count == 3 }
+        #expect((frames.firstSubmitMs ?? 1000) < 60, "submit waited \(frames.firstSubmitMs ?? -1) ms for the ML pass")
+        #expect(frames.pts == [1, 2, 3])
+        #expect(frames.widths == [3840, 3840, 3840])
+    }
+
     @Test(.enabled(if: UpscalerGate.mlAvailable))
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func lateCompletionReleasesTheAbandonedBuffers() throws {
@@ -641,6 +732,19 @@ private extension FrameUpscaler {
     func upscale(_ input: CVPixelBuffer) -> CVPixelBuffer? { upscale(input, pts: .invalid) }
 }
 
+private final class FrameLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [(pts: Int64, width: Int)] = []
+    private var _firstSubmitMs: Double?
+    func add(_ pts: Int64, width: Int) { lock.lock(); items.append((pts, width)); lock.unlock() }
+    var pts: [Int64] { lock.lock(); defer { lock.unlock() }; return items.map(\.pts) }
+    var widths: [Int] { lock.lock(); defer { lock.unlock() }; return items.map(\.width) }
+    var firstSubmitMs: Double? {
+        get { lock.lock(); defer { lock.unlock() }; return _firstSubmitMs }
+        set { lock.lock(); _firstSubmitMs = newValue; lock.unlock() }
+    }
+}
+
 private final class BufferLog: @unchecked Sendable {
     private let lock = NSLock()
     private var buffers: [CVPixelBuffer] = []
@@ -655,6 +759,9 @@ private final class EventLog: @unchecked Sendable {
     private var events: [FrameUpscaler.Event] = []
     func add(_ e: FrameUpscaler.Event) { lock.lock(); events.append(e); lock.unlock() }
     var all: [FrameUpscaler.Event] { lock.lock(); defer { lock.unlock() }; return events }
+    var degradedPlans: [UpscalePlan] {
+        all.compactMap { if case let .degraded(plan, _, _) = $0 { return plan } else { return nil } }
+    }
 }
 
 private enum TestFrames {

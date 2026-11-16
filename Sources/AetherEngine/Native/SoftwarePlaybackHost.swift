@@ -227,6 +227,16 @@ final class SoftwarePlaybackHost {
     /// loosely for the same reason as `frameUpscaler`.
     private(set) var frameToneMapper: AnyObject?
 
+    /// AE#957: the queue the upscaler or the tone map runs in, two frames on the GPU at once. Nil when no
+    /// GPU stage wraps the frame handler. Settled after every decoder flush or drain (`settleFramePipeline`).
+    private(set) var framePipeline: PipelinedFrameStage?
+
+    /// Delivers the frames the GPU stage still holds, so they reach the renderer before it is flushed or
+    /// drained, as when the stage waited for each frame. Call it right after `videoDecoder.flush()`.
+    func settleFramePipeline() {
+        framePipeline?.settle()
+    }
+
     /// Forwarded Dolby Vision profile number (e.g. 7, 8) if detected from bitstream or container
     var configuredDVProfile: Int?
 
@@ -1232,15 +1242,19 @@ final class SoftwarePlaybackHost {
     ) -> DecodedFrameHandler {
         frameUpscaler = nil
         frameToneMapper = nil
+        framePipeline?.settle()
+        framePipeline = nil
         if let plan = videoProcessingPlan, upscalePlan == nil, !Self.isDualLayer(decoder) {
             #if !targetEnvironment(simulator)
             if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
                 let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
                 let stage = FrameToneMapper(plan: plan, frameInterval: interval)
                 frameToneMapper = stage
-                return { buffer, pts, hdr10Plus in
-                    handler(stage.process(buffer, pts: pts, carriesHDR10Plus: hdr10Plus != nil) ?? buffer, pts, hdr10Plus)
+                let pipeline = makeFramePipeline(handler) { buffer, pts, hdr10Plus in
+                    stage.begin(buffer, pts: pts, carriesHDR10Plus: hdr10Plus != nil)
                 }
+                framePipeline = pipeline
+                return pipeline.frameHandler
             }
             #endif
             return handler
@@ -1256,10 +1270,24 @@ final class SoftwarePlaybackHost {
             guard let stage = FrameUpscaler(plan: plan, frameInterval: interval, buildQueue: FrameUpscaler.stageBuildQueue)
             else { return handler }
             frameUpscaler = stage
-            return UpscalingFrameHandler.wrap(handler) { stage.upscale($0, pts: $1) }
+            let pipeline = makeFramePipeline(handler) { buffer, pts, _ in stage.begin(buffer, pts: pts) }
+            framePipeline = pipeline
+            return pipeline.frameHandler
         }
         #endif
         return handler
+    }
+
+    /// AE#957: a GPU stage's pipeline. Each frame carries the generation its packet was read under, and is
+    /// delivered only while that generation is live: the AE#491 check, taken when the frame is decoded,
+    /// because at delivery the demux loop may already read packets of the next position.
+    private func makeFramePipeline(
+        _ handler: @escaping DecodedFrameHandler,
+        begin: @escaping (CVPixelBuffer, CMTime, Data?) -> PipelinedFrameStage.Begun
+    ) -> PipelinedFrameStage {
+        PipelinedFrameStage(stamp: { [weak self] in self?.decodeGeneration ?? 0 },
+                            isCurrent: { [weak self] generation in self?.seekGeneration == generation },
+                            deliver: handler, begin: begin)
     }
 
     // MARK: - Load
@@ -2280,6 +2308,7 @@ final class SoftwarePlaybackHost {
         let clock = audioOutput?.currentTimeSeconds
         let threshold = clock.flatMap { $0.isFinite && $0 >= 0 ? CMTime(seconds: $0, preferredTimescale: 90000) : nil }
         videoDecoder.flush()
+        settleFramePipeline()
         renderer.flush(removingDisplayedImage: removingDisplayedImage, skipThreshold: threshold)
         if let threshold { videoDecoder.skipUntilPTS = threshold }
         // The second raise covers a keyframe the demux thread handed over after the first raise and
@@ -2520,6 +2549,7 @@ final class SoftwarePlaybackHost {
         // see where `setRenderClock` is called; a skewed sample corrects itself within one sweep.)
         #endif
         videoDecoder.flush()
+        settleFramePipeline()
         audioDecoder?.flush()
         // Hold the last frame through the seek (don't blank the display) so the viewer sees the previous
         // frame until the post-seek frame decodes, instead of a black flash (issue #90). Stop/teardown and
@@ -2936,6 +2966,7 @@ final class SoftwarePlaybackHost {
         audioDecoder?.close()
         audioDecoder = nil
         videoDecoder.close()
+        settleFramePipeline()
         renderer.flush()
         demuxer?.close()
         demuxer = nil
@@ -2957,6 +2988,7 @@ final class SoftwarePlaybackHost {
     private func startDemuxLoop() {
         guard let dem = demuxer else { return }
         let vDec = videoDecoder
+        let frames = framePipeline
         let vIdx = videoStreamIndex
         let aDec = audioDecoder
         let aOut = audioOutput
@@ -3164,6 +3196,7 @@ final class SoftwarePlaybackHost {
             feedQueue.async {
                 Self.runLiveFeederLoop(
                     videoDecoder: vDec,
+                    framePipeline: frames,
                     audioDecoder: aDec,
                     audioOutput: aOut,
                     videoStreamIndex: vIdx,
@@ -3208,6 +3241,7 @@ final class SoftwarePlaybackHost {
                 readAhead: readAhead,
                 directLiveSource: directLiveSource,
                 videoDecoder: vDec,
+                framePipeline: frames,
                 videoStreamIndex: vIdx,
                 audioDecoder: aDec,
                 audioOutput: aOut,
@@ -3431,6 +3465,7 @@ final class SoftwarePlaybackHost {
     /// Ring cursor -> decoders -> renderer with back-pressure. Pause = timeshift (reader keeps filling); DVR seek = cursor move.
     nonisolated private static func runLiveFeederLoop(
         videoDecoder: any VideoDecodingPipeline,
+        framePipeline: PipelinedFrameStage?,
         audioDecoder: (any SoftwareAudioProducing)?,
         audioOutput: AudioOutput?,
         videoStreamIndex: Int32,
@@ -3777,6 +3812,7 @@ final class SoftwarePlaybackHost {
                 if sourceEnded() {
                     videoDecoder.drainForEndOfStream()
                     videoDecoder.flush()
+                    framePipeline?.settle()
                     audioDecoder?.flush()
                     renderer.drainReorderBuffer()
                     onEnd()
@@ -3905,6 +3941,7 @@ final class SoftwarePlaybackHost {
         readAhead: SoftwarePacketReadAhead?,
         directLiveSource: DirectLiveAudioReadAhead?,
         videoDecoder: any VideoDecodingPipeline,
+        framePipeline: PipelinedFrameStage?,
         videoStreamIndex: Int32,
         audioDecoder: (any SoftwareAudioProducing)?,
         audioOutput: AudioOutput?,
@@ -4042,6 +4079,7 @@ final class SoftwarePlaybackHost {
         func applyVideoSeam() {
             videoDecoder.drainForEndOfStream()
             videoDecoder.flush()
+            framePipeline?.settle()
             renderer.drainReorderBuffer()
         }
 
@@ -4428,6 +4466,7 @@ final class SoftwarePlaybackHost {
                 // which here is the last frames of the stream: hand those over first.
                 videoDecoder.drainForEndOfStream()
                 videoDecoder.flush()
+                framePipeline?.settle()
                 audioDecoder?.flush()
                 renderer.drainReorderBuffer()
                 if terminalGeneration.record(genBeforeRead) { onEnd(genBeforeRead) }

@@ -107,6 +107,20 @@ final class FrameChain {
     /// Returns a buffer of the input's format at the target size, its attachments not yet set (`attach`
     /// replaces them), and the command buffer's GPU time in milliseconds.
     func process(_ input: CVPixelBuffer, picture: FrameUpscaler.PictureRegion) throws -> (CVPixelBuffer, Double) {
+        let encoded = try encode(input, picture: picture)
+        encoded.work.commandBuffer.commit()
+        encoded.work.commandBuffer.waitUntilCompleted()
+        return (encoded.output, try encoded.work.finish())
+    }
+
+    /// `process` without the commit and the wait (AE#957): a `PipelinedFrameStage` adds its completion
+    /// handler, commits, and keeps two frames on the GPU at once. `output` holds the picture once the
+    /// work completed.
+    func encode(_ input: CVPixelBuffer, picture: FrameUpscaler.PictureRegion) throws
+        -> (output: CVPixelBuffer, work: EncodedGPUWork) {
+        // Here, not at completion: the cache is only touched on the encoding thread. A texture an
+        // earlier frame still uses stays alive through its `EncodedGPUWork`.
+        CVMetalTextureCacheFlush(textureCache, 0)
         let format = CVPixelBufferGetPixelFormatType(input)
         guard Self.supportedFormats.contains(format) else { throw Failure("pixel format \(format) not supported") }
         guard picture.width == sourceWidth, picture.height == sourceHeight else {
@@ -163,15 +177,10 @@ final class FrameChain {
             }
         }
         enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
-        withExtendedLifetime((iy.1, ic.1, oy.1, oc.1)) {}
-        CVMetalTextureCacheFlush(textureCache, 0)
-        guard cb.status == .completed else {
-            throw Failure("command buffer \(cb.status.rawValue): \(cb.error.map { "\($0)" } ?? "no error")",
-                          underlying: cb.error)
-        }
-        return (output, max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1000))
+        let textures = (iy.1, ic.1, oy.1, oc.1)
+        return (output, EncodedGPUWork(commandBuffer: cb, keepAlive: textures) { status, error in
+            Failure("command buffer \(status.rawValue): \(error.map { "\($0)" } ?? "no error")", underlying: error)
+        })
     }
 
     /// The wide round trip reads luma four samples at a time, so the width and the picture's x origin

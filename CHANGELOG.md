@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`aetherctl bench` times the upscale stage (#957).** Every picture-quality stage should come with its
+  measured cost, and the upscaler had none in the benchmark. Five new cases run the stage playback builds:
+  480p and 720p through VT super resolution and MetalFX, 720p through MetalFX alone, and 1080p line art
+  with and without the restore pass, each to a 3840x2160 display. The note names the plan and the median
+  ML and GPU time; a case the device cannot build is skipped with the reason.
+
 ### Changed
 
 - **AVKit's scrub thumbnails near the playhead are ready before the scrub.** With `serveIFramePlaylist`,
@@ -26,6 +34,16 @@ the public-API contract.
   10 minute presentation behind an origin with 80 ms latency and 4 MB/s, `readyToPlay` moved from 6.2 s to
   4.25 s, 13 fewer requests, with the same segment plan and the same seek landings. Thanks to nulltuple for
   the report.
+
+- **The upscaler and the picture processing keep two frames on the GPU (#957).** Each stage committed
+  one frame and waited for it on the decoder's thread, so the GPU sat idle between frames and the wait
+  counted against the frame budget. Frames now go to the renderer when their GPU work completes, in
+  decode order, with at most two in flight. On an A12 Apple TV, 720p upscaled to 2160p holds the
+  decoder's thread about 9.5 ms per frame instead of 29.5 ms (GPU time unchanged, no dropped frames).
+  Seeks and the end of stream deliver the frames still in flight first. The VideoToolbox super
+  resolution pass runs off the decoder's thread as well: its MetalFX step is encoded when VT answers, so
+  the next frame's ML pass overlaps this frame's MetalFX work. Not yet measured on a device where VT
+  super resolution works (the A12 refuses it).
 
 ### Fixed
 
@@ -47,6 +65,14 @@ the public-API contract.
   the init segment and in the in-band SPS of each sample, and crops the 16 padding lines with a `clap` box
   instead. Other geometries and other platforms are untouched. Thanks to UnknownCoder807 for the fix
   (PR #1072).
+
+- **Upscaling keeps working where VideoToolbox super resolution fails every pass (#957).** An A12 Apple
+  TV (tvOS 27.2) reports VT super resolution and then refuses every frame. The stage switched itself off
+  after three failures and the session went back to native, so 720p video was not upscaled at all. Three
+  ML failures in a row now drop the ML pass and MetalFX alone takes the source to the same target
+  (about 29.5 ms per 720p frame to 2160p in 24 fps playback on the A12, inside the 37.5 ms budget, no
+  dropped frames). If the pass never worked, later loads in
+  the process plan without it. `$activeUpscale` shows `degraded` with `mlScale` nil.
 
 - **Live AC-3 follows a change from 2.0 to 5.1 on the same stream.** A channel with 2.0 ads and a 5.1
   programme on one PID stayed 2.0 when playback started on an ad, because the `dac3` box in the init

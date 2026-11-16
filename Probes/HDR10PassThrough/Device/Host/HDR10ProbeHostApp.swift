@@ -20,6 +20,8 @@ import UIKit
 // - `avpulse`: the control for the pulse arms. AVPlayer alternates the arm's clip and its `_m4000` twin
 //   (the same pixels, 4000 nit metadata) every 6 s, so it shows whether the television visibly follows a
 //   metadata change that Apple's own player makes.
+// - `bench`: `AetherEngine.runPerFrameBenchmarks` with `secs` as the iterations; plays nothing, the url is
+//   ignored. The report lands in `Library/Caches/bench.json`.
 // - `native`: AetherEngine as a host uses it, default routing (the native AVPlayer route for this clip).
 // - `software`, `meta`, `chain`, `chainmeta`, `pulse`, `chainpulse`, `chaintonemap`: AetherEngine on the
 //   software path (`preferredDecodePath: .software`) with `AETHER_HDR10_PROBE` set to `log`, `meta`, `chain`,
@@ -178,7 +180,9 @@ struct ProbeHarnessView: View {
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, log: say)
             case "avpulse":
                 await host.playAVPulse(arm.url, seconds: arm.seconds, log: say)
-            case "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse", "chaintonemap":
+            case "bench":
+                runBench(iterations: Int(arm.seconds), log: say)
+            case "upscale", "upscaleseek", "tonemap", "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse", "chaintonemap":
                 await playEngine(arm, log: say)
             default:
                 say("unknown mode \(arm.mode), skipped")
@@ -194,6 +198,30 @@ struct ProbeHarnessView: View {
         exit(0)
     }
 
+    /// `aetherctl bench` on the device: `AetherEngine.runPerFrameBenchmarks`, the arm's `secs` as the
+    /// iteration count. The report goes to `Library/Caches/bench.json` for `aetherctl bench --compare`.
+    @MainActor
+    private func runBench(iterations: Int, log: @Sendable (String) -> Void) {
+        let report = AetherEngine.runPerFrameBenchmarks(iterations: max(iterations, 10))
+        log("bench: \(report.device), \(report.os), \(report.width)x\(report.height)")
+        for r in report.results {
+            if r.iterations == 0 {
+                log("bench \(r.name): skipped, \(r.note ?? "")")
+            } else {
+                log(String(format: "bench %@: min %.1f median %.1f p95 %.1f p99 %.1f max %.1f us%@", r.name,
+                           r.minMicroseconds, r.medianMicroseconds, r.p95Microseconds, r.p99Microseconds,
+                           r.maxMicroseconds, r.note.map { " (\($0))" } ?? ""))
+            }
+        }
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(report) {
+            try? data.write(to: caches.appendingPathComponent("bench.json"))
+            log("bench: report written to Library/Caches/bench.json")
+        }
+    }
+
     @MainActor
     private func playEngine(_ arm: ProbeArm, log: @Sendable (String) -> Void) async {
         if let probe = arm.probeMode {
@@ -204,7 +232,15 @@ struct ProbeHarnessView: View {
         guard let e = try? AetherEngine() else { log("engine init failed"); return }
         engine = e
         var options = LoadOptions()
-        if arm.mode != "native" { options.preferredDecodePath = .software }
+        if arm.mode == "upscale" || arm.mode == "upscaleseek" {
+            options.upscalesLowResolutionVideo = true
+        } else if arm.mode != "native" {
+            options.preferredDecodePath = .software
+        }
+        if arm.mode == "tonemap" {
+            // The engine's own tone map (FrameToneMapper), not the probe's chain.
+            options.videoProcessing = VideoProcessingOptions(targetPeakNits: 600)
+        }
         do {
             try await e.load(url: arm.url, startPosition: nil, options: options, audioSourceStreamIndex: nil)
             e.play()
@@ -212,6 +248,19 @@ struct ProbeHarnessView: View {
             log("engine load failed: \(error)")
             engine = nil
             return
+        }
+        if arm.mode == "upscaleseek" {
+            // Seeks with frames in flight on the GPU: one while playing, one while paused, then on to the end.
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            log("seek while playing to 3 s")
+            await e.seek(to: 3)
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            e.pause()
+            log("paused at \(String(format: "%.2f", e.currentTime)), seek to 12 s")
+            await e.seek(to: 12)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            log("still paused at \(String(format: "%.2f", e.currentTime)), play")
+            e.play()
         }
         let deadline = Date().addingTimeInterval(arm.seconds)
         while Date() < deadline, e.state != .ended {
