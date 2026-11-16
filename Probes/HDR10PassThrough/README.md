@@ -156,6 +156,17 @@ eye, and only an HDMI analyser can.
 Film the moving bar and the frame counter; a stall or a jump is a dropped or repeated frame. Each arm's
 summary line reports `droppedFrames`.
 
+Four sequences time the engine's own GPU stages (AE#957) and need no camera:
+
+| `SEQ=` | What it plays | What to read |
+|---|---|---|
+| `bench` | nothing: `AetherEngine.runPerFrameBenchmarks`, `ITER` runs per case (default 300) | the report, pulled to `runs/` as JSON |
+| `upscale` | `out/sdr_720p.mp4` with `upscalesLowResolutionVideo`, 20 s | `[Upscale] timing` per 48 frames, `droppedFrames` |
+| `upscaleseek` | the same, with a seek to 3 s while playing and to 12 s while paused | `seek#` landed lines, no `[FramePipeline] settle` timeout |
+| `tonemap` | `pattern_24.mp4` with `LoadOptions.videoProcessing` at 600 nit, 25 s | `[VideoProcessing] timing` per 48 frames |
+
+`out/sdr_720p.mp4` is any 1280x720 SDR H.264 clip of about 20 s; `Scripts/build.sh` does not make it.
+
 After the run, the script pulls the app's log and prints the `[HDR10Probe]` lines (what the first
 frame carried before and after, what the format description built from it carries, GPU time per
 48-frame window, `chain built` once per picture size) and each arm's summary.
