@@ -30,8 +30,9 @@ the public-API contract.
 - **Apple TV no longer restarts on HEVC coded 3840x2176 and cropped to 2160.** An Apple TV (AppleTV18,1,
   tvOS 27.2.1) restarted within about 160 ms of the first frame when the hardware decoder got
   an SPS with that conformance window. On tvOS the native remux now sets the window's offsets to zero, in
-  the init segment and in every in-band SPS. AVFoundation still presents 2160 lines. Other geometries and
-  other platforms are untouched.
+  the init segment and in the in-band SPS of each sample, and crops the 16 padding lines with a `clap` box
+  instead. Other geometries and other platforms are untouched. Thanks to UnknownCoder807 for the fix
+  (PR #1072).
 
 - **Live AC-3 follows a change from 2.0 to 5.1 on the same stream.** A channel with 2.0 ads and a 5.1
   programme on one PID stayed 2.0 when playback started on an ad, because the `dac3` box in the init

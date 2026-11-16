@@ -80,6 +80,10 @@ final class MP4SegmentMuxer {
         let nalFramingLatch: NALFramingLatch?
         /// A stereo source's signalling (`StereoVideoSignal`); nil leaves the track as the source has it.
         let stereo: StereoVideoSignal?
+        /// Clear the conformance window of HEVC coded 3840x2176 and cropped to 2160, and crop with a
+        /// `clap` box instead (`HEVCConformanceCrop`). On by default on tvOS, where the window restarts
+        /// an Apple TV; tests turn it on elsewhere.
+        let clearsUHDPaddingCrop: Bool
 
         init(
             codecpar: UnsafePointer<AVCodecParameters>,
@@ -90,7 +94,8 @@ final class MP4SegmentMuxer {
             extradataOverride: [UInt8]? = nil,
             convertsAnnexBSamples: Bool = false,
             nalFramingLatch: NALFramingLatch? = nil,
-            stereo: StereoVideoSignal? = nil
+            stereo: StereoVideoSignal? = nil,
+            clearsUHDPaddingCrop: Bool = VideoConfig.clearsUHDPaddingCropByDefault
         ) {
             self.codecpar = codecpar
             self.timeBase = timeBase
@@ -101,7 +106,14 @@ final class MP4SegmentMuxer {
             self.convertsAnnexBSamples = convertsAnnexBSamples
             self.nalFramingLatch = nalFramingLatch
             self.stereo = stereo
+            self.clearsUHDPaddingCrop = clearsUHDPaddingCrop
         }
+
+        #if os(tvOS)
+        static let clearsUHDPaddingCropByDefault = true
+        #else
+        static let clearsUHDPaddingCropByDefault = false
+        #endif
     }
 
     struct AudioConfig {
@@ -208,11 +220,9 @@ final class MP4SegmentMuxer {
     private var shortHEVCHeadersRemoved = 0
     /// Latched from `VideoConfig.convertsAnnexBSamples`.
     private let convertsAnnexBVideoSamples: Bool
-    #if os(tvOS)
     /// The init segment's SPS lost its 2176-to-2160 padding crop (`HEVCConformanceCrop`), so in-band
     /// copies must lose it too.
     private let removesUHDPaddingCrop: Bool
-    #endif
     /// AE#561 harness switch: the sanitizer removes the only shape that reproduces a segment Apple's
     /// parser refuses, so the rung underneath it (the software-path escalation) would have nothing to
     /// be measured against. Read once from the environment, never set in a shipped configuration.
@@ -338,12 +348,10 @@ final class MP4SegmentMuxer {
         self.videoNALFraming = video.nalFramingLatch ?? NALFramingLatch()
         self.convertsAnnexBVideoSamples = video.convertsAnnexBSamples
         self.isHEVCVideo = video.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
-        #if os(tvOS)
         removesUHDPaddingCrop = Self.cropFreeConfiguration(for: video) != nil
         if removesUHDPaddingCrop {
-            EngineLog.emit("[MP4SegmentMuxer] 3840x2176 HEVC cropped to 2160: conformance window cleared in the init segment and in-band SPS (Apple TV hardware decode)", category: .session)
+            EngineLog.emit("[MP4SegmentMuxer] 3840x2176 HEVC cropped to 2160: conformance window cleared in the init segment and in-band SPS, clap crops to 2160 (Apple TV hardware decode)", category: .session)
         }
-        #endif
         // AE#561: the override, when there is one, is the record that reaches the sample entry. Both
         // carry the same width (the #19 rebuild keeps the source header's first 22 bytes), so this
         // only matters for a source whose own extradata is missing or Annex B.
@@ -643,13 +651,14 @@ final class MP4SegmentMuxer {
         if let extradata = video.extradataOverride {
             Self.replaceExtradata(videoStream.pointee.codecpar, with: extradata)
         }
-        #if os(tvOS)
         if let cropFree = Self.cropFreeConfiguration(for: video) {
             Self.replaceExtradata(videoStream.pointee.codecpar, with: cropFree)
-            // The sample entry states the coded height, as in the stream that was verified on device.
-            videoStream.pointee.codecpar.pointee.height = 2176
+            // The sample entry states the coded height, and movenc turns the crop side data into a
+            // `clap` of 3840x2160, so AVFoundation hides the padding lines the decoder now hands out.
+            // Both were verified on device together.
+            videoStream.pointee.codecpar.pointee.height = 2160 + Int32(HEVCConformanceCrop.paddingLines)
+            Self.setBottomCrop(videoStream.pointee.codecpar, lines: HEVCConformanceCrop.paddingLines)
         }
-        #endif
         if video.stereo == .multiview {
             // movenc writes `lhvC` (the second layer's parameter sets, which the extradata carries after
             // the base layer's) only for a stream with this disposition, and a new stream has none. The
@@ -759,11 +768,15 @@ final class MP4SegmentMuxer {
         // Before the AE#561 sanitizer, which walks the sample as the length-prefixed chain the
         // record declares. A packet with no start code is written as it came.
         if convertsAnnexBVideoSamples, streamIndex == videoOutputStreamIndex {
-            #if os(tvOS)
             _ = AnnexBSampleConverter.convertToLengthPrefixed(packet, removeUHDPaddingCrop: removesUHDPaddingCrop)
-            #else
-            _ = AnnexBSampleConverter.convertToLengthPrefixed(packet)
-            #endif
+        } else if removesUHDPaddingCrop, streamIndex == videoOutputStreamIndex,
+                  let prefixSize = videoNALLengthPrefixSize, let data = packet.pointee.data, packet.pointee.size > 0,
+                  let cropFree = HEVCConformanceCrop.removingUHDPaddingCrop(
+                      fromLengthPrefixed: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)),
+                      prefixSize: prefixSize) {
+            // An hev1 or Matroska source can repeat its SPS in the sample; the decoder would read the
+            // window back from there.
+            _ = AnnexBSampleConverter.replacePayload(packet, with: cropFree)
         }
 
         // #64 mid-segment flush bound: cap libavformat's interleaver RAM on a very long segment
@@ -1384,12 +1397,11 @@ final class MP4SegmentMuxer {
         return bytes
     }
 
-    /// Replace codecpar.extradata using av_malloc + AV_INPUT_BUFFER_PADDING_SIZE pad.
-    #if os(tvOS)
     /// The video configuration with the 2176-to-2160 padding crop cleared, or nil when the track is
-    /// not HEVC of that geometry. Reads the override when there is one, the source extradata otherwise.
+    /// not HEVC of that geometry or the config leaves the crop alone. Reads the override when there is
+    /// one, the source extradata otherwise.
     static func cropFreeConfiguration(for video: VideoConfig) -> [UInt8]? {
-        guard video.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else { return nil }
+        guard video.clearsUHDPaddingCrop, video.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else { return nil }
         if let override = video.extradataOverride {
             return HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: override)
         }
@@ -1399,8 +1411,22 @@ final class MP4SegmentMuxer {
         let bytes = [UInt8](UnsafeBufferPointer(start: extradata, count: Int(video.codecpar.pointee.extradata_size)))
         return HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: bytes)
     }
-    #endif
 
+    /// Replaces any crop side data with a bottom crop of `lines`; movenc writes it as `clap`. A failed
+    /// allocation only leaves the padding lines visible, so it does not fail the session.
+    private static func setBottomCrop(_ codecpar: UnsafeMutablePointer<AVCodecParameters>, lines: Int) {
+        av_packet_side_data_remove(codecpar.pointee.coded_side_data, &codecpar.pointee.nb_coded_side_data,
+                                   AV_PKT_DATA_FRAME_CROPPING)
+        // Four little-endian UInt32 in movenc's order: top, bottom, left, right.
+        guard let item = av_packet_side_data_new(
+            &codecpar.pointee.coded_side_data, &codecpar.pointee.nb_coded_side_data,
+            AV_PKT_DATA_FRAME_CROPPING, 16, 0),
+              let raw = item.pointee.data else { return }
+        memset(raw, 0, 16)
+        raw[4] = UInt8(lines)
+    }
+
+    /// Replace codecpar.extradata using av_malloc + AV_INPUT_BUFFER_PADDING_SIZE pad.
     private static func replaceExtradata(
         _ codecpar: UnsafeMutablePointer<AVCodecParameters>,
         with bytes: [UInt8]

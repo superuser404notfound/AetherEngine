@@ -68,6 +68,26 @@ enum AnnexBSampleConverter {
         return write(packet, source: packetBytes, ranges: packetRanges)
     }
 
+    /// Points the packet at a new buffer holding `bytes`, leaving a shared original untouched.
+    @discardableResult
+    static func replacePayload(_ packet: UnsafeMutablePointer<AVPacket>, with bytes: [UInt8]) -> Bool {
+        guard !bytes.isEmpty, bytes.count <= Int(Int32.max) else { return false }
+        let pad = Int(AV_INPUT_BUFFER_PADDING_SIZE)
+        guard let newRef = av_buffer_alloc(bytes.count + pad) else { return false }
+        guard let dst = newRef.pointee.data else {
+            var ref: UnsafeMutablePointer<AVBufferRef>? = newRef
+            av_buffer_unref(&ref)
+            return false
+        }
+        bytes.withUnsafeBufferPointer { _ = memcpy(dst, $0.baseAddress!, bytes.count) }
+        memset(dst + bytes.count, 0, pad)
+        av_buffer_unref(&packet.pointee.buf)
+        packet.pointee.buf = newRef
+        packet.pointee.data = dst
+        packet.pointee.size = Int32(bytes.count)
+        return true
+    }
+
     private static func write(_ packet: UnsafeMutablePointer<AVPacket>, source: UnsafeRawBufferPointer,
                               ranges: [Range<Int>]) -> Bool {
         guard let data = source.baseAddress?.assumingMemoryBound(to: UInt8.self), !ranges.isEmpty else { return false }

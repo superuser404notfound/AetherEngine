@@ -2,12 +2,13 @@ import Foundation
 
 /// Removes the bottom padding crop from a 3840x2176 HEVC sequence parameter set.
 ///
-/// Apple TV (AppleTV18,1, tvOS 27.2.1) restarts about 60–160 ms after AVPlayer
+/// Apple TV (AppleTV18,1, tvOS 27.2.1) restarts about 60 to 160 ms after AVPlayer
 /// starts a hardware-decoded HEVC stream whose SPS codes 3840x2176 and crops it to 3840x2160 with a
 /// conformance window. Measured on device with one variable changed at a time: the same pictures play
 /// once the window's offsets are zero, an ordinary x265 encode reboots as soon as it carries this
-/// window, and the level, HRD, SEI, delimiters and coding tools make no difference. AVFoundation
-/// presents such a stream at 2160 lines without the window, so nothing else has to hide the padding.
+/// window, and the level, HRD, SEI, delimiters and coding tools make no difference. With the window
+/// gone the decoder hands out all 2176 lines, so the muxer crops the 16 padding lines in the container
+/// instead (a `clap` box, which the same device also played).
 ///
 /// Only that one geometry is rewritten. Every other SPS passes through byte for byte.
 enum HEVCConformanceCrop {
@@ -92,6 +93,39 @@ enum HEVCConformanceCrop {
             } else {
                 out.append(contentsOf: bytes[range])
             }
+        }
+        return out
+    }
+
+    /// The bottom crop the SPS window carried, in luma lines. The muxer writes it as a `clap` box.
+    static let paddingLines = 16
+
+    /// A length-prefixed sample (an `hev1` or Matroska source) with the padding crop removed from every
+    /// in-band SPS, or nil when it holds none of that geometry or its length chain does not add up.
+    static func removingUHDPaddingCrop(fromLengthPrefixed bytes: UnsafeRawBufferPointer,
+                                       prefixSize: Int) -> [UInt8]? {
+        guard (1...4).contains(prefixSize) else { return nil }
+        var units: [(range: Range<Int>, sps: [UInt8]?)] = []
+        var cursor = 0
+        while cursor < bytes.count {
+            guard cursor + prefixSize <= bytes.count else { return nil }
+            var length = 0
+            for index in 0..<prefixSize { length = length << 8 | Int(bytes[cursor + index]) }
+            cursor += prefixSize
+            guard length > 0, length <= bytes.count - cursor else { return nil }
+            let range = cursor..<cursor + length
+            let sps = bytes[cursor] == 0x42 ? removingUHDPaddingCrop(fromSPS: [UInt8](bytes[range])) : nil
+            units.append((range, sps))
+            cursor += length
+        }
+        guard units.contains(where: { $0.sps != nil }) else { return nil }
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count + units.count)
+        for unit in units {
+            let nal = unit.sps ?? [UInt8](bytes[unit.range])
+            guard nal.count < 1 << (8 * prefixSize) else { return nil }
+            for index in (0..<prefixSize).reversed() { out.append(UInt8(truncatingIfNeeded: nal.count >> (8 * index))) }
+            out.append(contentsOf: nal)
         }
         return out
     }
