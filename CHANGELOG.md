@@ -56,6 +56,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A live session stays live after an audio-track switch.** The rebuild behind `selectAudioTrack`
+  (and the disc-title pick and the custom-source `reloadAtCurrentPosition`) runs `stopInternal`, which
+  clears `isLive`, `isSequentialOrigin` and the live window, and then reopens through `loadNative` or
+  `loadSoftware`, which never set them again. A live MPEG-TS channel switched to its second audio track
+  came back with `isLive == false` and no DVR window, and every `startRecording(to:)` threw `.notLive`
+  until the next `load`. The rebuild now takes the liveness of the session's options exactly as `load`
+  does.
+
 - **Audio-only AAC, FLAC, MP3 or AC-3 in Matroska no longer stays silent.** The audio-only dispatch only
   looked at the codec, so a whitelisted codec in a container AVFoundation does not open (MKA, Ogg,
   MPEG-TS, ASF) went to the AVPlayer audio host, which answered "Cannot Open" with the clock at 0. Only
