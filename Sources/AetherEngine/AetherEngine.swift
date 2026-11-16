@@ -8936,18 +8936,6 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
-    /// - Parameter resetDisplayCriteria: When `true` (default), release
-    ///   the `AVDisplayManager.preferredDisplayCriteria` so the panel
-    ///   returns to its default mode. Used by `load()` and the public
-    ///   `stop()` API where the next session may target a different
-    ///   format. The audio-track-switch reload path passes `false`
-    ///   because the same source is being re-prepared with only the
-    ///   audio stream changing; keeping the criteria in place avoids
-    ///   a redundant `apply` + `waitForSwitch` cycle that on some
-    ///   panels (notably when paired with a Bluetooth A2DP audio route)
-    ///   never settles and burns the full settle timeout (~12 s of
-    ///   black-screen latency per audio switch on the old fixed 5 s
-    ///   poll; capped at ~2 s since #117, but still worth skipping).
     /// The liveness a session takes from its `LoadOptions`: `isLive`, `isSequentialOrigin` and a fresh
     /// `liveWindow`. `load` adopts it, and so does every rebuild that runs `stopInternal` and then
     /// reopens on `loadedOptions` (`reloadWithAudioOverride`), because `stopInternal` clears all three.
@@ -8964,6 +8952,18 @@ public final class AetherEngine: ObservableObject {
             : nil
     }
 
+    /// - Parameter resetDisplayCriteria: When `true` (default), release
+    ///   the `AVDisplayManager.preferredDisplayCriteria` so the panel
+    ///   returns to its default mode. Used by `load()` and the public
+    ///   `stop()` API where the next session may target a different
+    ///   format. The audio-track-switch reload path passes `false`
+    ///   because the same source is being re-prepared with only the
+    ///   audio stream changing; keeping the criteria in place avoids
+    ///   a redundant `apply` + `waitForSwitch` cycle that on some
+    ///   panels (notably when paired with a Bluetooth A2DP audio route)
+    ///   never settles and burns the full settle timeout (~12 s of
+    ///   black-screen latency per audio switch on the old fixed 5 s
+    ///   poll; capped at ~2 s since #117, but still worth skipping).
     func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false, keepCurrentItem: Bool = false, finalTeardown: Bool = false,
                       cacheCleanupReason: SessionCacheCleanupReason = .sourceChanged) {
         // AE#560: a recording never outlives its session. This covers stop(), a new load() and

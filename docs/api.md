@@ -1506,7 +1506,7 @@ Hosts can supply other positive limits. Ordinary subtitle selection behaves as b
 | Symbol | Notes |
 | --- | --- |
 | `$isLive` | Mirrors `LoadOptions.isLive` for the session, across its rebuilds too (an audio-track switch). |
-| `$isSequentialOrigin` | True while a VOD session is served as a sequential origin, declared or found by the reader. Set during `load()`, cleared on stop. See [`sequentialOrigin`](#sequentialorigin). |
+| `$isSequentialOrigin` | True while a VOD session is served as a sequential origin, declared or found by the reader. Set during `load()` and kept across its rebuilds (an audio-track switch), cleared on stop. See [`sequentialOrigin`](#sequentialorigin). |
 | `seekToLiveEdge(offsetSeconds:)` | `async`. Lands `offsetSeconds` behind the usable edge (default 0; negative or non-finite read as 0), clamped to retained media. The safety margin is the host's call. On a live-only session it moves the native item to its own seekable end minus the offset. |
 | `currentItemLiveEdgeTime` | The native item's usable live edge on the display axis. nil before the item has a range, and on the software route. See the note below. |
 | `liveTargetDurationSeconds` | The TARGETDURATION the engine's own live playlist is serving. nil on remote HLS live, on the software path and before the first playlist build. |
