@@ -598,10 +598,10 @@ final class DocumentedConstantsTests: XCTestCase {
 
     func testFramePipelineDepthAndSettleMatchDocumentation() throws {
         XCTAssertEqual(PipelinedFrameStage.defaultDepth, 2)
-        XCTAssertEqual(PipelinedFrameStage.settleTimeout, 2.0)
+        XCTAssertEqual(PipelinedFrameStage.settleTimeout, 0.5)
         let docs = try documentation()
         assertDocumented("It keeps up to two frames on the GPU at once", docs)
-        assertDocumented("`settle()` gives up after 2 s", docs)
+        assertDocumented("`settle()` gives up after 0.5 s", docs)
     }
 
     func testLayerJoinRepairRunMatchesDocumentation() throws {

@@ -38,6 +38,10 @@ struct EncodedGPUWork: @unchecked Sendable {
 /// - Back-pressure: `submit` waits while `depth` frames are not yet delivered.
 /// - Flush and end of stream: the host calls `settle()` right after every decoder flush or drain, so what
 ///   is still on the GPU is delivered before the renderer flushes or drains, as when the stage waited.
+/// - Seeks: `submit` takes the frame's generation (`stamp`, the generation the packet was read under) and
+///   a frame is delivered only while `isCurrent` holds for it. Checking at delivery alone is not enough:
+///   by then the demux loop may have moved its generation on to the new position, and a frame from
+///   before the seek would pass (AE#491).
 /// - Budget: `begin`'s completion gets the time the frame held the decoder's thread (waiting for a free
 ///   slot, then encoding). In steady state that is the stage's cost per frame, the number its overrun
 ///   check must compare with the frame interval.
@@ -56,12 +60,16 @@ final class PipelinedFrameStage: @unchecked Sendable {
 
     /// Two frames in flight: the A12 measurement above.
     static let defaultDepth = 2
-    /// How long `settle()` waits for the frames in flight before it gives up (logged).
-    static let settleTimeout = 2.0
+    /// How long `settle()` waits for the frames in flight before it gives up (logged). The host calls it
+    /// on the main actor in seek and stop, so it stays short; a frame that misses it is still dropped by
+    /// its generation after a seek.
+    static let settleTimeout = 0.5
 
     let depth: Int
     private let deliver: DecodedFrameHandler
     private let begin: (CVPixelBuffer, CMTime, Data?) -> Begun
+    private let stamp: @Sendable () -> UInt64
+    private let isCurrent: @Sendable (UInt64) -> Bool
     private let slots: DispatchSemaphore
     private let undelivered = DispatchGroup()
     private let deliveryQueue = DispatchQueue(label: "AetherEngine.PipelinedFrameStage.delivery", qos: .userInteractive)
@@ -74,21 +82,29 @@ final class PipelinedFrameStage: @unchecked Sendable {
         let original: CVPixelBuffer
         let pts: CMTime
         let hdr10Plus: Data?
+        let generation: UInt64
         var output: CVPixelBuffer?
         var done = false
-        init(original: CVPixelBuffer, pts: CMTime, hdr10Plus: Data?) {
+        init(original: CVPixelBuffer, pts: CMTime, hdr10Plus: Data?, generation: UInt64) {
             self.original = original
             self.pts = pts
             self.hdr10Plus = hdr10Plus
+            self.generation = generation
         }
     }
 
-    /// `deliver` is the decoder's own frame handler; `begin` runs on the submitting thread.
-    init(depth: Int = defaultDepth, deliver: @escaping DecodedFrameHandler,
+    /// `deliver` is the decoder's own frame handler; `begin` runs on the submitting thread. `stamp` reads
+    /// the generation a frame was decoded under, `isCurrent` says whether a generation is still live.
+    init(depth: Int = defaultDepth,
+         stamp: @escaping @Sendable () -> UInt64 = { 0 },
+         isCurrent: @escaping @Sendable (UInt64) -> Bool = { _ in true },
+         deliver: @escaping DecodedFrameHandler,
          begin: @escaping (CVPixelBuffer, CMTime, Data?) -> Begun) {
         self.depth = max(1, depth)
         self.deliver = deliver
         self.begin = begin
+        self.stamp = stamp
+        self.isCurrent = isCurrent
         slots = DispatchSemaphore(value: self.depth)
     }
 
@@ -98,10 +114,13 @@ final class PipelinedFrameStage: @unchecked Sendable {
     }
 
     func submit(_ buffer: CVPixelBuffer, pts: CMTime, hdr10Plus: Data?) {
+        // A frame decoded from a packet read before a seek never reaches the GPU.
+        let generation = stamp()
+        guard isCurrent(generation) else { return }
         let start = DispatchTime.now().uptimeNanoseconds
         slots.wait()
         undelivered.enter()
-        let entry = Entry(original: buffer, pts: pts, hdr10Plus: hdr10Plus)
+        let entry = Entry(original: buffer, pts: pts, hdr10Plus: hdr10Plus, generation: generation)
         lock.lock()
         // Nothing ahead of it: a frame that needs no GPU goes out on this thread, as without the pipeline.
         let alone = entries.isEmpty && !delivering
@@ -162,7 +181,10 @@ final class PipelinedFrameStage: @unchecked Sendable {
     }
 
     private func hand(_ entry: Entry) {
-        deliver(entry.output ?? entry.original, entry.pts, entry.hdr10Plus)
+        // A seek since `submit` makes the frame stale: it frees its slot without reaching the renderer.
+        if isCurrent(entry.generation) {
+            deliver(entry.output ?? entry.original, entry.pts, entry.hdr10Plus)
+        }
         slots.signal()
         undelivered.leave()
     }

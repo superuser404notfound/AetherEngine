@@ -124,8 +124,10 @@ struct PipelinedFrameStageDeliversInOrderTests {
         gate.release(3)
         try await waitFor { delivered.pts.count == 3 }
         #expect(delivered.pts == [1, 2, 3])
-        // The third frame waited for a slot, and its hold time says so.
+        // The third frame waited for a slot, at least through the 200 ms window, and its hold time says
+        // so. Completions on one queue come in order, so the third hold time is frame 3's.
         #expect(gate.holdTimes.count == 3)
+        #expect((gate.holdTimes.last ?? 0) >= 150)
     }
 
     /// `settle()` returns once every frame in flight is delivered; the host calls it after a decoder
@@ -147,6 +149,44 @@ struct PipelinedFrameStageDeliversInOrderTests {
         gate.release(1)
         try await waitFor { settled.isSet }
         #expect(delivered.pts == [1, 2])
+    }
+
+    /// AE#491 through the pipeline: a frame keeps the generation it was decoded under. A seek while it is on
+    /// the GPU drops it at delivery, and a frame already stale when it is handed over never reaches the GPU.
+    @Test func issue957AFrameFromBeforeASeekIsNotDelivered() async throws {
+        let gate = Gate()
+        let delivered = Delivered()
+        let generations = Generations()
+        let begun = Flag()
+        let pipeline = PipelinedFrameStage(stamp: { generations.decoded },
+                                           isCurrent: { generations.live == $0 },
+                                           deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
+                                           begin: { _, _, _ in begun.set(); return gate.work(waitingFor: 1, output: Self.frame()) })
+        pipeline.submit(Self.frame(), pts: Self.pts(1), hdr10Plus: nil)
+        // The seek: the live generation moves on, then the demux loop reads the new position's packets.
+        generations.live = 1
+        generations.decoded = 1
+        gate.release(1)
+        try await waitFor { pipeline.inFlight == 0 }
+        #expect(delivered.pts.isEmpty)
+
+        let stale = Generations()
+        stale.live = 1
+        let begunStale = Flag()
+        let late = PipelinedFrameStage(stamp: { stale.decoded }, isCurrent: { stale.live == $0 },
+                                       deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
+                                       begin: { _, _, _ in begunStale.set(); return .passThrough })
+        late.submit(Self.frame(), pts: Self.pts(2), hdr10Plus: nil)
+        #expect(!begunStale.isSet)
+        #expect(delivered.pts.isEmpty)
+        #expect(begun.isSet)
+    }
+
+    private final class Generations: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _live: UInt64 = 0, _decoded: UInt64 = 0
+        var live: UInt64 { get { lock.lock(); defer { lock.unlock() }; return _live } set { lock.lock(); _live = newValue; lock.unlock() } }
+        var decoded: UInt64 { get { lock.lock(); defer { lock.unlock() }; return _decoded } set { lock.lock(); _decoded = newValue; lock.unlock() } }
     }
 
     /// A frame whose GPU work failed goes out as the original.

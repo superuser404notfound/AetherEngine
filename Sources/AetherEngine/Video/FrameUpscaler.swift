@@ -155,6 +155,16 @@ final class FrameUpscaler: @unchecked Sendable {
     private var rememberedOverrunNoted = false
     private var frameIndex: Int64 = 0
     private let processLock = NSLock()
+    /// AE#957: what pipelined frames reported on completion, recorded at the next `begin`. `begin` holds
+    /// `processLock` through the ML pass, so a completion that took it would wait for the next frame's
+    /// pass before its frame could go out.
+    private let completionLock = NSLock()
+    private var completions: [Completion] = []
+    private struct Completion {
+        let stage: Stage
+        let times: StageTimes
+        let error: Error?
+    }
 
     private let stateLock = NSLock()
     private var _onEvent: (@Sendable (Event) -> Void)?
@@ -267,7 +277,11 @@ final class FrameUpscaler: @unchecked Sendable {
         case let .gpu(work, complete):
             work.commandBuffer.commit()
             work.commandBuffer.waitUntilCompleted()
-            return complete(elapsedMs(since: start))
+            let output = complete(elapsedMs(since: start))
+            processLock.lock()
+            recordCompletions()
+            processLock.unlock()
+            return output
         }
     }
 
@@ -277,6 +291,7 @@ final class FrameUpscaler: @unchecked Sendable {
     func begin(_ input: CVPixelBuffer, pts: CMTime) -> PipelinedFrameStage.Begun {
         processLock.lock()
         defer { processLock.unlock() }
+        recordCompletions()
         guard !isDisabled else { return .passThrough }
         notePTS(pts)
         guard let built = stage else {
@@ -332,23 +347,39 @@ final class FrameUpscaler: @unchecked Sendable {
         }
     }
 
-    /// A frame's GPU work completed. A frame of a stage that has since been replaced (a fallback or a
-    /// rebuild) is still delivered, but no longer counts for the stage that runs now.
+    /// A frame's GPU work completed, on Metal's completion thread. It only queues the result, under its
+    /// own short lock, and the frame goes out at once; `recordCompletions` counts it.
     private func complete(_ work: EncodedGPUWork, output: CVPixelBuffer, stage ran: Stage,
                           times encodedTimes: StageTimes, holdMs: Double) -> CVPixelBuffer? {
-        processLock.lock()
-        defer { processLock.unlock() }
-        let current = ran === stage && !isDisabled
         var times = encodedTimes
+        let result: CVPixelBuffer?
+        let completion: Completion
         do {
             times.metalGPU = try work.finish()
+            times.total = holdMs
+            completion = Completion(stage: ran, times: times, error: nil)
+            result = output
         } catch {
-            if current { recordFailure(error) }
-            return nil
+            completion = Completion(stage: ran, times: times, error: error)
+            result = nil
         }
-        times.total = holdMs
-        if current { recordSuccess(times, stage: ran) }
-        return output
+        completionLock.lock()
+        completions.append(completion)
+        completionLock.unlock()
+        return result
+    }
+
+    /// Counts the queued completions, with `processLock` held. A frame of a stage that has since been
+    /// replaced (a fallback or a rebuild) was delivered, but no longer counts for the stage that runs now.
+    private func recordCompletions() {
+        completionLock.lock()
+        let done = completions
+        completions.removeAll()
+        completionLock.unlock()
+        for c in done {
+            guard c.stage === stage, !isDisabled else { continue }
+            if let error = c.error { recordFailure(error) } else { recordSuccess(c.times, stage: c.stage) }
+        }
     }
 
     private func notePTS(_ pts: CMTime) {

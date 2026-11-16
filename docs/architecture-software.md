@@ -363,10 +363,12 @@ See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.
 - The decoder's frame handler encodes the frame's GPU work, commits it and returns. The frame goes to the renderer when its work has completed.
 - Frames leave in the order they were decoded. A frame that needs no GPU waits for the frames ahead of it. With nothing ahead, it goes out on the decoder's thread, as before.
 - The handler waits while two frames are undelivered. That is the back-pressure: the decoder never runs more than two frames ahead of the renderer.
-- After every decoder flush or drain (seek, error recovery, end of stream, a live seam) and in `stop()`, the host calls `settle()`. The frames still on the GPU reach the renderer before it flushes. `settle()` gives up after 2 s and logs `[FramePipeline] settle: ...`.
+- After every decoder flush or drain (seek, error recovery, end of stream, a live seam) and in `stop()`, the host calls `settle()`. The frames still on the GPU reach the renderer before it flushes. `settle()` gives up after 0.5 s and logs `[FramePipeline] settle: ...`, because seek and stop call it on the main actor.
+- Each frame carries the generation its packet was read under, taken when the decoder hands it over, and goes out only while that generation is live (the AE#491 check). At delivery the demux loop may already read packets of the new position, so a check made only then would let a frame from before the seek through. A frame stale at hand-over never reaches the GPU.
 - A frame whose GPU work failed goes out as decoded.
 - The budget counts the time a frame holds the decoder's thread: waiting for a free slot, then encoding. In steady state that is the stage's cost per frame.
 - A frame that was in flight when its stage was rebuilt (an overrun rung, the ML fallback) is still delivered, but does not count against the new stage.
+- A completion only queues the frame's times, and the frame goes out at once. The upscaler counts them at its next frame, on the decoder's thread: it holds its lock through the ML pass, so a completion that took that lock would wait for the next frame's pass.
 - The VideoToolbox super resolution pass is not pipelined. It still runs on the decoder's thread.
 - `FrameChain.encode` and the upscaler's `encode` return the work uncommitted, because Metal takes a completion handler only before the commit. The synchronous `process` and `upscale` (tests, the benchmark, the probe) commit and wait.
 

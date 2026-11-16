@@ -1250,7 +1250,7 @@ final class SoftwarePlaybackHost {
                 let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
                 let stage = FrameToneMapper(plan: plan, frameInterval: interval)
                 frameToneMapper = stage
-                let pipeline = PipelinedFrameStage(deliver: handler) { buffer, pts, hdr10Plus in
+                let pipeline = makeFramePipeline(handler) { buffer, pts, hdr10Plus in
                     stage.begin(buffer, pts: pts, carriesHDR10Plus: hdr10Plus != nil)
                 }
                 framePipeline = pipeline
@@ -1270,12 +1270,24 @@ final class SoftwarePlaybackHost {
             guard let stage = FrameUpscaler(plan: plan, frameInterval: interval, buildQueue: FrameUpscaler.stageBuildQueue)
             else { return handler }
             frameUpscaler = stage
-            let pipeline = PipelinedFrameStage(deliver: handler) { buffer, pts, _ in stage.begin(buffer, pts: pts) }
+            let pipeline = makeFramePipeline(handler) { buffer, pts, _ in stage.begin(buffer, pts: pts) }
             framePipeline = pipeline
             return pipeline.frameHandler
         }
         #endif
         return handler
+    }
+
+    /// AE#957: a GPU stage's pipeline. Each frame carries the generation its packet was read under, and is
+    /// delivered only while that generation is live: the AE#491 check, taken when the frame is decoded,
+    /// because at delivery the demux loop may already read packets of the next position.
+    private func makeFramePipeline(
+        _ handler: @escaping DecodedFrameHandler,
+        begin: @escaping (CVPixelBuffer, CMTime, Data?) -> PipelinedFrameStage.Begun
+    ) -> PipelinedFrameStage {
+        PipelinedFrameStage(stamp: { [weak self] in self?.decodeGeneration ?? 0 },
+                            isCurrent: { [weak self] generation in self?.seekGeneration == generation },
+                            deliver: handler, begin: begin)
     }
 
     // MARK: - Load
