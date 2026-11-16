@@ -271,18 +271,25 @@ final class FrameUpscaler: @unchecked Sendable {
     /// the benchmark use it; playback goes through `begin` and a `PipelinedFrameStage`.
     func upscale(_ input: CVPixelBuffer, pts: CMTime) -> CVPixelBuffer? {
         let start = DispatchTime.now().uptimeNanoseconds
-        switch begin(input, pts: pts) {
-        case .passThrough: return nil
-        case let .ready(output): return output
+        var begun = begin(input, pts: pts)
+        if case let .later(startStep) = begun {
+            let resumed = SyncBox<PipelinedFrameStage.Begun>()
+            startStep { resumed.put($0) }
+            begun = resumed.take()
+        }
+        let output: CVPixelBuffer?
+        switch begun {
+        case .passThrough, .later: output = nil
+        case let .ready(buffer): output = buffer
         case let .gpu(work, complete):
             work.commandBuffer.commit()
             work.commandBuffer.waitUntilCompleted()
-            let output = complete(elapsedMs(since: start))
-            processLock.lock()
-            recordCompletions()
-            processLock.unlock()
-            return output
+            output = complete(elapsedMs(since: start))
         }
+        processLock.lock()
+        recordCompletions()
+        processLock.unlock()
+        return output
     }
 
     /// The pipelined form of `upscale` (AE#957): encodes the frame's GPU work and returns it uncommitted.
@@ -325,6 +332,9 @@ final class FrameUpscaler: @unchecked Sendable {
         let start = DispatchTime.now().uptimeNanoseconds
         frameIndex += 1
         var times = StageTimes()
+        if stage.runsMLOffThread {
+            return beginOffThread(input, picture: picture, stage: stage, start: start, times: times)
+        }
         let encoded: (output: CVPixelBuffer, work: EncodedGPUWork?)
         do {
             encoded = try stage.encode(input, picture: picture, frameIndex: frameIndex,
@@ -347,6 +357,69 @@ final class FrameUpscaler: @unchecked Sendable {
         }
     }
 
+    /// AE#957: an ML plan's frame, with `processLock` held. The crop happens here; the ML pass starts in
+    /// `.later`, after `begin` let go of the lock, and `afterML` encodes MetalFX from its callback. So the
+    /// decoder's thread waits only for the pass before this one, and the next frame's pass overlaps this
+    /// frame's MetalFX work on the GPU.
+    private func beginOffThread(_ original: CVPixelBuffer, picture: PictureRegion, stage: Stage, start: UInt64,
+                                times: StageTimes) -> PipelinedFrameStage.Begun {
+        var times = times
+        let input: CVPixelBuffer
+        do {
+            input = try stage.cropInput(original, picture: picture, times: &times)
+        } catch {
+            recordFailure(error)
+            return .passThrough
+        }
+        let ran = UncheckedSendable(stage)
+        let frames = UncheckedSendable((original, input))
+        let index = frameIndex, timeout = currentMLTimeout, submit = _mlSubmitOverride, startTimes = times
+        return .later { [weak self] resume in
+            guard let self else { resume(.passThrough); return }
+            ran.value.startML(frames.value.1, original: frames.value.0, frameIndex: index, timeout: timeout,
+                              submit: submit, times: startTimes) { [weak self] result, times in
+                resume(self?.afterML(result, stage: ran.value, original: frames.value.0, input: frames.value.1,
+                                     times: times, start: start) ?? .passThrough)
+            }
+        }
+    }
+
+    /// The ML pass answered (or timed out), on its finish queue: MetalFX encoded for the pipeline to commit,
+    /// the ML output on the ML-only rung, or the original frame. The result is counted at the next `begin`.
+    private func afterML(_ result: Result<UncheckedSendable<CVPixelBuffer>, Error>, stage ran: Stage,
+                         original: CVPixelBuffer, input: CVPixelBuffer, times: StageTimes,
+                         start: UInt64) -> PipelinedFrameStage.Begun {
+        processLock.lock()
+        defer { processLock.unlock() }
+        // A stage replaced while the pass ran (a fallback, a rebuild) is not the one to encode on.
+        guard ran === stage, !isDisabled else { return .passThrough }
+        var times = times
+        do {
+            let mlOut = try result.get().value
+            let encoded = try ran.encodeAfterML(original, input: input, mlOut: mlOut, times: &times)
+            guard let work = encoded.work else {
+                times.total = elapsedMs(since: start)
+                queueCompletion(Completion(stage: ran, times: times, error: nil))
+                return .ready(encoded.output)
+            }
+            let output = UncheckedSendable(encoded.output)
+            let box = UncheckedSendable(ran)
+            let encodedTimes = times
+            return .gpu(work) { [weak self] holdMs in
+                self?.complete(work, output: output.value, stage: box.value, times: encodedTimes, holdMs: holdMs)
+            }
+        } catch {
+            queueCompletion(Completion(stage: ran, times: times, error: error))
+            return .passThrough
+        }
+    }
+
+    private func queueCompletion(_ completion: Completion) {
+        completionLock.lock()
+        completions.append(completion)
+        completionLock.unlock()
+    }
+
     /// A frame's GPU work completed, on Metal's completion thread. It only queues the result, under its
     /// own short lock, and the frame goes out at once; `recordCompletions` counts it.
     private func complete(_ work: EncodedGPUWork, output: CVPixelBuffer, stage ran: Stage,
@@ -363,9 +436,7 @@ final class FrameUpscaler: @unchecked Sendable {
             completion = Completion(stage: ran, times: times, error: error)
             result = nil
         }
-        completionLock.lock()
-        completions.append(completion)
-        completionLock.unlock()
+        queueCompletion(completion)
         return result
     }
 
@@ -1049,23 +1120,47 @@ private final class Stage {
             times.metal = elapsedMs(since: t0)
             return (attach(to: output, from: original, times: &times), work)
         }
+        let input = try cropInput(original, picture: picture, times: &times)
+        let mlOut = try ml?.process(input, frameIndex: frameIndex, timeout: mlTimeout, submit: submit, times: &times)
+        return try encodeAfterML(original, input: input, mlOut: mlOut, times: &times)
+    }
+
+    /// AE#957: an automatic plan with an ML pass runs it off the decoder's thread (`startML`, then
+    /// `encodeAfterML` from its callback).
+    var runsMLOffThread: Bool { chain == nil && ml != nil }
+
+    /// The picture of `original` (its clean aperture), as a buffer of its own when it is smaller.
+    func cropInput(_ original: CVPixelBuffer, picture: FrameUpscaler.PictureRegion,
+                   times: inout FrameUpscaler.StageTimes) throws -> CVPixelBuffer {
+        guard picture.width != CVPixelBufferGetWidth(original) || picture.height != CVPixelBufferGetHeight(original)
+        else { return original }
+        let format = CVPixelBufferGetPixelFormatType(original)
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        if cropPools[format] == nil {
+            cropPools[format] = try makePool(width: picture.width, height: picture.height, format: format)
+        }
+        let input = try pooledBuffer(cropPools[format]!)
+        try copyPlanes(from: original, to: input, origin: (picture.x, picture.y))
+        times.copy += elapsedMs(since: t0)
+        return input
+    }
+
+    /// Starts this frame's ML pass and returns; `done` runs once, off this thread (see `MLScaler.start`).
+    func startML(_ input: CVPixelBuffer, original: CVPixelBuffer, frameIndex: Int64, timeout: Double,
+                 submit: FrameUpscaler.MLSubmit?, times: FrameUpscaler.StageTimes,
+                 done: @escaping @Sendable (Result<UncheckedSendable<CVPixelBuffer>, Error>, FrameUpscaler.StageTimes) -> Void) {
+        guard let ml else { done(.failure(UpscaleError("plan has no ML pass")), times); return }
+        ml.start(input, original: original, frameIndex: frameIndex, timeout: timeout, submit: submit,
+                 times: times, done: done)
+    }
+
+    /// Everything after the ML pass: MetalFX encoded and not committed, or the ML output itself on the
+    /// ML-only rung. `mlOut` nil runs MetalFX on `input`.
+    func encodeAfterML(_ original: CVPixelBuffer, input: CVPixelBuffer, mlOut: CVPixelBuffer?,
+                       times: inout FrameUpscaler.StageTimes) throws -> (output: CVPixelBuffer, work: EncodedGPUWork?) {
         let format = CVPixelBufferGetPixelFormatType(original)
         let color = UpscaleColorParams(videoRange: format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                                        matrix: UpscaleMatrix.of(original))
-        let input: CVPixelBuffer
-        if picture.width == CVPixelBufferGetWidth(original) && picture.height == CVPixelBufferGetHeight(original) {
-            input = original
-        } else {
-            let t0 = DispatchTime.now().uptimeNanoseconds
-            if cropPools[format] == nil {
-                cropPools[format] = try makePool(width: picture.width, height: picture.height, format: format)
-            }
-            input = try pooledBuffer(cropPools[format]!)
-            try copyPlanes(from: original, to: input, origin: (picture.x, picture.y))
-            times.copy += elapsedMs(since: t0)
-        }
-        let mlOut = try ml?.process(input, frameIndex: frameIndex, timeout: mlTimeout, submit: submit, times: &times)
-
         if #available(tvOS 27.1, *), let scaler = scaler as? any MTLFXSpatialScaler, let rgba, let scaled {
             let t0 = DispatchTime.now().uptimeNanoseconds
             // On the encoding thread only; a texture an earlier frame still uses stays alive in its work.
@@ -1143,7 +1238,7 @@ private final class Stage {
 // MARK: - VT low-latency super resolution
 
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
-private final class MLScaler {
+private final class MLScaler: @unchecked Sendable {
     let outputWidth: Int
     let outputHeight: Int
     private let processor = VTFrameProcessor()
@@ -1159,6 +1254,12 @@ private final class MLScaler {
     private var copiesInput = false
     private var ended = false
     private let abandoned = AbandonedPasses()
+    /// AE#957: one pass at a time off the decoder's thread. The low-latency scaler numbers its frames, and
+    /// the next frame's MetalFX work must be committed after this one's. Held from `start` until the
+    /// callback has handed its frame on (or the pass timed out).
+    private let passGate = DispatchSemaphore(value: 1)
+    /// Where a pass's callback does its CPU work (crop, edges) and hands the frame on.
+    private static let finishQueue = DispatchQueue(label: "AetherEngine.FrameUpscaler.ml", qos: .userInteractive)
 
     /// Outstanding timed-out passes past which the stage disables itself.
     static let maxAbandoned = 8
@@ -1227,6 +1328,117 @@ private final class MLScaler {
         try copyPlanes(from: input, to: copy, mirroring: pad)
         times.copy += elapsedMs(since: t0)
         return try run(copy, original: input, frameIndex: frameIndex, timeout: timeout, submit: submit, times: &times)
+    }
+
+    /// AE#957: `process` off the calling thread. Waits only for the pass before (bounded by `timeout`),
+    /// starts this one and returns. `done` runs once, on `finishQueue`, with the output or the error: an
+    /// `MLTimeout` when VT did not answer in `timeout`, whose buffers stay out of the pools until it does.
+    /// `done` must hand the frame on (and commit its GPU work) before it returns: the next pass starts then.
+    func start(_ input: CVPixelBuffer, original: CVPixelBuffer, frameIndex: Int64, timeout: Double,
+               submit: FrameUpscaler.MLSubmit?, times: FrameUpscaler.StageTimes,
+               done: @escaping @Sendable (Result<UncheckedSendable<CVPixelBuffer>, Error>, FrameUpscaler.StageTimes) -> Void) {
+        guard passGate.wait(timeout: .now() + timeout) == .success else {
+            done(.failure(MLTimeout(seconds: timeout, outstanding: abandoned.count)), times)
+            return
+        }
+        let direct = !copiesInput && croppedPool == nil && CVPixelBufferGetPixelFormatType(input) == sourceFormat
+            && CVPixelBufferGetIOSurface(input) != nil
+        launch(UncheckedSendable(input), original: UncheckedSendable(original), direct: direct, frameIndex: frameIndex,
+               timeout: timeout, submit: submit, times: times, done: done)
+    }
+
+    private func launch(_ input: UncheckedSendable<CVPixelBuffer>, original: UncheckedSendable<CVPixelBuffer>,
+                        direct: Bool, frameIndex: Int64, timeout: Double, submit: FrameUpscaler.MLSubmit?,
+                        times: FrameUpscaler.StageTimes,
+                        done: @escaping @Sendable (Result<UncheckedSendable<CVPixelBuffer>, Error>, FrameUpscaler.StageTimes) -> Void) {
+        var times = times
+        let source: CVPixelBuffer, destination: CVPixelBuffer, params: VTLowLatencySuperResolutionScalerParameters
+        do {
+            if direct {
+                source = input.value
+            } else {
+                let t0 = DispatchTime.now().uptimeNanoseconds
+                source = try pooledBuffer(sourcePool)
+                try copyPlanes(from: input.value, to: source, mirroring: pad)
+                times.copy += elapsedMs(since: t0)
+            }
+            destination = try pooledBuffer(destinationPool)
+            let pts = CMTime(value: frameIndex, timescale: 600)
+            guard let sf = VTFrameProcessorFrame(buffer: source, presentationTimeStamp: pts),
+                  let df = VTFrameProcessorFrame(buffer: destination, presentationTimeStamp: pts)
+            else { throw UpscaleError("VTFrameProcessorFrame refused a buffer") }
+            params = VTLowLatencySuperResolutionScalerParameters(sourceFrame: sf, destinationFrame: df)
+        } catch {
+            passGate.signal()
+            done(.failure(error), times)
+            return
+        }
+        let pass = AsyncPass()
+        let retrySubmit = UncheckedSendable(submit)
+        let buffers = UncheckedSendable((source, destination))
+        let abandoned = abandoned
+        let gate = passGate
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        let callback: @Sendable (Error?) -> Void = { [self] error in
+            let (first, abandonedID) = pass.finish()
+            guard first else {
+                // The pass answered after its timeout: its buffers may go back to the pools.
+                if let abandonedID { abandoned.remove(abandonedID) }
+                return
+            }
+            Self.finishQueue.async { [self] in
+                var times = times
+                times.ml += elapsedMs(since: t0)
+                if let error {
+                    if direct, !FrameUpscaler.isBackgroundRefusal(error) {
+                        // As in `process`: VT may refuse the decoder's buffer; copy it from now on.
+                        copiesInput = true
+                        EngineLog.emit("[Upscale] ML scaler refused the decoder buffer (\(error)), copying input from now on",
+                                       category: .swPlayback)
+                        launch(input, original: original, direct: false, frameIndex: frameIndex, timeout: timeout,
+                               submit: retrySubmit.value, times: times, done: done)
+                        return
+                    }
+                    gate.signal()
+                    done(.failure(FrameUpscaler.isBackgroundRefusal(error) ? error : MLPassFailure(underlying: error)), times)
+                    return
+                }
+                let result: Result<UncheckedSendable<CVPixelBuffer>, Error>
+                let t1 = DispatchTime.now().uptimeNanoseconds
+                do {
+                    result = .success(UncheckedSendable(try finishOutput(buffers.value.1, original: original.value)))
+                } catch {
+                    result = .failure(error)
+                }
+                times.edge = elapsedMs(since: t1)
+                done(result, times)
+                gate.signal()
+            }
+        }
+        if let submit {
+            submit(params) { callback($0) }
+        } else {
+            processor.process(parameters: params) { _, error in callback(error) }
+        }
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + timeout) {
+            // VT may still write these later: keep them out of the pools until it calls back.
+            guard pass.timeOut({ abandoned.insert(buffers.value.0, buffers.value.1) }) else { return }
+            gate.signal()
+            done(.failure(MLTimeout(seconds: timeout, outstanding: abandoned.count)), times)
+        }
+    }
+
+    /// The pass's destination without its margin, with its edge band rescaled where there is no margin.
+    private func finishOutput(_ destination: CVPixelBuffer, original: CVPixelBuffer) throws -> CVPixelBuffer {
+        var output = destination
+        if let croppedPool {
+            output = try pooledBuffer(croppedPool)
+            try copyPlanes(from: destination, to: output, origin: crop)
+        }
+        if pad.x == 0 || pad.y == 0 {
+            try rescaleEdges(of: output, from: original, columns: pad.x == 0, rows: pad.y == 0)
+        }
+        return output
     }
 
     private func run(_ source: CVPixelBuffer, original: CVPixelBuffer, frameIndex: Int64, timeout: Double,
@@ -1357,6 +1569,36 @@ private final class Completion: @unchecked Sendable {
         guard semaphore.wait(timeout: .now() + timeout) == .success else { return nil }
         lock.lock(); defer { lock.unlock() }
         return .some(error)
+    }
+}
+
+/// One value handed from another thread to a waiting one.
+private final class SyncBox<Value>: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var value: Value?
+    func put(_ value: Value) { self.value = value; semaphore.signal() }
+    func take() -> Value { semaphore.wait(); return value! }
+}
+
+/// AE#957: an ML pass started off the decoder's thread, raced by its timeout. The first of the two wins.
+private final class AsyncPass: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state = 0  // 0 pending, 1 finished, 2 timed out
+    private var abandonedID: Int?
+    /// VT called back: true when it was in time, else the abandoned buffers' id to release.
+    func finish() -> (first: Bool, abandonedID: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        guard state == 0 else { return (false, abandonedID) }
+        state = 1
+        return (true, nil)
+    }
+    /// The timeout fired first: `abandon` parks the buffers, under the lock, so a late callback finds them.
+    func timeOut(_ abandon: () -> Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard state == 0 else { return false }
+        state = 2
+        abandonedID = abandon()
+        return true
     }
 }
 

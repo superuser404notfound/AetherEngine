@@ -189,6 +189,42 @@ struct PipelinedFrameStageDeliversInOrderTests {
         var decoded: UInt64 { get { lock.lock(); defer { lock.unlock() }; return _decoded } set { lock.lock(); _decoded = newValue; lock.unlock() } }
     }
 
+    /// A stage whose first step runs off the submitting thread (the VideoToolbox ML pass) lets `submit`
+    /// return at once, and its frame still leaves ahead of the pass-through frame behind it.
+    @Test func issue957AFrameWhoseFirstStepRunsLaterKeepsItsPlace() async throws {
+        let gate = Gate()
+        let delivered = Delivered()
+        let resume = ResumeBox()
+        let upscaled = UncheckedSendable(Self.frame()), original = UncheckedSendable(Self.frame())
+        let pipeline = PipelinedFrameStage(deliver: { buffer, pts, _ in delivered.add(pts, upscaled: buffer === upscaled.value) },
+                                           begin: { _, pts, _ in
+            pts.value == 1 ? .later { resume.set($0) } : .passThrough
+        })
+        let submitted = Self.onThread {
+            pipeline.submit(original.value, pts: Self.pts(1), hdr10Plus: nil)
+            pipeline.submit(original.value, pts: Self.pts(2), hdr10Plus: nil)
+        }
+        try await waitFor { submitted.isSet }
+        #expect(pipeline.inFlight == 2 && delivered.pts.isEmpty)
+        // The step answers from another thread with GPU work, which completes in turn.
+        resume.call(gate.work(waitingFor: 1, output: upscaled.value))
+        gate.release(1)
+        try await waitFor { delivered.pts.count == 2 }
+        #expect(delivered.pts == [1, 2])
+        #expect(delivered.upscaled == [true, false])
+        #expect(gate.holdTimes.count == 1)
+    }
+
+    private final class ResumeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resume: (@Sendable (PipelinedFrameStage.Begun) -> Void)?
+        func set(_ r: @escaping @Sendable (PipelinedFrameStage.Begun) -> Void) { lock.lock(); resume = r; lock.unlock() }
+        func call(_ next: PipelinedFrameStage.Begun) {
+            lock.lock(); let r = resume; lock.unlock()
+            r?(next)
+        }
+    }
+
     /// A frame whose GPU work failed goes out as the original.
     @Test func issue957AFailedFrameGoesOutAsTheOriginal() async throws {
         let gate = Gate()

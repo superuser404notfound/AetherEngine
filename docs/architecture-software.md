@@ -368,9 +368,12 @@ See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.
 - A frame whose GPU work failed goes out as decoded.
 - The budget counts the time a frame holds the decoder's thread: waiting for a free slot, then encoding. In steady state that is the stage's cost per frame.
 - A frame that was in flight when its stage was rebuilt (an overrun rung, the ML fallback) is still delivered, but does not count against the new stage.
-- A completion only queues the frame's times, and the frame goes out at once. The upscaler counts them at its next frame, on the decoder's thread: it holds its lock through the ML pass, so a completion that took that lock would wait for the next frame's pass.
-- The VideoToolbox super resolution pass is not pipelined. It still runs on the decoder's thread.
-- `FrameChain.encode` and the upscaler's `encode` return the work uncommitted, because Metal takes a completion handler only before the commit. The synchronous `process` and `upscale` (tests, the benchmark, the probe) commit and wait.
+- A completion only queues the frame's times, and the frame goes out at once. The stage counts them at its next frame, on the decoder's thread, so a completion never waits for the stage's lock.
+- The VideoToolbox super resolution pass runs off the decoder's thread too. The decoder's thread starts the pass and moves on. When VT answers, MetalFX is encoded and committed from VT's callback, so the next frame's ML pass (on the Neural Engine) overlaps this frame's MetalFX work (on the GPU).
+  - One ML pass at a time. The low-latency scaler numbers its frames, and the next frame's MetalFX work must be committed after this one's. So the decoder's thread waits for the pass before, and that wait counts in the budget: with ML slower than MetalFX, the budget measures the ML pass.
+  - The ML timeout (three frame intervals, at least 50 ms) is a timer. A pass that answers late keeps its buffers out of the pools until it does, as before.
+  - A stage replaced while its pass ran (the MetalFX-only fallback, a rebuild) delivers that frame as decoded.
+- `FrameChain.encode` and the upscaler's `encode` return the work uncommitted, because Metal takes a completion handler only before the commit. The synchronous `process` and `upscale` (tests, the probe) commit and wait; `upscale` also waits for an off-thread ML pass. The benchmark still runs the ML pass in line, so its wall time is one frame start to finish.
 
 On the A12, 720p to 2160p through MetalFX holds the decoder's thread about 9.5 ms per frame instead of 29.5 ms. Numbers: [measurements.md › Two frames in flight on the A12](measurements.md#two-frames-in-flight-on-the-a12-ae957).
 

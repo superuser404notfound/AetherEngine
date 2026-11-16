@@ -25,7 +25,10 @@ the public-API contract.
   counted against the frame budget. Frames now go to the renderer when their GPU work completes, in
   decode order, with at most two in flight. On an A12 Apple TV, 720p upscaled to 2160p holds the
   decoder's thread about 9.5 ms per frame instead of 29.5 ms (GPU time unchanged, no dropped frames).
-  Seeks and the end of stream deliver the frames still in flight first.
+  Seeks and the end of stream deliver the frames still in flight first. The VideoToolbox super
+  resolution pass runs off the decoder's thread as well: its MetalFX step is encoded when VT answers, so
+  the next frame's ML pass overlaps this frame's MetalFX work. Not yet measured on a device where VT
+  super resolution works (the A12 refuses it).
 
 ### Fixed
 

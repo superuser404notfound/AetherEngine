@@ -56,6 +56,11 @@ final class PipelinedFrameStage: @unchecked Sendable {
         /// Deliver what `complete` returns once `work` completed (nil: the original frame). `complete` gets
         /// the hold time in milliseconds and runs on a Metal completion thread.
         case gpu(EncodedGPUWork, complete: @Sendable (_ holdMs: Double) -> CVPixelBuffer?)
+        /// The stage's first step runs off the submitting thread (the VideoToolbox ML pass). `start` is called
+        /// on the submitting thread right after `begin`, may wait there for the step before (back-pressure),
+        /// and returns once this frame's step is under way. It calls `resume` once, from any thread, with
+        /// what to do next; a `.later` there delivers the original frame.
+        case later(_ start: (_ resume: @escaping @Sendable (Begun) -> Void) -> Void)
     }
 
     /// Two frames in flight: the A12 measurement above.
@@ -85,6 +90,8 @@ final class PipelinedFrameStage: @unchecked Sendable {
         let generation: UInt64
         var output: CVPixelBuffer?
         var done = false
+        /// When the frame let go of the submitting thread (uptime ns), under the pipeline's lock.
+        var released: UInt64?
         init(original: CVPixelBuffer, pts: CMTime, hdr10Plus: Data?, generation: UInt64) {
             self.original = original
             self.pts = pts
@@ -133,12 +140,33 @@ final class PipelinedFrameStage: @unchecked Sendable {
         case let .ready(output):
             finish(entry, output: output, inline: alone)
         case let .gpu(work, complete):
-            let holdMs = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
-            work.commandBuffer.addCompletedHandler { [self] _ in
-                finish(entry, output: complete(holdMs), inline: false)
+            release(entry)
+            commit(entry, work, complete: complete, start: start)
+        case let .later(startStep):
+            startStep { [self] next in
+                switch next {
+                case .passThrough, .later: finish(entry, output: nil, inline: false)
+                case let .ready(output): finish(entry, output: output, inline: false)
+                case let .gpu(work, complete): commit(entry, work, complete: complete, start: start)
+                }
             }
-            work.commandBuffer.commit()
+            release(entry)
         }
+    }
+
+    private func release(_ entry: Entry) {
+        lock.lock(); entry.released = DispatchTime.now().uptimeNanoseconds; lock.unlock()
+    }
+
+    /// Commits `work`; its completion delivers the frame with the time it held the submitting thread. A
+    /// `.later` frame whose step resumed before `start` returned counts until its completion instead.
+    private func commit(_ entry: Entry, _ work: EncodedGPUWork,
+                        complete: @escaping @Sendable (Double) -> CVPixelBuffer?, start: UInt64) {
+        work.commandBuffer.addCompletedHandler { [self] _ in
+            lock.lock(); let released = entry.released ?? DispatchTime.now().uptimeNanoseconds; lock.unlock()
+            finish(entry, output: complete(Double(released - start) / 1_000_000), inline: false)
+        }
+        work.commandBuffer.commit()
     }
 
     /// Delivers every frame still in flight, then returns. Call it after a decoder flush or drain, never
@@ -189,6 +217,9 @@ final class PipelinedFrameStage: @unchecked Sendable {
         undelivered.leave()
     }
 }
+
+/// A stage hands a `Begun` from its ML callback to the pipeline; the buffers in it belong to one frame.
+extension PipelinedFrameStage.Begun: @unchecked Sendable {}
 
 /// Carries a value the compiler cannot prove `Sendable` into a `@Sendable` closure, where the code
 /// guarantees it is not used from two threads at once (a frame buffer handed from encode to completion).

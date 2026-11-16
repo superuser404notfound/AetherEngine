@@ -602,6 +602,34 @@ struct FrameUpscalerTests {
         #expect(up.isDisabled && up.isDegraded)
         #expect(!MLRefusalMemory.refused)
     }
+    /// AE#957: through the pipeline the ML pass runs off the decoder's thread. `submit` returns before the
+    /// pass answers, the next frame's pass starts after it, and the frames leave upscaled and in order.
+    /// The fake pass answers after 100 ms without writing pixels, so a VM whose VT refuses every pass runs it.
+    @Test(.enabled(if: UpscalerGate.mlSessionAvailable))
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957TheMLPassRunsOffTheDecodersThread() async throws {
+        // 0.1 s frames: the ML timeout (three intervals) stays well above the fake pass.
+        let up = try upscaler(try plan(1280, 720, ml: [2]), frameInterval: 0.1)
+        up.mlSubmitOverride = { _, done in
+            // VT's latency, played by a thread of its own (not a wait in the test).
+            Thread.detachNewThread { Thread.sleep(forTimeInterval: 0.1); done(nil) }
+        }
+        let frames = FrameLog()
+        let pipeline = PipelinedFrameStage(deliver: { buffer, pts, _ in frames.add(pts.value, width: CVPixelBufferGetWidth(buffer)) },
+                                           begin: { buffer, pts, _ in up.begin(buffer, pts: pts) })
+        let input = UncheckedSendable(try TestFrames.nv12(1280, 720))
+        Thread {
+            let t0 = Date()
+            pipeline.submit(input.value, pts: CMTime(value: 1, timescale: 10), hdr10Plus: nil)
+            frames.firstSubmitMs = Date().timeIntervalSince(t0) * 1000
+            for n in 2...3 { pipeline.submit(input.value, pts: CMTime(value: Int64(n), timescale: 10), hdr10Plus: nil) }
+        }.start()
+        try await waitFor(upTo: .seconds(10)) { frames.pts.count == 3 }
+        #expect((frames.firstSubmitMs ?? 1000) < 60, "submit waited \(frames.firstSubmitMs ?? -1) ms for the ML pass")
+        #expect(frames.pts == [1, 2, 3])
+        #expect(frames.widths == [3840, 3840, 3840])
+    }
+
     @Test(.enabled(if: UpscalerGate.mlAvailable))
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func lateCompletionReleasesTheAbandonedBuffers() throws {
@@ -677,6 +705,19 @@ private final class CompletionLog: @unchecked Sendable {
 private extension FrameUpscaler {
     /// No timing: the configured interval stays in force.
     func upscale(_ input: CVPixelBuffer) -> CVPixelBuffer? { upscale(input, pts: .invalid) }
+}
+
+private final class FrameLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [(pts: Int64, width: Int)] = []
+    private var _firstSubmitMs: Double?
+    func add(_ pts: Int64, width: Int) { lock.lock(); items.append((pts, width)); lock.unlock() }
+    var pts: [Int64] { lock.lock(); defer { lock.unlock() }; return items.map(\.pts) }
+    var widths: [Int] { lock.lock(); defer { lock.unlock() }; return items.map(\.width) }
+    var firstSubmitMs: Double? {
+        get { lock.lock(); defer { lock.unlock() }; return _firstSubmitMs }
+        set { lock.lock(); _firstSubmitMs = newValue; lock.unlock() }
+    }
 }
 
 private final class BufferLog: @unchecked Sendable {
