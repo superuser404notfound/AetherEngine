@@ -849,6 +849,7 @@ SDR video below 1080p is scaled up to the display's native size, with VideoToolb
 - **It moves the title onto the software path,** so that path's rules apply: PiP through `softwarePiPSource`, no native subtitle renditions.
 - **Some titles keep their usual route:** HDR, Dolby Vision, a display no larger than the source, and any AirPlay route. The load logs one `[Upscale]` line saying why.
 - **It never stops playback.** A stage that falls behind degrades, then switches itself off. `$activeUpscale` then carries `degraded` or `disabledReason`.
+- **A failing VideoToolbox pass is dropped, not the stage.** Some devices (an A12 Apple TV on tvOS 27.2) report VideoToolbox super resolution and then refuse every frame. MetalFX alone then scales to the same size, and `$activeUpscale` shows `degraded` with `mlScale` nil.
 
 Details in [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo) and [upscaleScaler](api.md#upscalescaler).
 

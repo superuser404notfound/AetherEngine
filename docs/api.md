@@ -2985,7 +2985,7 @@ So correcting it through `reloadAtCurrentPosition(applying:)` does nothing. Call
 
 1. **`TitleInfo`.** `id` is a position in the current scan. `playlist` and `titleSet` name the title on the disc, so store those to recognize a title at a later open.
 2. **`ChapterInfo`.** `discChapters` are relative to the title and reached through `selectChapter(id:)`. `mediaChapters` are on the 0-based `currentTime` / `seek(to:)` axis (the container start already subtracted): a host passes `startSeconds` straight to `seek(to:)`, and `selectChapter` does nothing for them.
-3. **`UpscaleStatus.degraded`** is true when the stage runs below its top step. Either a sustained overrun or missing MetalFX made it deliver the VideoToolbox output at its own size (which `targetSize` then is, with the source's pixel aspect ratio), or a line-art overrun fell back to the automatic scaler. It stays true when the stage later switches itself off.
+3. **`UpscaleStatus.degraded`** is true when the stage runs below its top step. Either a sustained overrun or missing MetalFX made it deliver the VideoToolbox output at its own size (which `targetSize` then is, with the source's pixel aspect ratio), a failing VideoToolbox pass left MetalFX alone at the same `targetSize` (`mlScale` nil), or a line-art overrun fell back to the automatic scaler. It stays true when the stage later switches itself off.
 
 **`SourceProbe` HDR flags.**
 
