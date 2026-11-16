@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.69.0] - 2026-11-16
+
 ### Added
 
 - **Track loudness on audio-only sessions, lifts included (Sodalite#242).** `LoadOptions.normalizationGainDB`
