@@ -462,8 +462,8 @@ struct FrameUpscalerTests {
             #expect(v >= 0, "\(name) \(v)")
         }
         #expect(t.total > 0 && t.metal > 0)
-        let sum = t.copy + t.ml + t.edge + t.metal + t.attach
-        #expect(abs(t.total - sum) <= max(1, 0.2 * t.total), "total \(t.total) vs sum \(sum)")
+        // Since AE#957 `total` is the frame's hold time on the decoder's thread. The ML pass and the GPU work run
+        // off it, and the hold includes the wait for the previous pass, so the stages no longer sum to it.
         print("[FrameUpscalerTests] \(t.logLine(frames: FrameUpscaler.budgetWindow, intervalMs: 1000.0 / 24))")
     }
 
