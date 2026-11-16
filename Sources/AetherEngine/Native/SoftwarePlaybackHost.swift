@@ -1118,12 +1118,14 @@ final class SoftwarePlaybackHost {
     /// and letting it do the pacing would make the effective lead a function of frame rate.
     /// Before the clock is armed the lead is meaningless (the clock reads garbage), so only
     /// the backstop applies: the loop has to keep reading to produce the buffers that arm it.
+    /// `targetLeadSeconds` and `parkedCap` come from `SoftwareReadGateBudget` (AE#1079).
     nonisolated static func shouldHoldDemuxRead(
         parkedCount: Int,
         parkedCap: Int,
         clockArmed: Bool,
         lastAudioPts: Double,
-        clockSeconds: Double
+        clockSeconds: Double,
+        targetLeadSeconds: Double = AudioLookaheadPolicy.targetLeadSeconds
     ) -> Bool {
         if parkedCount >= parkedCap { return true }
         guard clockArmed, clockSeconds.isFinite else { return false }
@@ -1131,7 +1133,8 @@ final class SoftwarePlaybackHost {
             clockArmed: true,
             preArmPacketsFed: 0,
             lastFedAudioPTS: lastAudioPts,
-            clockSeconds: clockSeconds
+            clockSeconds: clockSeconds,
+            targetLeadSeconds: targetLeadSeconds
         ) == .stop
     }
 
@@ -1159,11 +1162,12 @@ final class SoftwarePlaybackHost {
     nonisolated static let parkedVideoReadWaitSeconds: TimeInterval = 0.020
 
     nonisolated static func parkedRendererWaitSeconds(
-        clockArmed: Bool, lastAudioPts: Double, clockSeconds: Double, rate: Float
+        clockArmed: Bool, lastAudioPts: Double, clockSeconds: Double, rate: Float,
+        targetLeadSeconds: Double = AudioLookaheadPolicy.targetLeadSeconds
     ) -> TimeInterval {
         let floor = 0.005, ceiling = 0.020
         guard clockArmed, lastAudioPts.isFinite, clockSeconds.isFinite, rate > 0 else { return floor }
-        let untilGateOpens = (lastAudioPts - clockSeconds - AudioLookaheadPolicy.targetLeadSeconds) / Double(rate)
+        let untilGateOpens = (lastAudioPts - clockSeconds - targetLeadSeconds) / Double(rate)
         guard untilGateOpens.isFinite else { return floor }
         return min(max(untilGateOpens, floor), ceiling)
     }
@@ -3234,6 +3238,17 @@ final class SoftwarePlaybackHost {
         let diag = demuxDiag
         let keyframeLedger = keyframeLedger
         let directLiveSource = directLiveReadAhead
+        let readGateBudget = SoftwareReadGateBudget(
+            audioReadLeadSeconds: dem.dashInterleaveLeadSeconds,
+            videoSubsegmentSeconds: dem.dashVideoSubsegmentSeconds,
+            frameRate: dem.stream(at: vIdx).flatMap { AetherEngine.detectFrameRate(stream: $0) })
+        if readGateBudget != .ordinary {
+            EngineLog.emit(
+                "[SWHost] AE#1079 read gate sized to the DASH interleave: audio lead "
+                + String(format: "%.1f", readGateBudget.audioLeadSeconds)
+                + " s, parked video cap \(readGateBudget.parkedVideoCap)",
+                category: .swPlayback)
+        }
         let readAhead = directLiveSource?.packets ?? vodPacketReadAhead
         demuxQueue.async {
             Self.runDemuxLoop(
@@ -3272,6 +3287,7 @@ final class SoftwarePlaybackHost {
                 onError: onErrorForGeneration,
                 onEnd: onEndForGeneration,
                 audioTapSink: getAudioTapSink,
+                readGateBudget: readGateBudget,
                 subtitleStreamIndices: subIndices,
                 subtitleTimeBases: subTimeBases,
                 splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
@@ -3971,6 +3987,7 @@ final class SoftwarePlaybackHost {
         onError: @Sendable (String, UInt64) -> Void,
         onEnd: @Sendable (UInt64) -> Void,
         audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?),
+        readGateBudget: SoftwareReadGateBudget = .ordinary,
         subtitleStreamIndices: Set<Int32> = [],
         subtitleTimeBases: [Int32: AVRational] = [:],
         splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
@@ -4051,7 +4068,8 @@ final class SoftwarePlaybackHost {
         // but never pauses its clock for rebuffering. Its forward-only producer keeps already
         // parked video runnable while source I/O waits; DVR retains its separate feeder.
         var parkedVideo: [UnsafeMutablePointer<AVPacket>] = []
-        let parkedVideoCap = 256
+        let parkedVideoCap = readGateBudget.parkedVideoCap
+        let targetAudioLead = readGateBudget.audioLeadSeconds
         /// Compressed allocation cost; the Live limit includes side data and packet headers.
         var parkedVideoBytes = 0
         var terminalGeneration = SoftwareTerminalGeneration()
@@ -4204,7 +4222,8 @@ final class SoftwarePlaybackHost {
                     return Self.shouldHoldDemuxRead(
                         parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
                         clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
-                        clockSeconds: audioOutput?.currentTimeSeconds ?? .nan)
+                        clockSeconds: audioOutput?.currentTimeSeconds ?? .nan,
+                        targetLeadSeconds: targetAudioLead)
                 case .packetCapacity(let bytes):
                     return directLiveSource.map {
                         Self.shouldWaitForLivePacketCapacity(
@@ -4240,7 +4259,8 @@ final class SoftwarePlaybackHost {
                     // changes, so those cut the wait short where the sleep used to ride them out.
                     let wait = Self.parkedRendererWaitSeconds(
                         clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
-                        clockSeconds: audioOutput?.currentTimeSeconds ?? .nan, rate: currentRate())
+                        clockSeconds: audioOutput?.currentTimeSeconds ?? .nan, rate: currentRate(),
+                        targetLeadSeconds: targetAudioLead)
                     condition.lock()
                     autoreleasepool {
                         _ = condition.wait(until: Date(timeIntervalSinceNow: wait))
@@ -4371,7 +4391,8 @@ final class SoftwarePlaybackHost {
                         || Self.shouldHoldDemuxRead(
                         parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
                         clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
-                        clockSeconds: audioOutput?.currentTimeSeconds ?? .nan) {
+                        clockSeconds: audioOutput?.currentTimeSeconds ?? .nan,
+                        targetLeadSeconds: targetAudioLead) {
                         waitForRenderer(.readGate)
                         return true
                     }

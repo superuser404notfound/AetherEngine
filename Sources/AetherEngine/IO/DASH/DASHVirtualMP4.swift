@@ -41,6 +41,10 @@ struct DASHVirtualLayout: Sendable {
     /// can run this far ahead of the video in read order, and a plan segment shorter than that loses
     /// its keyframe to the next segment because the audio has already cut past it.
     var interleaveLeadSeconds: Double = 0
+    /// AE#1079: the longest video subsegment. The other direction of the same interleave: a video
+    /// piece is read whole before the audio that starts inside it, so the software read gate has to
+    /// be able to park this much video before the next audio arrives.
+    var videoSubsegmentSeconds: Double = 0
 
     /// One representation's parsed head.
     struct Source: Sendable {
@@ -158,7 +162,10 @@ struct DASHVirtualLayout: Sendable {
                                  randomAccessStartsSeconds: video.map { randomAccessStarts(indexes[$0]) } ?? [],
                                  interleaveLeadSeconds: indexes.indices.filter { $0 != video }
                                     .flatMap { s in indexes[s].references.map { Double($0.duration) / Double(indexes[s].timescale) } }
-                                    .max() ?? 0)
+                                    .max() ?? 0,
+                                 videoSubsegmentSeconds: video.map { v in
+                                    indexes[v].references.map { Double($0.duration) / Double(indexes[v].timescale) }.max() ?? 0
+                                 } ?? 0)
     }
 
     /// The SAP times of `index` relative to the first, or empty when a subsegment does not start with a

@@ -278,6 +278,8 @@ struct DASHVirtualMP4Tests {
         let longest = audioIndex.references.map { Double($0.duration) / Double(audioIndex.timescale) }.max()
         #expect(layout.interleaveLeadSeconds == longest)
         #expect(layout.interleaveLeadSeconds > 2)
+        // AE#1079: the other direction, a video subsegment read whole before the audio inside it.
+        #expect(layout.videoSubsegmentSeconds == 2)
     }
 
     /// A one-level sidx (version 0, timescale 1000, earliest presentation time 500) with one
