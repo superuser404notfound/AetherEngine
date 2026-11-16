@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A live channel at a low bitrate opens in milliseconds instead of seconds (AE#1076).** The network reader
+  held every live read until FFmpeg's whole 256 KB buffer was full. On a 0.5 Mbit/s HDHomeRun sub-channel
+  that is 4 s per read: `open_input` took 1.7 to 2.9 s against 0.3 s on the main channels, and during
+  playback the live edge moved in 3 s steps. A live read now returns what has arrived. Measured on a
+  real-time 0.68 Mbit/s MPEG-TS origin, `open_input` went from 3.07 s to 20 ms. VOD reads are unchanged.
+  Thanks to en0x for the measurements that pointed at it.
+
 - **A live session stays live after an audio-track switch.** The rebuild behind `selectAudioTrack`
   (and the disc-title pick and the custom-source `reloadAtCurrentPosition`) runs `stopInternal`, which
   clears `isLive`, `isSequentialOrigin` and the live window, and then reopens through `loadNative` or

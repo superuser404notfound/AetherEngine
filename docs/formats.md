@@ -1673,6 +1673,10 @@ With a fixed 4 s lead instead, the buffer runs dry before every 10 s segment and
 - `SourceProbe.isLive` flags no-duration network streams, so hosts can detect and reload.
 - **Mid-stream joins (#107).** Sources joined mid-stream deliver their first samples at arbitrary PTS hours past zero. They anchor the clock at the first decoded sample on every session shape (live, live+DVR, and a plain VOD open of the same URL or of a mid-broadcast capture file), publishing session-relative positions while `sourceTime` stays on the source axis for subtitles.
 
+**Reads on a live source return what has arrived (AE#1076).** FFmpeg reads a network source through a 256 KB buffer. On a live source the reader hands back whatever bytes are there instead of waiting until that buffer is full, the way a socket read does. Waiting for the full 256 KB cost 4 s per read on a 0.5 Mbit/s tuner sub-channel. That showed up as a 1.7 to 2.9 s `open_input` and as a live edge that moved in 3 s steps. A VOD read still fills its request.
+
+Measured with `aetherctl play --live` against an origin that sends MPEG-2 + AC-3 in real time, PAT and PMT in the first packets: `open_input` went from 3.07 s to 20 ms at 0.68 Mbit/s and from 0.44 s to 2 ms at 4.8 Mbit/s.
+
 **A PAT program that never sends its PMT.** The TS demuxer only knows its stream list is complete once every program its PAT lists has sent a PMT. Until then `avformat_find_stream_info` cannot take its "all info found" exit. Some IPTV panels and restreamers pass on a multiplex fragment whose PAT still lists a program they do not carry. Without a release, such a channel reads the whole playback budget (50 MiB / 60 s) after every stream it has is resolved.
 
 - The engine releases that wait once the stream analysis has received data for 2.5 s while one program still has no PMT and another has its PMT and an audio or video stream. 2.5 s is five missed repetitions of the 0.5 s PMT interval ETSI TR 101 290 expects.

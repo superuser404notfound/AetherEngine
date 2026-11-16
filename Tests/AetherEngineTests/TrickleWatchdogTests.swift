@@ -359,8 +359,9 @@ struct TrickleWatchdogTests {
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
-        // One AVIO-sized read takes about 13 s at this rate, so it stays blocked on forward data for
-        // the whole observation, which is the state the verdict is evaluated in.
+        // 256 KB takes about 13 s at this rate, and the loop reads again as soon as a read returns
+        // (live reads return short since AE#1076), so a read waits on forward data for the whole
+        // observation, which is the state the verdict is evaluated in.
         _ = Self.startReading(reader, bytes: 256 * 1024)
         let ended = try await waitFor(upTo: .seconds(8 * Self.stallTimeout)) {
             reader.trickleEndCountForTesting > 0 || origin.requests.count > 1

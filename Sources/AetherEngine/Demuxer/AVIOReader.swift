@@ -2436,6 +2436,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 }
                 streamLock.unlock()
                 toResume?.resume()
+                if isLive { break }   // AE#1076, see readPersistent
             } else if ended {
                 break
             } else {
@@ -2866,6 +2867,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         timedReconnect(seek: false, at: refillFrom)
                     }
                 }
+                // AE#1076: a live source hands back what it has, like a socket. Filling FFmpeg's whole
+                // 256 KB buffer first held every read for 256 KB of broadcast: 4 s on a 0.5 Mbit/s
+                // sub-channel, which is where its 1.7 to 2.9 s `open_input` went.
+                if isLive { break }
                 continue
             }
 
