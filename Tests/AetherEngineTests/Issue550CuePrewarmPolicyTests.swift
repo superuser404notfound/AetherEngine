@@ -14,6 +14,12 @@ struct Issue550CuePrewarmPolicyTests {
         #expect(!HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: false, isSourceSeekable: false))
     }
 
+    @Test("a DASH source does not (AE#1075): its virtual MP4 is fragmented, so there is no stss to load")
+    func dashSourceDoesNotPrewarm() {
+        #expect(!HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: false, isSourceSeekable: true, isDASHSource: true))
+        #expect(HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: false, isSourceSeekable: true, isDASHSource: false))
+    }
+
     @Test("a segmented reader keeps its own AE#268 exemption, seekable or not")
     func segmentedReaderNeverPrewarms() {
         #expect(!HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: true, isSourceSeekable: true))

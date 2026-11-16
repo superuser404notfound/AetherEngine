@@ -410,6 +410,30 @@ struct DASHOverHTTPTests {
         #expect(origin.requests(to: "/movie.mpd").count == 1)
     }
 
+    @Test("a DASH source skips the cue prewarm, the same file served as plain MP4 keeps it (AE#1075)")
+    func dashSkipsCuePrewarm() throws {
+        let origin = try Self.origin(manifestPath: "/movie.mpd")
+        defer { origin.stop() }
+
+        let dash = Demuxer()
+        try dash.open(url: URL(string: "\(origin.baseURL)/movie.mpd")!)
+        defer { dash.close() }
+        #expect(dash.isDASHSource)
+        #expect(dash.isSourceSeekable && dash.timeSeekableReader == nil)
+        #expect(!HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: false,
+                                                 isSourceSeekable: dash.isSourceSeekable,
+                                                 isDASHSource: dash.isDASHSource))
+
+        // Same container format name, so the flag must come from the open path, not from "mp4".
+        let plain = Demuxer()
+        try plain.open(url: URL(string: "\(origin.baseURL)/media/v.mp4")!)
+        defer { plain.close() }
+        #expect(!plain.isDASHSource)
+        #expect(HLSVideoEngine.cuePrewarmMayRun(hasSegmentedReader: false,
+                                                isSourceSeekable: plain.isSourceSeekable,
+                                                isDASHSource: plain.isDASHSource))
+    }
+
     @Test("an origin that ignores Range is refused with that reason")
     func rangeIgnoringOrigin() throws {
         let origin = try Self.origin()

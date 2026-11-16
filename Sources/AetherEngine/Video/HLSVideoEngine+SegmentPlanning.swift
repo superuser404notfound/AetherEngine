@@ -35,8 +35,16 @@ extension HLSVideoEngine {
     /// ("the scan would consume the non-replayable prefix"); this closes the larger hole above it.
     /// A segmented reader is excluded for the AE#268 reason instead: it has no index to load and every
     /// reposition refetches a segment.
-    static func cuePrewarmMayRun(hasSegmentedReader: Bool, isSourceSeekable: Bool) -> Bool {
-        !hasSegmentedReader && isSourceSeekable
+    ///
+    /// AE#1075: a DASH presentation is excluded because the seek cannot load anything. Its virtual MP4
+    /// is fragmented, the moov's sample tables are empty (no `stss`), and libavformat adds index entries
+    /// only for the fragments it parses, so the seek indexes the one fragment at the midpoint. Measured
+    /// on a 10 min SegmentBase source behind an origin with 80 ms latency and 4 MB/s, 5 runs per arm:
+    /// the seek fetched about 5.7 MB in 13 extra requests, readyToPlay moved from 4.25 s to 6.2 s, and
+    /// the plan was the same uniform-stride fallback either way (2 IRAPs with the seek, 1 without).
+    static func cuePrewarmMayRun(hasSegmentedReader: Bool, isSourceSeekable: Bool,
+                                 isDASHSource: Bool = false) -> Bool {
+        !hasSegmentedReader && !isDASHSource && isSourceSeekable
     }
 
     /// True when the indexed keyframe list is dense enough AND wide enough to trust for a keyframe-aligned plan (#64, #91).

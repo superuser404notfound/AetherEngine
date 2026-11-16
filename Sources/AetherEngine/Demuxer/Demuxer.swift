@@ -3047,6 +3047,12 @@ public final class Demuxer: @unchecked Sendable {
         (avioProvider as? CustomIOReaderBridge)?.timeSeekableReader
     }
 
+    /// AE#1075: the open went through `openDASH`, so the container is the virtual fragmented MP4.
+    /// Read from the provider rather than the container name, which a plain MP4 shares.
+    var isDASHSource: Bool {
+        (avioProvider as? CustomIOReaderBridge)?.isDASHSource ?? false
+    }
+
     /// Every engine seek target is an ABSOLUTE source PTS, while a `TimeSeekableIOReader` addresses
     /// elapsed media time (for HLS: the EXTINF sum in front of a segment). MPEG-TS carries an
     /// arbitrary PTS origin, so the two axes differ by that origin: ffmpeg writes 1.4 s by default and
