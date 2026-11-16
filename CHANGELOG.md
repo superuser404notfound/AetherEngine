@@ -63,8 +63,9 @@ the public-API contract.
   tvOS 27.2.1) restarted within about 160 ms of the first frame when the hardware decoder got
   an SPS with that conformance window. On tvOS the native remux now sets the window's offsets to zero, in
   the init segment and in the in-band SPS of each sample, and crops the 16 padding lines with a `clap` box
-  instead. Other geometries and other platforms are untouched. Thanks to UnknownCoder807 for the fix
-  (PR #1072).
+  instead. The box's vertical offset uses the sign tvOS reads (+8), the opposite of the spec, because
+  with the spec's -8 an Apple TV cut 16 lines off the top and showed 16 black lines at the bottom. Other
+  geometries and other platforms are untouched. Thanks to UnknownCoder807 for the fix (PR #1072).
 
 - **Upscaling keeps working where VideoToolbox super resolution fails every pass (#957).** An A12 Apple
   TV (tvOS 27.2) reports VT super resolution and then refuses every frame. The stage switched itself off
