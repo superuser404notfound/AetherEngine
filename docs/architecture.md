@@ -119,6 +119,7 @@ These cases take the libavcodec route even when the codec is on the whitelist:
 | Case | Reason |
 | --- | --- |
 | A custom `IOReader` | AVPlayer needs a URL. |
+| A container AVFoundation does not open (Matroska, Ogg, MPEG-TS, ASF, ...) | AVPlayer answers "Cannot Open" and the clock stays at 0. Only QuickTime/MP4/M4A, raw MP3/MP2, ADTS AAC, raw AC-3 / E-AC-3, raw FLAC, WAV, AIFF and CAF go to AVPlayer (`avPlayerReadsAudioContainer`). |
 | A FLAC whose blocks are under CoreMedia's floor | AE#764. |
 | An AAC whose layout sits in a PCE (`channelConfiguration` 0) | AVPlayer opens it and ends at 0 s with no duration (AE#1047). |
 | A FLAC whose first frame is smaller than its `STREAMINFO` `max_blocksize` | AVPlayer times each frame by the declared size and runs its clock past the end. Read from a peeked first packet (AE#946). |
@@ -129,7 +130,7 @@ These cases take the libavcodec route even when the codec is on the whitelist:
 
 ```
 audioOnly == true
-   ├─ whitelisted codec, URL source, not .software ──► AVPlayer (AudioAVPlayerHost) ──► AVR / speakers
+   ├─ whitelisted codec and container, URL source, not .software ──► AVPlayer (AudioAVPlayerHost) ──► AVR / speakers
    └─ otherwise ──► Demuxer ──► AudioDecoder ──► AVSampleBufferAudioRenderer ──► AVR / speakers
 ```
 

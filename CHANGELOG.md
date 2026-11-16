@@ -47,6 +47,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Audio-only AAC, FLAC, MP3 or AC-3 in Matroska no longer stays silent.** The audio-only dispatch only
+  looked at the codec, so a whitelisted codec in a container AVFoundation does not open (MKA, Ogg,
+  MPEG-TS, ASF) went to the AVPlayer audio host, which answered "Cannot Open" with the clock at 0. Only
+  containers AVFoundation reads now go to AVPlayer; the rest goes to the FFmpeg host. `aetherctl audio` on
+  AAC, FLAC, MP3 and MP2 in MKA: silent before, playing now; M4A still plays on AVPlayer.
+
 - **MPEG-DASH segments start on a keyframe, and seeks land where they were aimed (#1075).** A DASH
   source has no keyframe index, so the native route laid its HLS segments on an even grid that ignored the
   GOPs. Wherever a boundary missed a keyframe, the segment depended on the one before it and a seek landed
