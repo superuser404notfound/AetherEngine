@@ -1,0 +1,164 @@
+import Foundation
+import Testing
+import CoreMedia
+import CoreVideo
+import Metal
+@testable import AetherEngine
+
+/// AE#957: the GPU stages keep two frames in flight (`PipelinedFrameStage`). Each GPU frame here is an
+/// empty command buffer that waits on a shared event, so the test decides when it completes. Calls that
+/// block (`submit` at the depth, `settle`) run on a thread of their own, never the test's.
+@Suite("Pipelined frame stage delivers in order (AE#957)", .serialized, .timeLimit(.minutes(2)),
+       .enabled(if: MTLCreateSystemDefaultDevice() != nil))
+struct PipelinedFrameStageDeliversInOrderTests {
+
+    private final class Delivered: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [(pts: Int64, upscaled: Bool)] = []
+        func add(_ pts: CMTime, upscaled: Bool) { lock.lock(); items.append((pts.value, upscaled)); lock.unlock() }
+        var pts: [Int64] { lock.lock(); defer { lock.unlock() }; return items.map(\.pts) }
+        var upscaled: [Bool] { lock.lock(); defer { lock.unlock() }; return items.map(\.upscaled) }
+    }
+
+    /// A GPU frame held until `release(value)`; `complete` hands back `output` and records the hold time.
+    private final class Gate: @unchecked Sendable {
+        let device: MTLDevice
+        let queue: MTLCommandQueue
+        let event: MTLSharedEvent
+        init() {
+            device = MTLCreateSystemDefaultDevice()!
+            queue = device.makeCommandQueue()!
+            event = device.makeSharedEvent()!
+        }
+        private let lock = NSLock()
+        private var holds: [Double] = []
+        var holdTimes: [Double] { lock.lock(); defer { lock.unlock() }; return holds }
+
+        func work(waitingFor value: UInt64, output: CVPixelBuffer, fails: Bool = false) -> PipelinedFrameStage.Begun {
+            let cb = queue.makeCommandBuffer()!
+            cb.encodeWaitForEvent(event, value: value)
+            let work = EncodedGPUWork(commandBuffer: cb, keepAlive: ()) { _, _ in NSError(domain: "test", code: 1) }
+            let out = UncheckedSendable(output)
+            return .gpu(work) { [self] hold in
+                lock.lock(); holds.append(hold); lock.unlock()
+                return fails ? nil : out.value
+            }
+        }
+
+        func release(_ value: UInt64) { event.signaledValue = value }
+    }
+
+    private static func frame() -> CVPixelBuffer {
+        var b: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 16, 16, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &b)
+        return b!
+    }
+
+    private static func pts(_ n: Int64) -> CMTime { CMTime(value: n, timescale: 24) }
+
+    /// Starts `body` on a thread of its own and returns a flag that turns true when it returned.
+    private static func onThread(_ body: @escaping @Sendable () -> Void) -> Flag {
+        let flag = Flag()
+        Thread { body(); flag.set() }.start()
+        return flag
+    }
+
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    /// A pass-through frame behind a GPU frame waits for it: frames leave in the order they came in.
+    @Test func issue957APassThroughFrameWaitsForTheGPUFrameAheadOfIt() async throws {
+        let gate = Gate()
+        let delivered = Delivered()
+        let upscaled = UncheckedSendable(Self.frame()), original = UncheckedSendable(Self.frame())
+        let pipeline = PipelinedFrameStage(deliver: { buffer, pts, _ in delivered.add(pts, upscaled: buffer === upscaled.value) },
+                                           begin: { _, pts, _ in
+            pts.value == 1 ? gate.work(waitingFor: 1, output: upscaled.value) : .passThrough
+        })
+        let submitted = Self.onThread {
+            pipeline.submit(original.value, pts: Self.pts(1), hdr10Plus: nil)
+            pipeline.submit(original.value, pts: Self.pts(2), hdr10Plus: nil)
+        }
+        try await waitFor { submitted.isSet }
+        // Neither may leave while frame 1 is still on the GPU.
+        let early1 = try await waitFor(upTo: .milliseconds(200)) { !delivered.pts.isEmpty }
+        #expect(!early1)
+        #expect(pipeline.inFlight == 2)
+        gate.release(1)
+        try await waitFor { delivered.pts.count == 2 }
+        #expect(delivered.pts == [1, 2])
+        #expect(delivered.upscaled == [true, false])
+        #expect(pipeline.inFlight == 0)
+    }
+
+    /// With nothing ahead of it, a frame that needs no GPU goes out on the submitting thread, as before
+    /// the pipeline: a stage that is still building or switched off adds no queue hop.
+    @Test func issue957AFrameWithNothingAheadGoesOutInline() {
+        let delivered = Delivered()
+        let pipeline = PipelinedFrameStage(deliver: { _, pts, _ in delivered.add(pts, upscaled: false) },
+                                           begin: { _, _, _ in .passThrough })
+        pipeline.submit(Self.frame(), pts: Self.pts(7), hdr10Plus: nil)
+        #expect(delivered.pts == [7])
+    }
+
+    /// `submit` waits while `depth` frames are undelivered: the GPU never holds more than two.
+    @Test func issue957SubmitWaitsAtTheDepth() async throws {
+        let gate = Gate()
+        let delivered = Delivered()
+        let pipeline = PipelinedFrameStage(deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
+                                           begin: { _, pts, _ in gate.work(waitingFor: UInt64(pts.value), output: Self.frame()) })
+        #expect(pipeline.depth == PipelinedFrameStage.defaultDepth && pipeline.depth == 2)
+        let input = UncheckedSendable(Self.frame())
+        let third = Self.onThread {
+            for n in 1...3 { pipeline.submit(input.value, pts: Self.pts(Int64(n)), hdr10Plus: nil) }
+        }
+        try await waitFor { pipeline.inFlight == 2 }
+        let early2 = try await waitFor(upTo: .milliseconds(200)) { third.isSet }
+        #expect(!early2)
+        gate.release(1)
+        try await waitFor { third.isSet }
+        gate.release(3)
+        try await waitFor { delivered.pts.count == 3 }
+        #expect(delivered.pts == [1, 2, 3])
+        // The third frame waited for a slot, and its hold time says so.
+        #expect(gate.holdTimes.count == 3)
+    }
+
+    /// `settle()` returns once every frame in flight is delivered; the host calls it after a decoder
+    /// flush, so nothing from before a seek reaches the renderer after its flush.
+    @Test func issue957SettleDeliversWhatIsInFlight() async throws {
+        let gate = Gate()
+        let delivered = Delivered()
+        let pipeline = PipelinedFrameStage(deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
+                                           begin: { _, pts, _ in gate.work(waitingFor: 1, output: Self.frame()) })
+        let input = UncheckedSendable(Self.frame())
+        let submitted = Self.onThread {
+            pipeline.submit(input.value, pts: Self.pts(1), hdr10Plus: nil)
+            pipeline.submit(input.value, pts: Self.pts(2), hdr10Plus: nil)
+        }
+        try await waitFor { submitted.isSet }
+        let settled = Self.onThread { pipeline.settle() }
+        let early3 = try await waitFor(upTo: .milliseconds(200)) { settled.isSet }
+        #expect(!early3)
+        gate.release(1)
+        try await waitFor { settled.isSet }
+        #expect(delivered.pts == [1, 2])
+    }
+
+    /// A frame whose GPU work failed goes out as the original.
+    @Test func issue957AFailedFrameGoesOutAsTheOriginal() async throws {
+        let gate = Gate()
+        let original = UncheckedSendable(Self.frame())
+        let delivered = Delivered()
+        let pipeline = PipelinedFrameStage(deliver: { buffer, pts, _ in delivered.add(pts, upscaled: buffer !== original.value) },
+                                           begin: { _, _, _ in gate.work(waitingFor: 1, output: Self.frame(), fails: true) })
+        gate.release(1)
+        pipeline.submit(original.value, pts: Self.pts(1), hdr10Plus: nil)
+        try await waitFor { delivered.pts.count == 1 }
+        #expect(delivered.upscaled == [false])
+    }
+}

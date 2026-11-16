@@ -3,15 +3,15 @@ import Testing
 @testable import AetherEngine
 
 /// AE#957: the per-frame benchmark behind `aetherctl bench`. Small frames and few runs, so it only checks
-/// that every case reports and that a report survives the JSON a baseline is kept in. The frame chain cases
-/// are skipped: they compile the chain's kernels and wait on the GPU, on the main actor, and `FrameChainTests`
-/// covers the chain with the guards that needs.
+/// that every case reports and that a report survives the JSON a baseline is kept in. The frame chain and
+/// upscale cases are skipped: they compile their kernels and wait on the GPU, on the main actor, and
+/// `FrameChainTests` covers the chain with the guards that needs.
 @Suite("Per-frame benchmark reports every case (AE#957)", .timeLimit(.minutes(3)))
 struct PerFrameBenchmarkReportsEveryCaseTests {
 
     @MainActor
     @Test func issue957EveryCaseReportsAndTheReportRoundTrips() throws {
-        let report = PerFrameBenchmark(iterations: 10, width: 64, height: 64, includesChain: false).run()
+        let report = PerFrameBenchmark(iterations: 10, width: 64, height: 64, includesGPU: false).run()
         let names = report.results.map { $0.name }
         #expect(names == [
             "normalizer: frame already tagged",
@@ -23,6 +23,11 @@ struct PerFrameBenchmarkReportsEveryCaseTests {
             "chain: tone map, one kernel, wall time",
             "chain: tone map, two passes, wall time",
             "sei: HDR10 scan of a 250 KB key frame",
+            "upscale: 480p to 2160p, automatic, wall time",
+            "upscale: 720p to 2160p, automatic, wall time",
+            "upscale: 720p to 2160p, MetalFX only, wall time",
+            "upscale: 1080p to 2160p, line art, wall time",
+            "upscale: 1080p to 2160p, line art with restore, wall time",
         ])
         // A case either ran with ordered numbers or was skipped with a reason.
         let consistent = report.results.allSatisfy { result in
@@ -33,12 +38,33 @@ struct PerFrameBenchmarkReportsEveryCaseTests {
                     && result.p99Microseconds <= result.maxMicroseconds
         }
         #expect(consistent)
-        let chainSkipped = report.results.filter { $0.name.hasPrefix("chain:") }.allSatisfy { $0.iterations == 0 }
-        #expect(chainSkipped)
+        let gpuSkipped = report.results.filter { $0.name.hasPrefix("chain:") || $0.name.hasPrefix("upscale:") }
+            .allSatisfy { $0.iterations == 0 }
+        #expect(gpuSkipped)
         #expect(report.width == 64)
 
         let decoded = try JSONDecoder().decode(PerFrameBenchmarkReport.self, from: JSONEncoder().encode(report))
         #expect(decoded == report)
+    }
+
+    /// The upscale cases run the plan playback would build for their source on a UHD display; the note
+    /// names its steps, so a report says which route a device took.
+    @MainActor
+    @Test func issue957UpscaleCasesUsePlaybackPlans() throws {
+        typealias Case = PerFrameBenchmark.UpscaleCase
+        func plan(_ c: Case, factors: [Float]) throws -> UpscalePlan {
+            try #require(UpscaleRouteDecision.makePlan(source: c.source, display: PerFrameBenchmark.upscaleDisplay,
+                                                       mlScaleFactors: { _, _ in factors }, scaler: c.scaler))
+        }
+        #expect(PerFrameBenchmark.describe(try plan(.automatic720, factors: [2]))
+                == "1280x720 -> ML 2x 2560x1440 -> MetalFX 3840x2160")
+        #expect(PerFrameBenchmark.describe(try plan(.metalFX720, factors: []))
+                == "1280x720 -> MetalFX 3840x2160")
+        #expect(PerFrameBenchmark.describe(try plan(.automatic480, factors: [3, 2]))
+                == "720x480 -> ML 3x 2160x1440 -> MetalFX 3840x2160")
+        #expect(PerFrameBenchmark.describe(try plan(.lineArt1080, factors: []))
+                == "1920x1080 -> line art 3840x2160")
+        #expect(Case.allCases.allSatisfy { $0.rawValue.hasPrefix("upscale: ") })
     }
 
     private static func report(_ cases: [(String, Int, Double)]) -> PerFrameBenchmarkReport {

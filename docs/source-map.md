@@ -276,7 +276,7 @@ Notes:
 | `MallocBlockCensus.swift` | In-process census of live malloc blocks by size class (#220), so a step in resident memory can name the allocation instead of guessing it from a block count and a total. |
 | `MallocBlockCensusTrigger.swift` | Captures that census when memory jumps. Every recorded kill is flat and then steps inside a single 30 s memprobe sample, so a periodic sampler can never catch the allocation (#220). |
 | `ThreadCPUSampler.swift` | CPU time per thread group between two samples (consumed time, including ended threads): the `cpuprobe` line next to every memprobe. Public, so a host can profile its UI from a field log. |
-| `PerFrameBenchmark.swift` | `AetherEngine.runPerFrameBenchmarks` (AE#957): per-frame time of the software path's frame work. Backs `aetherctl bench`. |
+| `PerFrameBenchmark.swift` | `AetherEngine.runPerFrameBenchmarks` (AE#957): per-frame time of the software path's frame work, the frame chain and the upscale stage. Backs `aetherctl bench`. |
 | `VMRegionCensus.swift` | Per-`user_tag` census of the dirty + swapped pages `phys_footprint` counts, as a delta against the session's first tick. Names the region a rising footprint rose in when every itemized bucket (heap census included) is flat, which is where AE#445 kept ending up. |
 | `SubtitleDeliveryStatement.swift` | Value and formatter for the #357 line. See note. |
 | `LogRedaction.swift` | Strips credentials (tokens in URL queries, auth headers) out of a line before `EngineLog` emits it. |
@@ -586,7 +586,8 @@ Notes:
 | `IFrameFragmentBuilder.swift` | AE#682: wraps one keyframe into one fMP4 fragment on the main rendition's timeline. |
 | `IFrameJPEGBuilder.swift` | AE#682: one keyframe as a Motion JPEG fragment, for sources whose own keyframes AVKit will not show. |
 | `IFramePayloadCache.swift` | AE#682: byte-capped on-disk cache of keyframe payloads read for the rendition. |
-| `FrameUpscaler.swift` | The per-frame upscale stage (#846): optional VT super resolution, then MetalFX, with overrun fallback. |
+| `FrameUpscaler.swift` | The per-frame upscale stage (#846): optional VT super resolution, then MetalFX, with overrun fallback. `UpscaleBenchmarkStage` builds the same stage for the benchmark. |
+| `PipelinedFrameStage.swift` | AE#957: runs a per-frame GPU stage with two frames in flight, delivered in decode order; `settle()` delivers them after a decoder flush. `EncodedGPUWork` is one frame's uncommitted command buffer. |
 | `FrameToneMapper.swift` | #957: the per-frame picture processing stage: a frame chain with the tone map, rebuilt for a frame's own metadata, with the overrun and HDR10+ switch-off. |
 | `BT2390ToneCurve.swift` | AE#957: the BT.2390 tone curve from a source peak to a target peak on PQ values (the CPU reference), the PQ conversions, which source value sets the peak (`ToneMapSourcePeak`), and the curve's shader parameters. |
 | `FrameChainOutput.swift` | AE#957: `FrameChainColorVolume`, the colour volume a frame chain stage declares for its output, and the attachments a chain's output buffer carries (the source's, minus its geometry, with the declared HDR10 metadata). |

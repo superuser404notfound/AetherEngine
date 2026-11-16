@@ -2143,7 +2143,7 @@ swift run --traits DualLayerDolbyVision aetherctl dmpass --frames 120 --out /tmp
 
 ## bench
 
-Times the work the software path does around each decoded frame, and fails when a case got slower than a saved baseline. It calls `AetherEngine.runPerFrameBenchmarks`, which returns a `PerFrameBenchmarkReport` with one `PerFrameBenchmarkResult` per case. No source is needed: it builds a 4K P010 frame itself.
+Times the work the software path does around each decoded frame, and fails when a case got slower than a saved baseline. It calls `AetherEngine.runPerFrameBenchmarks`, which returns a `PerFrameBenchmarkReport` with one `PerFrameBenchmarkResult` per case. No source is needed: it builds its frames itself, a 4K P010 frame and 8-bit NV12 frames for the upscale sources.
 
 **Usage:** `aetherctl bench [--iterations N] [--json out.json] [--baseline base.json] [--tolerance PCT]`, or `aetherctl bench --compare <base.json> <new.json> [--tolerance PCT]`
 
@@ -2173,6 +2173,13 @@ swift run -c release aetherctl bench --baseline /tmp/base.json
 | `chain: tone map, one kernel, wall time` | The frame chain with the BT.2390 tone-map stage, a 1000 nit master to a 600 nit target, run inside the one round-trip kernel. The real kernel, which costs the same on any picture. |
 | `chain: tone map, two passes, wall time` | The same tone map as its own pass between the two passes through RGB, as when it shares a chain with a stage that needs the texture. |
 | `sei: HDR10 scan of a 250 KB key frame` | The in-band scan for the HDR10 SEI. |
+| `upscale: 480p to 2160p, automatic, wall time` | The `upscalesLowResolutionVideo` stage on a 16:9 DVD frame (720x480) for a 3840x2160 display: VT super resolution at the largest factor the device offers, then MetalFX. |
+| `upscale: 720p to 2160p, automatic, wall time` | The same stage on a 1280x720 frame. |
+| `upscale: 720p to 2160p, MetalFX only, wall time` | MetalFX alone on the 720p frame, the rung the stage drops to without an ML pass. |
+| `upscale: 1080p to 2160p, line art, wall time` | `upscaleScaler = .lineArt` on a 1920x1080 frame, upscale network only (its lower rung). |
+| `upscale: 1080p to 2160p, line art with restore, wall time` | The same with the restore pass and the highlight clamp, the stage's top rung. |
+
+The upscale cases build the stage playback builds for that plan, with its VT session and MetalFX scaler, and wait for each frame's ML pass. Their note names the plan's steps (for example `1280x720 -> ML 2x 2560x1440 -> MetalFX 3840x2160`) and the median ML and GPU time. A case is skipped with the reason when the device cannot build it: MetalFX needs tvOS 27.1, and every upscale case needs OS 26 and real hardware. The display size is fixed, so `--iterations` is the only flag that changes them.
 
 **Verdict.** A case regresses when:
 

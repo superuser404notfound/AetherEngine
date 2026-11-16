@@ -80,7 +80,7 @@ final class FrameUpscaler: @unchecked Sendable {
 
     /// Scale factors VT offers for a frame size, empty when the ML scaler is unsupported.
     static func mlScaleFactors(_ width: Int, _ height: Int) -> [Float] {
-        guard VTLowLatencySuperResolutionScalerConfiguration.isSupported else { return [] }
+        guard VTLowLatencySuperResolutionScalerConfiguration.isSupported, !MLRefusalMemory.refused else { return [] }
         return VTLowLatencySuperResolutionScalerConfiguration
             .__supportedScaleFactors(forFrameWidth: width, frameHeight: height).map(\.floatValue)
     }
@@ -148,6 +148,8 @@ final class FrameUpscaler: @unchecked Sendable {
     private var timingLines = 0
     private var totalMs = 0.0
     private var consecutiveFailures = 0
+    /// True once a frame went through an ML pass on this upscaler.
+    private var mlPassSucceeded = false
     private var firstFrameSent = false
     private var backgroundRefusalNoted = false
     private var rememberedOverrunNoted = false
@@ -255,14 +257,31 @@ final class FrameUpscaler: @unchecked Sendable {
 
     private var currentMLTimeout: Double { max(0.05, 3 * frameInterval) }
 
+    /// One frame, start to finish on the calling thread: nil delivers the original frame. The tests and
+    /// the benchmark use it; playback goes through `begin` and a `PipelinedFrameStage`.
     func upscale(_ input: CVPixelBuffer, pts: CMTime) -> CVPixelBuffer? {
+        let start = DispatchTime.now().uptimeNanoseconds
+        switch begin(input, pts: pts) {
+        case .passThrough: return nil
+        case let .ready(output): return output
+        case let .gpu(work, complete):
+            work.commandBuffer.commit()
+            work.commandBuffer.waitUntilCompleted()
+            return complete(elapsedMs(since: start))
+        }
+    }
+
+    /// The pipelined form of `upscale` (AE#957): encodes the frame's GPU work and returns it uncommitted.
+    /// Its completion records the frame (budget, events, failures) with the time the frame held the
+    /// caller's thread, which the overrun ladder compares with the frame interval.
+    func begin(_ input: CVPixelBuffer, pts: CMTime) -> PipelinedFrameStage.Begun {
         processLock.lock()
         defer { processLock.unlock() }
-        guard !isDisabled else { return nil }
+        guard !isDisabled else { return .passThrough }
         notePTS(pts)
         guard let built = stage else {
             notePassThrough("stage still building")
-            return nil
+            return .passThrough
         }
 
         let format = CVPixelBufferGetPixelFormatType(input)
@@ -271,37 +290,65 @@ final class FrameUpscaler: @unchecked Sendable {
         if built.plan.scaler == .lineArt {
             guard FrameChain.supportedFormats.contains(format) else {
                 notePassThrough("pixel format \(fourCC(format)) is not 8 or 10-bit 4:2:0")
-                return nil
+                return .passThrough
             }
         } else {
             guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
                     || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else {
                 notePassThrough("pixel format \(fourCC(format)) is not 8-bit 4:2:0")
-                return nil
+                return .passThrough
             }
         }
         let picture = Self.pictureRegion(of: input)
         if picture.width != built.plan.sourceWidth || picture.height != built.plan.sourceHeight {
-            guard rebuild(for: input, width: picture.width, height: picture.height) else { return nil }
+            guard rebuild(for: input, width: picture.width, height: picture.height) else { return .passThrough }
         }
         applyRememberedOverrun()
-        guard !isDisabled, let stage else { return nil }
+        guard !isDisabled, let stage else { return .passThrough }
         lastPassThroughNote = nil
 
         let start = DispatchTime.now().uptimeNanoseconds
         frameIndex += 1
+        var times = StageTimes()
+        let encoded: (output: CVPixelBuffer, work: EncodedGPUWork?)
         do {
-            var times = StageTimes()
-            let output = try stage.process(
-                input, picture: picture, frameIndex: frameIndex,
-                mlTimeout: currentMLTimeout, submit: _mlSubmitOverride, times: &times)
-            times.total = elapsedMs(since: start)
-            recordSuccess(times, stage: stage)
-            return output
+            encoded = try stage.encode(input, picture: picture, frameIndex: frameIndex,
+                                       mlTimeout: currentMLTimeout, submit: _mlSubmitOverride, times: &times)
         } catch {
             recordFailure(error)
+            return .passThrough
+        }
+        guard let work = encoded.work else {
+            times.total = elapsedMs(since: start)
+            recordSuccess(times, stage: stage)
+            return .ready(encoded.output)
+        }
+        let output = UncheckedSendable(encoded.output)
+        let ran = UncheckedSendable(stage)
+        let encodedTimes = times
+        return .gpu(work) { [weak self] holdMs in
+            guard let self else { return nil }
+            return self.complete(work, output: output.value, stage: ran.value, times: encodedTimes, holdMs: holdMs)
+        }
+    }
+
+    /// A frame's GPU work completed. A frame of a stage that has since been replaced (a fallback or a
+    /// rebuild) is still delivered, but no longer counts for the stage that runs now.
+    private func complete(_ work: EncodedGPUWork, output: CVPixelBuffer, stage ran: Stage,
+                          times encodedTimes: StageTimes, holdMs: Double) -> CVPixelBuffer? {
+        processLock.lock()
+        defer { processLock.unlock() }
+        let current = ran === stage && !isDisabled
+        var times = encodedTimes
+        do {
+            times.metalGPU = try work.finish()
+        } catch {
+            if current { recordFailure(error) }
             return nil
         }
+        times.total = holdMs
+        if current { recordSuccess(times, stage: ran) }
+        return output
     }
 
     private func notePTS(_ pts: CMTime) {
@@ -413,6 +460,7 @@ final class FrameUpscaler: @unchecked Sendable {
 
     private func recordSuccess(_ times: StageTimes, stage: Stage) {
         consecutiveFailures = 0
+        if stage.plan.mlScale != nil { mlPassSucceeded = true }
         backgroundRefusalNoted = false
         totalMs += times.total
         recentTimes.append(times)
@@ -606,8 +654,64 @@ final class FrameUpscaler: @unchecked Sendable {
             return
         }
         if consecutiveFailures >= Self.maxConsecutiveFailures {
+            if error is MLPassFailure, fallBackFromMLFailure(error) { return }
             disable(reason: "\(consecutiveFailures) consecutive failures, last: \(error)")
         }
+    }
+
+    /// The ML pass failed `maxConsecutiveFailures` times in a row: run the same plan without it, MetalFX
+    /// from the source to the target, instead of switching the stage off. VT super resolution can report
+    /// support and refuse every pass (an A12 Apple TV on tvOS 27.2, GitHub's macOS VMs); when it never
+    /// delivered a frame here, the process stops offering ML factors (`MLRefusalMemory`). False when there
+    /// is no MetalFX to fall back to, or it overran here before.
+    private func fallBackFromMLFailure(_ error: Error) -> Bool {
+        guard let stage, stage.plan.scaler == .automatic, stage.plan.mlScale != nil, !degraded,
+              gpu.metalFXAvailable else { return false }
+        let plan = Self.metalFXOnlyPlan(stage.plan)
+        guard plan.needsMetalFX, MetalFXCostMemory.overrun(covering: plan, frameInterval: frameInterval) == nil
+        else { return false }
+        let neverWorked = !mlPassSucceeded
+        if neverWorked { MLRefusalMemory.record() }
+        let reason = "ML pass failed \(consecutiveFailures) times in a row (last: \(error))"
+        EngineLog.emit("[Upscale] degraded: \(reason), continuing with MetalFX only to "
+                       + "\(plan.targetWidth)x\(plan.targetHeight)"
+                       + (neverWorked ? "; VT super resolution is off for this process" : ""), category: .swPlayback)
+        stage.release()
+        self.stage = nil
+        buildGeneration += 1
+        if let buildQueue {
+            buildAsync(plan, mlOnly: false, on: buildQueue, generation: buildGeneration)
+        } else {
+            do {
+                self.stage = try Stage(plan: plan, gpu: gpu)
+            } catch {
+                disable(reason: reason + "; MetalFX only not built: \(error)")
+                return true
+            }
+        }
+        consecutiveFailures = 0
+        // The published plan changes here; the next frame is not a new first frame.
+        firstFrameSent = true
+        recentTimes.removeAll()
+        stageFrames = 0
+        timingLines = 0
+        stateLock.lock()
+        _isDegraded = true
+        _deliveredPlan = plan
+        let stats = _stats
+        let handler = _onEvent
+        stateLock.unlock()
+        handler?(.degraded(plan, reason: reason, stats: stats))
+        return true
+    }
+
+    /// `plan` with its ML pass removed: MetalFX takes the source straight to the target.
+    static func metalFXOnlyPlan(_ plan: UpscalePlan) -> UpscalePlan {
+        var p = plan
+        p.mlScale = nil
+        p.mlOutputWidth = plan.sourceWidth
+        p.mlOutputHeight = plan.sourceHeight
+        return p
     }
 
     private func disable(reason: String) {
@@ -665,8 +769,20 @@ enum MetalFXCostMemory {
     }
 }
 
+/// Set once VT super resolution failed every pass of a stage in this process: it reported support and
+/// then refused, which is a property of the device, so later plans are made without an ML pass.
+enum MLRefusalMemory {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var _refused = false
+
+    static var refused: Bool { lock.lock(); defer { lock.unlock() }; return _refused }
+    static func record() { lock.lock(); _refused = true; lock.unlock() }
+    static func reset() { lock.lock(); _refused = false; lock.unlock() }
+}
+
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 extension FrameUpscaler {
+    static func resetMLRefusalMemoryForTesting() { MLRefusalMemory.reset() }
     static func resetMetalFXCostMemoryForTesting() { MetalFXCostMemory.reset() }
     static func resetLineArtCostMemoryForTesting() { LineArtCostMemory.reset() }
 }
@@ -880,12 +996,27 @@ private final class Stage {
     func process(_ original: CVPixelBuffer, picture: FrameUpscaler.PictureRegion, frameIndex: Int64,
                  mlTimeout: Double, submit: FrameUpscaler.MLSubmit?,
                  times: inout FrameUpscaler.StageTimes) throws -> CVPixelBuffer {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        let encoded = try encode(original, picture: picture, frameIndex: frameIndex, mlTimeout: mlTimeout,
+                                 submit: submit, times: &times)
+        if let work = encoded.work {
+            times.metalGPU = try work.commitAndWait()
+            times.metal = elapsedMs(since: t0) - times.copy - times.ml - times.edge - times.attach
+        }
+        return encoded.output
+    }
+
+    /// One frame up to its GPU work, encoded and not committed (AE#957): `PipelinedFrameStage` commits it
+    /// and delivers `output` when it completed. `work` is nil when nothing runs on the GPU (the ML-only
+    /// rung). The output's attachments are already set; they do not depend on the pixels.
+    func encode(_ original: CVPixelBuffer, picture: FrameUpscaler.PictureRegion, frameIndex: Int64,
+                mlTimeout: Double, submit: FrameUpscaler.MLSubmit?,
+                times: inout FrameUpscaler.StageTimes) throws -> (output: CVPixelBuffer, work: EncodedGPUWork?) {
         if let chain {
             let t0 = DispatchTime.now().uptimeNanoseconds
-            let (output, gpuMs) = try chain.process(original, picture: picture)
+            let (output, work) = try chain.encode(original, picture: picture)
             times.metal = elapsedMs(since: t0)
-            times.metalGPU = gpuMs
-            return attach(to: output, from: original, times: &times)
+            return (attach(to: output, from: original, times: &times), work)
         }
         let format = CVPixelBufferGetPixelFormatType(original)
         let color = UpscaleColorParams(videoRange: format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -903,11 +1034,12 @@ private final class Stage {
             times.copy += elapsedMs(since: t0)
         }
         let mlOut = try ml?.process(input, frameIndex: frameIndex, timeout: mlTimeout, submit: submit, times: &times)
-        let output: CVPixelBuffer
 
         if #available(tvOS 27.1, *), let scaler = scaler as? any MTLFXSpatialScaler, let rgba, let scaled {
             let t0 = DispatchTime.now().uptimeNanoseconds
-            output = try makeOutput(format: format, width: plan.targetWidth, height: plan.targetHeight)
+            // On the encoding thread only; a texture an earlier frame still uses stays alive in its work.
+            CVMetalTextureCacheFlush(gpu.textureCache, 0)
+            let output = try makeOutput(format: format, width: plan.targetWidth, height: plan.targetHeight)
             let source = mlOut ?? input
             // The ML pass carries sample values through unchanged, so its output keeps the input's range.
             let sy = try gpu.planeTexture(source, plane: 0, format: .r8Unorm)
@@ -916,6 +1048,8 @@ private final class Stage {
             let oc = try gpu.planeTexture(output, plane: 1, format: .rg8Unorm)
             guard let cb = gpu.queue.makeCommandBuffer() else { throw UpscaleError("no command buffer") }
             guard let enc = cb.makeComputeCommandEncoder() else { throw UpscaleError("no encoder") }
+            // `rgba` and `scaled` are shared by the frames in flight: Metal's hazard tracking orders their
+            // use across command buffers on this queue.
             gpu.dispatch(enc, gpu.toRGBA, textures: [sy.0, sc.0, rgba], color: color,
                          grid: (rgba.width, rgba.height))
             enc.endEncoding()
@@ -924,17 +1058,15 @@ private final class Stage {
             gpu.dispatch(enc2, gpu.toNV12, textures: [scaled, oy.0, oc.0], color: color,
                          grid: (scaled.width / 2, scaled.height / 2))
             enc2.endEncoding()
-            cb.commit()
-            cb.waitUntilCompleted()
-            withExtendedLifetime((sy.1, sc.1, oy.1, oc.1)) {}
-            CVMetalTextureCacheFlush(gpu.textureCache, 0)
             times.metal = elapsedMs(since: t0)
-            times.metalGPU = max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1000)
-            guard cb.status == .completed else {
-                throw UpscaleError("command buffer \(cb.status.rawValue): \(cb.error.map { "\($0)" } ?? "no error")",
-                                   underlying: cb.error)
+            // The source buffers (the ML output among them) live as long as the work.
+            let work = EncodedGPUWork(commandBuffer: cb, keepAlive: (sy.1, sc.1, oy.1, oc.1, source)) { status, error in
+                UpscaleError("command buffer \(status.rawValue): \(error.map { "\($0)" } ?? "no error")",
+                             underlying: error)
             }
+            return (attach(to: output, from: original, times: &times), work)
         } else if let mlOut {
+            let output: CVPixelBuffer
             if CVPixelBufferGetPixelFormatType(mlOut) == format {
                 output = mlOut
             } else {
@@ -943,10 +1075,10 @@ private final class Stage {
                 try copyPlanes(from: mlOut, to: output)
                 times.copy += elapsedMs(since: t0)
             }
+            return (attach(to: output, from: original, times: &times), nil)
         } else {
             throw UpscaleError("plan has no stage")
         }
-        return attach(to: output, from: original, times: &times)
     }
 
     private func attach(to output: CVPixelBuffer, from original: CVPixelBuffer,
@@ -1090,7 +1222,9 @@ private final class MLScaler {
             if !done.abandon(onLateFinish: { abandoned.remove(id) }) { abandoned.remove(id) }
             throw MLTimeout(seconds: timeout, outstanding: abandoned.count)
         }
-        if let error = result { throw error }
+        if let error = result {
+            throw FrameUpscaler.isBackgroundRefusal(error) ? error : MLPassFailure(underlying: error)
+        }
         times.ml += elapsedMs(since: t0)
         mlTimed = true
         let t1 = DispatchTime.now().uptimeNanoseconds
@@ -1162,10 +1296,6 @@ private func elapsedMs(since start: UInt64) -> Double {
     Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
 }
 
-private struct UncheckedSendable<Value>: @unchecked Sendable {
-    let value: Value
-    init(_ value: Value) { self.value = value }
-}
 
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 private final class Completion: @unchecked Sendable {
@@ -1215,6 +1345,13 @@ private final class AbandonedPasses: @unchecked Sendable {
 }
 
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
+/// VT's ML pass returned an error (not a timeout, not a background refusal): three in a row fall back
+/// to MetalFX only (`fallBackFromMLFailure`).
+private struct MLPassFailure: Error, CustomStringConvertible {
+    let underlying: Error
+    var description: String { "ML pass failed: \(underlying)" }
+}
+
 private struct MLTimeout: Error, CustomStringConvertible {
     let seconds: Double
     let outstanding: Int
@@ -1316,6 +1453,34 @@ private func copyPlanes(from src: CVPixelBuffer, to dst: CVPixelBuffer, mirrorin
                 memcpy(to + (px + w + x) * bytes, from + (w - 2 - x) * bytes, bytes)
             }
         }
+    }
+}
+
+// MARK: - Benchmark
+
+/// One plan's stage built as playback builds it (VT session, MetalFX scaler, line-art chain), for
+/// `PerFrameBenchmark`: the bench times what a frame really costs, not a copy of the stage.
+@available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
+final class UpscaleBenchmarkStage {
+    /// The plan the stage runs, as built (an ML-only rung keeps the ML output size).
+    let plan: UpscalePlan
+    private let stage: Stage
+    private var frameIndex: Int64 = 0
+
+    init(plan: UpscalePlan, restores: Bool = true) throws {
+        guard let gpu = GPU() else { throw UpscaleError("no Metal device or upscale kernels") }
+        stage = try Stage(plan: plan, gpu: gpu, restores: restores)
+        self.plan = stage.plan
+    }
+
+    /// Runs one frame through the stage and returns its step times. `mlTimeout` is generous: a bench
+    /// waits for the ML pass instead of dropping it as playback does.
+    func process(_ frame: CVPixelBuffer, mlTimeout: Double = 1) throws -> FrameUpscaler.StageTimes {
+        frameIndex += 1
+        var times = FrameUpscaler.StageTimes()
+        _ = try stage.process(frame, picture: FrameUpscaler.pictureRegion(of: frame), frameIndex: frameIndex,
+                              mlTimeout: mlTimeout, submit: nil, times: &times)
+        return times
     }
 }
 

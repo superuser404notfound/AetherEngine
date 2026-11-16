@@ -1985,8 +1985,9 @@ public struct UpscaleStatus: Sendable, Equatable {
     /// Set when the stage switched itself off mid-session (repeated failures or a sustained overrun of
     /// the frame budget); frames are then delivered as decoded.
     public let disabledReason: String?
-    /// True once a sustained overrun made the stage drop MetalFX and deliver the VideoToolbox output at
-    /// its own size (`targetSize`, carrying the source's pixel aspect). Kept when it later disables.
+    /// True once the stage dropped a step: MetalFX after a sustained overrun (the VideoToolbox output then
+    /// goes out at its own size, `targetSize`, with the source's pixel aspect), the VideoToolbox pass after
+    /// it kept failing (MetalFX alone, `mlScale` nil), or a line-art rung. Kept when it later disables.
     public let degraded: Bool
     /// The scaler the stage runs (`LoadOptions.upscaleScaler`).
     public let scaler: UpscaleScaler

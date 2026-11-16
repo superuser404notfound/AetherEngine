@@ -2,6 +2,7 @@ import Foundation
 import CoreMedia
 import CoreVideo
 import Metal
+import CoreGraphics
 
 /// One timed piece of per-frame work, in microseconds of wall time per frame.
 public struct PerFrameBenchmarkResult: Codable, Sendable, Equatable {
@@ -62,7 +63,8 @@ extension PerFrameBenchmarkReport {
 extension AetherEngine {
     /// Times the per-frame work the software path does around each decoded frame, at the given picture
     /// size (4K P010 by default): the output metadata normalizer's three outcomes, the renderer's sample
-    /// buffer, the HDR10 key-frame SEI scan and the frame chain. For finding regressions and judging
+    /// buffer, the HDR10 key-frame SEI scan and the frame chain. The upscale cases scale fixed 8-bit
+    /// sources (480p, 720p, 1080p) to a 3840x2160 display, whatever the size given. For finding regressions and judging
     /// optimisations on a device; `aetherctl bench` runs it, and a tvOS host can call it.
     @MainActor
     public static func runPerFrameBenchmarks(iterations: Int = 300, width: Int = 3840,
@@ -76,9 +78,9 @@ struct PerFrameBenchmark {
     let iterations: Int
     let width: Int
     let height: Int
-    /// False skips the frame chain cases, which compile the chain's kernels (minutes on a cold CI runner)
-    /// and wait on the GPU: for the unit test, which checks the case list and the report.
-    var includesChain = true
+    /// False skips the frame chain and upscale cases, which compile their kernels (minutes on a cold CI
+    /// runner) and wait on the GPU: for the unit test, which checks the case list and the report.
+    var includesGPU = true
     static let warmup = 20
 
     /// A typical HDR10 master (BT.2020, 1000 nit, MaxCLL 1000 / 400), in Core Video's byte layout.
@@ -89,12 +91,13 @@ struct PerFrameBenchmark {
 
     func run() -> PerFrameBenchmarkReport {
         var results: [PerFrameBenchmarkResult] = []
-        if let frame = makeFrame() {
+        if let frame = Self.makeFrame(width: width, height: height,
+                                      format: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange) {
             results.append(normalizerAlreadyTagged(frame))
             results.append(normalizerInPlace(frame))
             results.append(normalizerOwnedCopy(frame))
             results.append(rendererSampleBuffer(frame))
-            if includesChain {
+            if includesGPU {
                 for chainCase in ChainCase.allCases { results.append(chain(frame, chainCase)) }
             } else {
                 for chainCase in ChainCase.allCases { results.append(Self.skipped(chainCase.rawValue, "not requested")) }
@@ -103,6 +106,9 @@ struct PerFrameBenchmark {
             results.append(Self.skipped("frames", "could not create a \(width)x\(height) P010 buffer"))
         }
         results.append(keyFrameSEIScan())
+        for upscaleCase in UpscaleCase.allCases {
+            results.append(includesGPU ? upscale(upscaleCase) : Self.skipped(upscaleCase.rawValue, "not requested"))
+        }
         return PerFrameBenchmarkReport(device: Self.deviceName(), os: ProcessInfo.processInfo.operatingSystemVersionString,
                                        width: width, height: height, results: results)
     }
@@ -206,6 +212,92 @@ struct PerFrameBenchmark {
         #endif
     }
 
+    /// The upscale cases (`upscalesLowResolutionVideo`), each the stage playback builds for its plan:
+    /// `automatic` takes the VT super-resolution factor the device offers, then MetalFX to the target.
+    enum UpscaleCase: String, CaseIterable {
+        case automatic480 = "upscale: 480p to 2160p, automatic, wall time"
+        case automatic720 = "upscale: 720p to 2160p, automatic, wall time"
+        case metalFX720 = "upscale: 720p to 2160p, MetalFX only, wall time"
+        case lineArt1080 = "upscale: 1080p to 2160p, line art, wall time"
+        case lineArtRestore1080 = "upscale: 1080p to 2160p, line art with restore, wall time"
+
+        /// The coded source: 16:9 DVD (720x480, 32:27 pixels), 720p, 1080p.
+        var source: SourceGeometry {
+            switch self {
+            case .automatic480: return SourceGeometry(width: 720, height: 480, sarNum: 32, sarDen: 27)
+            case .automatic720, .metalFX720: return SourceGeometry(width: 1280, height: 720, sarNum: 1, sarDen: 1)
+            case .lineArt1080, .lineArtRestore1080: return SourceGeometry(width: 1920, height: 1080, sarNum: 1, sarDen: 1)
+            }
+        }
+        var scaler: UpscaleScaler { self == .lineArt1080 || self == .lineArtRestore1080 ? .lineArt : .automatic }
+    }
+
+    /// The display every upscale case fills.
+    static let upscaleDisplay = CGSize(width: 3840, height: 2160)
+
+    private func upscale(_ upscaleCase: UpscaleCase) -> PerFrameBenchmarkResult {
+        let name = upscaleCase.rawValue
+        #if targetEnvironment(simulator)
+        return Self.skipped(name, "the upscale stage is not built for the simulator")
+        #else
+        guard #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) else {
+            return Self.skipped(name, "the upscale stage needs OS 26")
+        }
+        let source = upscaleCase.source
+        let metalFXOnly = upscaleCase == .metalFX720
+        let factors: (Int, Int) -> [Float] = { metalFXOnly ? [] : FrameUpscaler.mlScaleFactors($0, $1) }
+        guard let plan = UpscaleRouteDecision.makePlan(source: source, display: Self.upscaleDisplay,
+                                                       mlScaleFactors: factors, scaler: upscaleCase.scaler),
+              let frame = Self.makeFrame(width: source.width, height: source.height,
+                                         format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+        else { return Self.skipped(name, "no plan or no \(source.width)x\(source.height) NV12 buffer") }
+        let stage: UpscaleBenchmarkStage
+        do {
+            stage = try UpscaleBenchmarkStage(plan: plan, restores: upscaleCase == .lineArtRestore1080)
+            // The first frame: VT super resolution can report support and still refuse every pass
+            // (GitHub's macOS VMs, the A12 Apple TV on tvOS 27.2).
+            _ = try stage.process(frame)
+        } catch {
+            return Self.skipped(name, "\(error)")
+        }
+        var steps: [FrameUpscaler.StageTimes] = []
+        var failures = 0
+        let result = time(name) {
+            if let times = try? stage.process(frame) { steps.append(times) } else { failures += 1 }
+        }
+        func median(_ key: KeyPath<FrameUpscaler.StageTimes, Double>) -> Double {
+            let sorted = steps.map { $0[keyPath: key] }.sorted()
+            return sorted.isEmpty ? 0 : sorted[sorted.count / 2] * 1000
+        }
+        var note = Self.describe(stage.plan)
+        if stage.plan.mlScale != nil { note += String(format: "; ML median %.0f us", median(\.ml)) }
+        note += String(format: "; GPU median %.0f us", median(\.metalGPU))
+        if failures > 0 { note += "; \(failures) frames failed" }
+        return PerFrameBenchmarkResult(
+            name: result.name, iterations: result.iterations, minMicroseconds: result.minMicroseconds,
+            medianMicroseconds: result.medianMicroseconds, p95Microseconds: result.p95Microseconds,
+            p99Microseconds: result.p99Microseconds, maxMicroseconds: result.maxMicroseconds, note: note)
+        #endif
+    }
+
+    /// "1280x720 -> ML 2x 2560x1440 -> MetalFX 3840x2160": the steps of a plan, for the note.
+    static func describe(_ plan: UpscalePlan) -> String {
+        var steps = ["\(plan.sourceWidth)x\(plan.sourceHeight)"]
+        switch plan.scaler {
+        case .lineArt:
+            steps.append("line art \(plan.mlOutputWidth)x\(plan.mlOutputHeight)")
+            if plan.mlOutputWidth != plan.targetWidth || plan.mlOutputHeight != plan.targetHeight {
+                steps.append("bilinear \(plan.targetWidth)x\(plan.targetHeight)")
+            }
+        case .automatic:
+            if let scale = plan.mlScale {
+                steps.append("ML " + String(format: "%g", scale) + "x \(plan.mlOutputWidth)x\(plan.mlOutputHeight)")
+            }
+            if plan.needsMetalFX { steps.append("MetalFX \(plan.targetWidth)x\(plan.targetHeight)") }
+        }
+        return steps.joined(separator: " -> ")
+    }
+
     // MARK: - Helpers
 
     private func apply(_ normalizer: VideoToolboxOutputMetadataNormalizer, _ frame: CVPixelBuffer,
@@ -246,13 +338,13 @@ struct PerFrameBenchmark {
                                 p95Microseconds: 0, p99Microseconds: 0, maxMicroseconds: 0, note: why)
     }
 
-    /// A 10-bit 4:2:0 IOSurface frame, written once so its pages are real, tagged as PQ BT.2020.
-    private func makeFrame() -> CVPixelBuffer? {
+    /// A 4:2:0 IOSurface frame (P010 for the 4K cases, NV12 for the upscale sources), written once so its
+    /// pages are real.
+    private static func makeFrame(width: Int, height: Int, format: OSType) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
         let attributes: NSDictionary = [kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
                                         kCVPixelBufferMetalCompatibilityKey: true]
-        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                                  attributes, &buffer) == kCVReturnSuccess, let buffer else { return nil }
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, format, attributes, &buffer) == kCVReturnSuccess, let buffer else { return nil }
         CVPixelBufferLockBaseAddress(buffer, [])
         for plane in 0 ..< CVPixelBufferGetPlaneCount(buffer) {
             if let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) {
