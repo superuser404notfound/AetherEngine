@@ -295,14 +295,17 @@ struct TrickleWatchdogTests {
           .timeLimit(.minutes(3)))
     func healthyStreamIsLeftAlone() async throws {
         let dripOffset = Self.dripOffset
-        // 64 KB every 20 ms, about 3 MB/s: well above the floor, and slow enough that one 4 MB read
-        // waits several stall periods, which is the state the verdict is evaluated in.
+        // A 2 s period instead of the suite's 0.5 s: a loaded runner froze the origin past 0.5 s, the
+        // delivery-gap watchdog rightly replaced the connection, and this test read that as a false
+        // trickle verdict (CI, 2026-11-16). The floor scales with the period (about 100 KB/s here).
+        // 64 KB every 50 ms, about 1.3 MB/s: well above that floor, and slow enough that each 4 MB
+        // read waits past a full period, which is the state the verdict is evaluated in.
         let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { start, _ in
-            start == dripOffset ? .drip(bytes: 64 * 1024, everyUs: 20_000) : .fast
+            start == dripOffset ? .drip(bytes: 64 * 1024, everyUs: 50_000) : .fast
         })
         let origin = try #require(originMaybe)
         defer { origin.stop() }
-        let reader = Self.makeReader(origin)
+        let reader = Self.makeReader(origin, stallTimeout: 2)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
         try await waitFor { !reader.hasLiveConnectionForTesting }
