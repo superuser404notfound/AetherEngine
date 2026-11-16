@@ -52,11 +52,25 @@ enum AnnexBSampleConverter {
     ///
     /// The payload goes into a new buffer rather than being rewritten in place: a demuxed packet's
     /// buffer can be shared with another reference.
-    static func convertToLengthPrefixed(_ packet: UnsafeMutablePointer<AVPacket>) -> Bool {
-        guard let data = packet.pointee.data, packet.pointee.size > 0 else { return false }
-        let source = UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size))
-        let ranges = nalRanges(source)
-        guard !ranges.isEmpty else { return false }
+    ///
+    /// `removeUHDPaddingCrop` replaces an SPS that codes 3840x2176 cropped to 2160 with its crop-free
+    /// form (`HEVCConformanceCrop`), so the sample agrees with the init segment the tvOS remux wrote.
+    static func convertToLengthPrefixed(_ packet: UnsafeMutablePointer<AVPacket>,
+                                        removeUHDPaddingCrop: Bool = false) -> Bool {
+        guard let packetData = packet.pointee.data, packet.pointee.size > 0 else { return false }
+        let packetBytes = UnsafeRawBufferPointer(start: packetData, count: Int(packet.pointee.size))
+        let packetRanges = nalRanges(packetBytes)
+        guard !packetRanges.isEmpty else { return false }
+        if removeUHDPaddingCrop,
+           let cropFree = HEVCConformanceCrop.removingUHDPaddingCrop(fromAnnexB: packetBytes, ranges: packetRanges) {
+            return cropFree.withUnsafeBytes { write(packet, source: $0, ranges: nalRanges($0)) }
+        }
+        return write(packet, source: packetBytes, ranges: packetRanges)
+    }
+
+    private static func write(_ packet: UnsafeMutablePointer<AVPacket>, source: UnsafeRawBufferPointer,
+                              ranges: [Range<Int>]) -> Bool {
+        guard let data = source.baseAddress?.assumingMemoryBound(to: UInt8.self), !ranges.isEmpty else { return false }
         let total = ranges.reduce(0) { $0 + 4 + $1.count }
         guard total <= Int(Int32.max) else { return false }
 

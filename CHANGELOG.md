@@ -27,6 +27,12 @@ the public-API contract.
   on every side are now a bilinear scale of the source, as they already were on axes without room for the
   mirrored margin, so the edge looks as it does with upscaling off. Reported and diagnosed by classicjazz.
 
+- **Apple TV no longer restarts on HEVC coded 3840x2176 and cropped to 2160.** An Apple TV (AppleTV18,1,
+  tvOS 27.2.1) restarted within about 160 ms of the first frame when the hardware decoder got
+  an SPS with that conformance window. On tvOS the native remux now sets the window's offsets to zero, in
+  the init segment and in every in-band SPS. AVFoundation still presents 2160 lines. Other geometries and
+  other platforms are untouched.
+
 - **Live AC-3 follows a change from 2.0 to 5.1 on the same stream.** A channel with 2.0 ads and a 5.1
   programme on one PID stayed 2.0 when playback started on an ad, because the `dac3` box in the init
   segment was written once from the first frame. When the AC-3 or E-AC-3 layout changes, the next segment
