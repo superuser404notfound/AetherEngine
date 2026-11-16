@@ -4,6 +4,7 @@ import XCTest
 private final class Issue208WaitResult: @unchecked Sendable {
     private let lock = NSLock()
     private var _value: Bool?
+    private var _releasedAt: DispatchTime?
 
     var value: Bool? {
         lock.lock()
@@ -11,9 +12,19 @@ private final class Issue208WaitResult: @unchecked Sendable {
         return _value
     }
 
+    /// Stamped on the waiter's own thread the moment the wait returns, so a timing assertion does
+    /// not also measure how late XCTest's `wait(for:)` wakes the test thread afterwards.
+    var releasedAt: DispatchTime? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _releasedAt
+    }
+
     func store(_ value: Bool) {
+        let now = DispatchTime.now()
         lock.lock()
         _value = value
+        _releasedAt = now
         lock.unlock()
     }
 }
@@ -97,12 +108,16 @@ final class Issue208FastZapDegradedStartTests: XCTestCase {
         append(provider, index: 1)
 
         wait(for: [finished], timeout: 300)
-        let elapsed = Double(
-            DispatchTime.now().uptimeNanoseconds - threshold.uptimeNanoseconds
-        ) / 1_000_000_000
         XCTAssertEqual(result.value, true)
+        // Measured to the waiter's own release stamp: read after `wait(for:)` returned, the same
+        // 0.5 s grace came out at 1.03 s on a loaded CI runner. The ceiling still has to sit well
+        // below the 2.0 s clamp, which is what a wrongly sized grace would land on.
+        let released = result.releasedAt ?? DispatchTime.now()
+        let elapsed = Double(
+            released.uptimeNanoseconds - threshold.uptimeNanoseconds
+        ) / 1_000_000_000
         XCTAssertGreaterThanOrEqual(elapsed, 0.45)
-        XCTAssertLessThan(elapsed, 0.9)
+        XCTAssertLessThan(elapsed, 1.5)
     }
 
     func testStandardStillWaitsForFullHoldback() {
