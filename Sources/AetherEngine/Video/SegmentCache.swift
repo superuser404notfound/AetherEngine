@@ -47,6 +47,7 @@ final class SegmentCache: @unchecked Sendable {
 
     private let condition = NSCondition()
     private let availableVolumeBytes: @Sendable (URL) -> Int64?
+    private let reusesVolumeCapacity: Bool
     private let onResidentSetChanged: (@Sendable () -> Void)?
 
     private let forwardWindow: Int
@@ -196,7 +197,7 @@ final class SegmentCache: @unchecked Sendable {
         retentionBudgetBytes: Int = 0,
         hardDiskLimitBytes: Int? = nil,
         freeDiskReserveBytes: Int = 0,
-        availableVolumeBytes: @escaping @Sendable (URL) -> Int64? = SegmentCache.availableVolumeBytes,
+        availableVolumeBytes: (@Sendable (URL) -> Int64?)? = nil,
         baseDirectory: URL? = nil,
         sessionID: String = UUID().uuidString,
         now: Date = Date(),
@@ -208,7 +209,9 @@ final class SegmentCache: @unchecked Sendable {
         self.retentionBudgetBytes = retentionBudgetBytes
         self.hardDiskLimitBytes = hardDiskLimitBytes.map { max(1, $0) }
         self.freeDiskReserveBytes = max(0, freeDiskReserveBytes)
-        self.availableVolumeBytes = availableVolumeBytes
+        self.availableVolumeBytes = availableVolumeBytes ?? SegmentCache.availableVolumeBytes
+        // An injected probe is a test double whose answers the test scripts call by call.
+        self.reusesVolumeCapacity = availableVolumeBytes == nil
         self.nativeLiveDVRPolicy = nativeLiveDVRPolicy
         self.onResidentSetChanged = onResidentSetChanged
 
@@ -599,6 +602,40 @@ final class SegmentCache: @unchecked Sendable {
             .volumeAvailableCapacity.map(Int64.init)
     }
 
+    /// The staging write path asks for the free space on every 64 KiB write when a reserve is set,
+    /// and each ask is a stat call on the producer thread. The answer is reused for a short interval,
+    /// less what this cache has admitted since, so a burst cannot walk past the reserve on a stale
+    /// number. An eviction drops it, because that is the moment the number is known to be wrong.
+    private static let volumeCapacityReuseSeconds: Double = 0.5
+    private let volumeProbeLock = NSLock()
+    private var volumeProbe: (at: DispatchTime, free: Int64, admittedSince: Int64)?
+
+    private func freeVolumeBytesForAdmission(bytes: Int) -> Int64? {
+        guard reusesVolumeCapacity else { return availableVolumeBytes(sessionDir) }
+        let now = DispatchTime.now()
+        volumeProbeLock.lock()
+        if var probe = volumeProbe,
+           Double(now.uptimeNanoseconds &- probe.at.uptimeNanoseconds) / 1e9 < Self.volumeCapacityReuseSeconds {
+            probe.admittedSince += Int64(bytes)
+            volumeProbe = probe
+            let remaining = probe.free - probe.admittedSince + Int64(bytes)
+            volumeProbeLock.unlock()
+            return remaining
+        }
+        volumeProbeLock.unlock()
+        guard let free = availableVolumeBytes(sessionDir) else { return nil }
+        volumeProbeLock.lock()
+        volumeProbe = (now, free, Int64(bytes))
+        volumeProbeLock.unlock()
+        return free
+    }
+
+    private func invalidateVolumeCapacityProbe() {
+        volumeProbeLock.lock()
+        volumeProbe = nil
+        volumeProbeLock.unlock()
+    }
+
     func stagingWriteAdmission(path: URL, bytes: Int, waitForConsumer: Bool = false,
                                shouldStop: () -> Bool = { false }) -> SegmentWriteAdmission {
         guard !shouldStop() else { return .cancelled }
@@ -625,7 +662,7 @@ final class SegmentCache: @unchecked Sendable {
             if hasRoom {
                 if freeDiskReserveBytes > 0 {
                     // An unknown capacity does not silently disable an explicitly requested reserve.
-                    guard let free = availableVolumeBytes(sessionDir), free >= 0 else {
+                    guard let free = freeVolumeBytesForAdmission(bytes: bytes), free >= 0 else {
                         return rejectedForStorage(shouldStop: shouldStop)
                     }
                     let (required, overflow) = Int64(freeDiskReserveBytes).addingReportingOverflow(Int64(bytes))
@@ -636,6 +673,7 @@ final class SegmentCache: @unchecked Sendable {
                         condition.unlock()
                         for url in more { try? FileManager.default.removeItem(at: url) }
                         if more.isEmpty { return rejectedForStorage(shouldStop: shouldStop) }
+                        invalidateVolumeCapacityProbe()
                         onResidentSetChanged?()
                         continue // An open reader may still own an unlinked file: measure again.
                     }
