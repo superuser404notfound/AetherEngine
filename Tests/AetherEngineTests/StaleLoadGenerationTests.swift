@@ -33,7 +33,7 @@ struct StaleLoadGenerationTests {
     /// mount its URL on the host the stop() had just torn down, and play it: sound with no player.
     @Test("A remote-HLS load stopped during its stand-in fetch mounts nothing", .timeLimit(.minutes(3)))
     func standInFetchThenStopMountsNothing() async throws {
-        let origin = try #require(HeldHTTPOrigin(holds: { $0.hasSuffix(".m3u8") }))
+        let origin = try #require(HeldHTTPOrigin())
         defer { origin.stop() }
         let engine = try AetherEngine()
         defer { engine.stop() }
@@ -42,7 +42,9 @@ struct StaleLoadGenerationTests {
             try await engine.load(url: origin.url("/stopped/master.m3u8"),
                                   options: Self.bypassWithSidecar(origin))
         }
-        try await waitFor { origin.connectionCount > 0 }
+        // The stand-in's master fetch, not the sidecar's: everything is held, so the sidecar stays
+        // pending and the stand-in runs, and nothing but the stand-in asks for the master first.
+        try await waitFor { origin.heldRequests(for: "/stopped/master.m3u8") > 0 }
         let host = try #require(engine.nativeHost)
         engine.stop()
         origin.release()
@@ -59,7 +61,7 @@ struct StaleLoadGenerationTests {
     @Test("A remote-HLS load superseded during its stand-in fetch leaves the successor's item alone",
           .timeLimit(.minutes(3)))
     func standInFetchThenZapLeavesSuccessor() async throws {
-        let origin = try #require(HeldHTTPOrigin(holds: { $0.hasSuffix(".m3u8") }))
+        let origin = try #require(HeldHTTPOrigin())
         defer { origin.stop() }
         let engine = try AetherEngine()
         defer { engine.stop() }
@@ -68,7 +70,7 @@ struct StaleLoadGenerationTests {
             try await engine.load(url: origin.url("/zapped/master.m3u8"),
                                   options: Self.bypassWithSidecar(origin))
         }
-        try await waitFor { origin.connectionCount > 0 }
+        try await waitFor { origin.heldRequests(for: "/zapped/master.m3u8") > 0 }
         let successorURL = URL(string: "http://127.0.0.1:9/successor.m3u8")!
         _ = try await engine.load(url: successorURL, options: LoadOptions(nativeRemoteHLS: true))
         origin.release()

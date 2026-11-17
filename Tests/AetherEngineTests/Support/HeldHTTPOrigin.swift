@@ -14,6 +14,7 @@ final class HeldHTTPOrigin: @unchecked Sendable {
     private let lock = NSLock()
     private var held: [Int32] = []
     private var heldCount = 0
+    private var heldPaths: [String] = []
     private var released = false
     private var stopped = false
 
@@ -29,6 +30,9 @@ final class HeldHTTPOrigin: @unchecked Sendable {
 
     /// Requests parked so far (only those `holds` accepted).
     var connectionCount: Int { lock.withLock { heldCount } }
+
+    /// Requests for exactly `path` parked so far.
+    func heldRequests(for path: String) -> Int { lock.withLock { heldPaths.filter { $0 == path }.count } }
 
     func release() {
         let parked = lock.withLock { () -> [Int32] in
@@ -58,6 +62,7 @@ final class HeldHTTPOrigin: @unchecked Sendable {
                 if stopped { return nil }
                 guard let path, holds(path), !released else { return false }
                 heldCount += 1
+                heldPaths.append(path)
                 held.append(fd)
                 return true
             }
