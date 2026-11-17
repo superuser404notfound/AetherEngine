@@ -37,6 +37,9 @@ struct StaleLoadGenerationTests {
         defer { origin.stop() }
         let engine = try AetherEngine()
         defer { engine.stop() }
+        // The origin holds every request until release(), so the stand-in's 5 s budget is the only
+        // clock left. On a loaded runner it ran out before stop() and the load mounted the origin.
+        engine.remoteHLSStandInBudgetSeconds = 600
 
         let stale = Task { @MainActor in
             try await engine.load(url: origin.url("/stopped/master.m3u8"),
@@ -65,6 +68,9 @@ struct StaleLoadGenerationTests {
         defer { origin.stop() }
         let engine = try AetherEngine()
         defer { engine.stop() }
+        // The origin holds every request until release(), so the stand-in's 5 s budget is the only
+        // clock left. On a loaded runner it ran out before stop() and the load mounted the origin.
+        engine.remoteHLSStandInBudgetSeconds = 600
 
         let stale = Task { @MainActor in
             try await engine.load(url: origin.url("/zapped/master.m3u8"),

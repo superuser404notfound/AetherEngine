@@ -4281,6 +4281,10 @@ public final class AetherEngine: ObservableObject {
     var heldPictureAwaitsSoftwareHost = false
     /// Which route the last held picture came from, for the log line and the tests that pin it.
     var heldPictureLastRoute: String?
+    /// The stand-in's playlist budget (`RemoteHLSSubtitleProxy.budgetSeconds`). Only tests change it:
+    /// a test that holds the origin and stops the load mid-fetch races this clock, and on a loaded CI
+    /// runner the fetch timed out first and the load mounted the origin instead.
+    var remoteHLSStandInBudgetSeconds: TimeInterval = RemoteHLSSubtitleProxy.budgetSeconds
     /// PR #1082 follow-up: the last native read came back empty after its full wait, so the next one
     /// only probes. See `heldPictureFrameWait(seconds:afterMiss:)`.
     var heldPictureNativeReadMissed = false
