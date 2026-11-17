@@ -24,12 +24,11 @@ struct SoftwarePacketRecordIOTests {
         return data
     }
 
-    @Test("records of every size survive the spool across chunk boundaries", arguments: [false, true])
-    func recordsRoundTrip(retainConsumed: Bool) throws {
+    @Test("records of every size survive the spool across chunk boundaries")
+    func recordsRoundTrip() throws {
         let root = try Self.makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, retainConsumed: retainConsumed,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, parentDirectory: root)
         defer { try? fifo.close() }
         let sizes = [0, 1, 7, 8, 9, 100, 4_096, 65_528, 65_529, 70_000, 200_000, 0, 3]
         let records = sizes.enumerated().map { Self.payload($0.element, seed: UInt8($0.offset)) }
@@ -42,8 +41,7 @@ struct SoftwarePacketRecordIOTests {
     func onDiskLayoutIsUnchanged() throws {
         let root = try Self.makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1 << 20, retainConsumed: true,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1 << 20, parentDirectory: root)
         defer { try? fifo.close() }
         let first = Self.payload(300, seed: 1)
         let second = Data()

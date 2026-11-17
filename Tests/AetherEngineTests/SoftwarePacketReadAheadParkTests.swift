@@ -45,8 +45,7 @@ struct SoftwarePacketReadAheadParkTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let counter = SourceCounter()
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, retainConsumed: true,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, parentDirectory: root)
         let source = SoftwarePacketReadAhead(
             video: .init(index: 0, numerator: 1, denominator: Self.tickRate), audio: nil,
             byteBudget: byteBudget, forwardSeconds: forwardSeconds, initialSourceClock: 0,

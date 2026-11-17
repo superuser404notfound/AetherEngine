@@ -280,20 +280,6 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         condition.unlock()
     }
 
-    /// Legacy explicit cold seek. Production first uses beginSeek(to:) + prepareSeek off-main.
-    @discardableResult
-    func beginSeek() -> UInt64 {
-        condition.lock(); defer { condition.unlock() }
-        generation &+= 1
-        sourceEpoch &+= 1
-        sourceRepositioning = true
-        seeking = true
-        resetPending = true
-        clearSourceMetadataLocked()
-        condition.broadcast()
-        return generation
-    }
-
     /// Main-thread safe: freeze only the decoder/consumer, not the source reader or retained data.
     @discardableResult
     func beginSeek(to seconds: Double) -> UInt64 {
@@ -341,8 +327,6 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                 return true
             } catch SoftwarePacketDiskFIFO.Failure.invalidCursor {
                 // An expired bookmark is a cache miss, never a playback/disk failure.
-            } catch SoftwarePacketDiskFIFO.Failure.retentionDisabled {
-                // Keeps callers using the legacy destructive FIFO safe during migration.
             }
         }
 

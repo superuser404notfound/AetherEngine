@@ -28,8 +28,7 @@ struct Issue605SoftwareVODStillTests {
         let root = try Self.makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         // 64-byte chunks hold two 28-byte records, so ten records span five chunks.
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64, retainConsumed: true,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64, parentDirectory: root)
         var cursors: [SoftwarePacketDiskFIFO.Cursor] = []
         for value in UInt8(0)..<10 { cursors.append(try fifo.append(Self.record(value))) }
 
@@ -47,8 +46,7 @@ struct Issue605SoftwareVODStillTests {
     func historyWalkStopsEarly() throws {
         let root = try Self.makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64, retainConsumed: true,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64, parentDirectory: root)
         var cursors: [SoftwarePacketDiskFIFO.Cursor] = []
         for value in UInt8(0)..<10 { cursors.append(try fifo.append(Self.record(value))) }
 
@@ -64,8 +62,7 @@ struct Issue605SoftwareVODStillTests {
     func historyWalkRefusesStaleCursor() throws {
         let root = try Self.makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64, retainConsumed: true,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64, parentDirectory: root)
         let stale = try fifo.append(Self.record(1))
         try fifo.reset()
         try fifo.append(Self.record(2))
@@ -81,8 +78,7 @@ struct Issue605SoftwareVODStillTests {
     func historyWalkRefusesEvictedCursor() throws {
         let root = try Self.makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64, retainConsumed: true,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64, parentDirectory: root)
         var cursors: [SoftwarePacketDiskFIFO.Cursor] = []
         for value in UInt8(0)..<10 { cursors.append(try fifo.append(Self.record(value))) }
         for _ in 0..<6 { _ = try fifo.pop() }
@@ -126,8 +122,7 @@ struct Issue605SoftwareVODStillTests {
     private static func parkedCache(root: URL, forwardSeconds: Double,
                                     keyframeEvery: Int = pictureRate) throws -> SoftwarePacketReadAhead {
         let counter = Counter()
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, retainConsumed: true,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, parentDirectory: root)
         let cache = SoftwarePacketReadAhead(
             video: .init(index: 0, numerator: 1, denominator: tickRate), audio: nil,
             byteBudget: 50_000_000, forwardSeconds: forwardSeconds, initialSourceClock: 0,

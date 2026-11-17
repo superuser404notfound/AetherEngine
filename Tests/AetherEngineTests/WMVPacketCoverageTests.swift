@@ -84,7 +84,7 @@ struct WMVPacketCoverageTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let store: any SoftwarePacketStore = memory
             ? SoftwarePacketMemoryFIFO(chunkTargetBytes: 4096, historyCapBytes: historyCapBytes, kernelMayPurge: false)
-            : try SoftwarePacketDiskFIFO(chunkTargetBytes: 4096, retainConsumed: true, parentDirectory: root)
+            : try SoftwarePacketDiskFIFO(chunkTargetBytes: 4096, parentDirectory: root)
         let input = Packets(packets)
         let source = SoftwarePacketReadAhead(
             video: .init(index: packets[0].streamIndex, numerator: 1, denominator: 1000), audio: nil,
@@ -116,7 +116,8 @@ struct WMVPacketCoverageTests {
                 source.endSeek(token, sourceClock: target)
             }
             #expect(source.snapshot.sourceEpoch == 0)
-            _ = source.beginSeek()
+            let cold = source.beginSeek(to: 9_999)   // past the frontier: a cache miss, the cold seek
+            #expect(try source.prepareSeek(cold, to: 9_999) == false)
             #expect(source.residentRanges.isEmpty)
             #expect(source.snapshot.frontier == nil)
             #expect(source.snapshot.sourceEpoch == 1)

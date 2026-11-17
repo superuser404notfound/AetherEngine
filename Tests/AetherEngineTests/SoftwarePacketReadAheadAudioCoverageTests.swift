@@ -44,8 +44,7 @@ struct SoftwarePacketReadAheadAudioCoverageTests {
         }
         let counter = Counter()
         let all = packets
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, retainConsumed: true,
-                                              parentDirectory: root)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, parentDirectory: root)
         let source = SoftwarePacketReadAhead(
             video: .init(index: 0, numerator: 1, denominator: 1000),
             audio: .init(index: 1, numerator: 1, denominator: 1000),
@@ -114,7 +113,7 @@ struct QuantizedAudioReadAheadTests {
         let index = Index()
         let store: any SoftwarePacketStore = memory
             ? SoftwarePacketMemoryFIFO(historyCapBytes: 8 << 20)
-            : try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, retainConsumed: true, parentDirectory: root)
+            : try SoftwarePacketDiskFIFO(chunkTargetBytes: 64 * 1024, parentDirectory: root)
         let source = SoftwarePacketReadAhead(
             video: .init(index: 0, numerator: 1, denominator: 1000),
             audio: .init(index: 1, numerator: 1, denominator: 1000,
@@ -138,7 +137,8 @@ struct QuantizedAudioReadAheadTests {
             #expect(try source.prepareSeek(backwards, to: 1))
             #expect(source.snapshot.sourceEpoch == 0)
         }
-        _ = source.beginSeek()
+        let cold = source.beginSeek(to: 9_999)   // past the frontier: a cache miss, the cold seek
+        #expect(try source.prepareSeek(cold, to: 9_999) == false)
         #expect(source.residentRanges.isEmpty)
         #expect(source.snapshot.frontier == nil)
     }

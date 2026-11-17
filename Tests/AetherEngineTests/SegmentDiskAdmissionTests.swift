@@ -39,6 +39,19 @@ struct SegmentDiskAdmissionTests {
         #expect(status(cache).currentDiskBytes == 300)
     }
 
+    /// Audit SEG-204: an adopt whose rename fails deleted the file, so its reservation has to go too.
+    @Test("A failed adopt releases the staging reservation")
+    func failedAdoptReleasesReservation() {
+        let cache = SegmentCache(hardDiskLimitBytes: 600)
+        defer { cache.close() }
+        cache.declareTarget(0)
+        let path = cache.sessionDir.appendingPathComponent("staging-missing.tmp")
+        #expect(cache.admitStagingWrite(path: path, bytes: 300))
+        #expect(status(cache).stagingBytes == 300)
+        #expect(!cache.adopt(index: 0, stagingPath: path, byteCount: 300))
+        #expect(status(cache).stagingBytes == 0)
+    }
+
     @Test("Oversized and foreign writes are rejected before disk writes")
     func refusesImpossibleWrites() {
         let cache = SegmentCache(hardDiskLimitBytes: 500)

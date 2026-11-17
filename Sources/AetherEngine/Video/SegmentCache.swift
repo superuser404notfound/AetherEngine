@@ -262,10 +262,8 @@ final class SegmentCache: @unchecked Sendable {
         if fd >= 0 { Darwin.close(fd) }
     }
 
-    /// Bounded crash-remnant cleanup. Only expired sibling directories are eligible; the current
-    /// UUID and fresh sessions are never removed. Preserve upstream creation-time age and held-lock
-    /// liveness checks. Both directory inspection and deletion are capped
-    /// so a cache root with many crash remnants cannot create an unbounded startup I/O burst.
+    /// Bounded crash-remnant cleanup, through the sweep the software packet spool shares
+    /// (`SessionDirectoryLiveness.sweepStale`): expired sibling directories whose marker is not held.
     static func sweepStaleSessionDirs(
         baseDir: URL,
         currentSession: String,
@@ -273,45 +271,9 @@ final class SegmentCache: @unchecked Sendable {
         maxEntries: Int = 128,
         maxRemovals: Int = 16
     ) -> StaleSweepResult {
-        let fm = FileManager.default
-        guard maxEntries > 0, maxRemovals > 0 else {
-            return StaleSweepResult(inspectedCount: 0, removedCount: 0, failureCount: 0)
-        }
-        var failures = 0
-        guard let enumerator = fm.enumerator(
-            at: baseDir,
-            includingPropertiesForKeys: [.isDirectoryKey, .creationDateKey],
-            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants],
-            errorHandler: { _, _ in failures += 1; return false }
-        ) else {
-            return StaleSweepResult(inspectedCount: 0, removedCount: 0, failureCount: max(1, failures))
-        }
-
-        let cutoff = now.addingTimeInterval(-3600)
-        var inspected = 0
-        var removed = 0
-        while inspected < maxEntries, let entry = enumerator.nextObject() as? URL {
-            inspected += 1
-            guard entry.lastPathComponent != currentSession, removed < maxRemovals else { continue }
-            let values: URLResourceValues
-            do { values = try entry.resourceValues(forKeys: [.isDirectoryKey, .creationDateKey]) }
-            catch { failures += 1; continue }
-            // An unreadable creation date counts as old, as before; liveness still spares a held one.
-            guard values.isDirectory == true, (values.creationDate.map { $0 < cutoff } ?? true) else { continue }
-            // Old does not mean abandoned: spare sessions whose marker is held (AE#451).
-            if SessionDirectoryLiveness.isLive(entry) {
-                EngineLog.emit("[SegmentCache] sweep spared live session dir \(entry.lastPathComponent)",
-                               category: .session)
-                continue
-            }
-            do {
-                try fm.removeItem(at: entry)
-                removed += 1
-            } catch {
-                failures += 1
-            }
-        }
-        return StaleSweepResult(inspectedCount: inspected, removedCount: removed, failureCount: failures)
+        SessionDirectoryLiveness.sweepStale(
+            base: baseDir, currentSession: currentSession, now: now,
+            maxEntries: maxEntries, maxRemovals: maxRemovals, logPrefix: "[SegmentCache]")
     }
 
     // MARK: - Writer side
@@ -480,8 +442,9 @@ final class SegmentCache: @unchecked Sendable {
             }
         }
         condition.lock()
-        // Sealed or not, this staging file is no longer being written.
-        if renameOK { stagingReservations.removeValue(forKey: stagingPath) }
+        // Sealed or not, this staging file is no longer being written; a failed rename deleted it, so
+        // its reservation goes too, and the muxer no longer remembers the path (audit SEG-204).
+        stagingReservations.removeValue(forKey: stagingPath)
         if inProgress[index] == stagingPath { inProgress.removeValue(forKey: index) }
         if renameOK {
             if sealedFromStaging.updateValue(byteCount, forKey: stagingPath) == nil {
