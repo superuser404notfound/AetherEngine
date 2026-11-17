@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.69.1] - 2026-11-17
+
 ### Fixed
 
 - **After a rendered Atmos title, the next 5.1 title no longer reaches the receiver as Atmos (AE#1081).**
