@@ -165,8 +165,8 @@ final class Issue99BridgeResumeTests: XCTestCase {
 
     /// A VOD pump death with reason muxerFailed previously had no recovery arm at all (only live
     /// sessions reopened). The revive gate allows a bounded number of producer rebuilds per session.
-    func testMuxerFailureReviveGateAdmitsUpToCapThenRefuses() {
-        var gate = MuxerFailureReviveGate(maxAttempts: 2)
+    func testReviveBudgetAdmitsUpToCapThenRefuses() {
+        var gate = ReviveBudget(maxAttempts: 2)
         XCTAssertTrue(gate.admit())
         XCTAssertTrue(gate.admit())
         XCTAssertFalse(gate.admit())

@@ -130,6 +130,7 @@ final class SegmentCache: @unchecked Sendable {
     /// Monotonic across prunes; NOT decremented by pruneOutsideWindow. Lets VideoSegmentProvider
     /// detect gaps below the producer's write head after eviction erases them from indexRange().
     private var _highestStoredIndex: Int = -1
+    private var _totalStoredCount: Int = 0
 
     /// Audit SEG-4: every stored generation of an index gets its own file name, so a URL names exactly
     /// one set of bytes. A reader dropping a vanished entry, or a prune deleting a doomed one after
@@ -434,6 +435,7 @@ final class SegmentCache: @unchecked Sendable {
             entryBytes[index] = data.count
             _totalBytes += data.count
             if index > _highestStoredIndex { _highestStoredIndex = index }
+            _totalStoredCount &+= 1
         }
         let doomed = pruneOutsideWindow()
         if !doomed.isEmpty { residentSetChanged = true }
@@ -505,6 +507,7 @@ final class SegmentCache: @unchecked Sendable {
             entryBytes[index] = byteCount
             _totalBytes += byteCount
             if index > _highestStoredIndex { _highestStoredIndex = index }
+            _totalStoredCount &+= 1
             // A later epoch produced what an earlier one passed over: a re-anchor moved the
             // boundaries and this index is no longer a hole (#358).
             foldCounts.removeValue(forKey: index)
@@ -1125,6 +1128,14 @@ final class SegmentCache: @unchecked Sendable {
         condition.lock()
         defer { condition.unlock() }
         return _highestStoredIndex
+    }
+
+    /// Segments ever stored or adopted, never reduced by pruning or a restart. The revive budgets
+    /// read it as "the session produced something since the last death".
+    var totalStoredCount: Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return _totalStoredCount
     }
 
     /// Largest K such that every index in [startIdx ... K] is resident, walking forward until the first
