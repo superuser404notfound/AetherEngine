@@ -619,8 +619,12 @@ extension AetherEngine {
         // AE#495: a host that answered the trust evaluator needs the media on a session the engine
         // owns, and the same stand-in does that. With sidecars it mounts a relay behind the
         // rewritten master, without them the relay stands alone.
-        let playbackURL = await prepareRemoteHLSStandIn(
+        let playbackURL = try await prepareRemoteHLSStandIn(
             originURL: url, options: options, expectedGeneration: bypassGeneration) ?? url
+        // Audit LOAD-201: a stop() or zap during the stand-in's fetches owns the host now. Mounting and
+        // playing on it would put this URL's sound on a torn-down player, or this item over the
+        // successor's. A stand-in adopted before the zap is the successor's teardown to release.
+        try checkLoadCurrent(bypassGeneration)
         // With a relay in front, the item AVPlayer fails is a loopback 502 and the refused handshake
         // happened out of its sight, so the classification has to be able to ask the side that made it.
         if let relay = remoteHLSSubtitleProxy?.server.relay {
@@ -722,7 +726,9 @@ extension AetherEngine {
 
     /// Stand a loopback origin in front of the remote master and return the URL AVPlayer should open.
     /// Nil means "play the origin directly", which is the answer for a live source, and for a session
-    /// with neither text sidecars to inject (#316) nor a trust evaluator to honor (AE#495).
+    /// with neither text sidecars to inject (#316) nor a trust evaluator to honor (AE#495). Throws
+    /// `CancellationError` when a load() or stop() superseded the session during its fetches, so nil
+    /// never stands for "superseded" (audit LOAD-201).
     ///
     /// Bitmap sidecars (`.sup`) are excluded: WebVTT is a text rendition, and promising one for a PGS file
     /// would serve an empty `.vtt` that AVPlayer never re-fetches. Those keep the overlay (and Phase D OCR).
@@ -739,7 +745,7 @@ extension AetherEngine {
     @MainActor
     private func prepareRemoteHLSStandIn(originURL: URL,
                                          options: LoadOptions,
-                                         expectedGeneration: UInt64) async -> URL? {
+                                         expectedGeneration: UInt64) async throws -> URL? {
         let mayNeedRelay = EngineTLS.serverTrustEvaluator != nil
             && originURL.scheme?.lowercased() == "https"
         let tracks = options.isLive
@@ -753,18 +759,18 @@ extension AetherEngine {
         let needsRelay = mayNeedRelay
             ? await HLSOriginRelay.systemTrustRefuses(originURL, headers: options.httpHeaders)
             : false
+        try checkLoadCurrent(expectedGeneration)
         guard !options.isLive || needsRelay else { return nil }
         guard !tracks.isEmpty || needsRelay else { return nil }
 
-        guard let prepared = await RemoteHLSSubtitleProxy.prepare(
+        let prepared = await RemoteHLSSubtitleProxy.prepare(
             originURL: originURL, tracks: tracks, httpHeaders: options.httpHeaders,
-            needsRelay: needsRelay) else { return nil }
+            needsRelay: needsRelay)
         // The playlist fetches suspend; a load()/stop() can have superseded this session meanwhile, and a
         // proxy nobody owns would keep its socket and decode task for the rest of the process.
-        guard loadGeneration == expectedGeneration else {
-            prepared.tearDown()
-            return nil
-        }
+        if loadGeneration != expectedGeneration { prepared?.tearDown() }
+        try checkLoadCurrent(expectedGeneration)
+        guard let prepared else { return nil }
         remoteHLSSubtitleProxy = prepared
         // Audit NAT-2: the NAMEs the served master carries, which the selection and the legible-list
         // filter match against, not the names the tracks asked for (the rewriter disambiguates and
