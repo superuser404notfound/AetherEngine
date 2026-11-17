@@ -119,6 +119,7 @@ final class DeinterlaceFilter {
             return true
         }
         teardown()
+        if passthroughLatched { return false }
 
         if config.mode == .auto, !hwDisabled {
             if buildGraph(frame: frame, timeBase: timeBase, engine: .hardware) {
@@ -335,10 +336,47 @@ final class DeinterlaceFilter {
         return desc.pointee.comp.0.depth > 8
     }
 
-    /// Feed a decoded frame (takes ownership; frame is reset after the call).
+    /// Feed a decoded frame. KEEP_REF (DEC-202): buffersrc takes its own reference and leaves `frame`
+    /// intact, so a failed push really can fall through to "render as-is" instead of emitting a frame the
+    /// call had emptied. The caller unrefs the frame after a successful push.
     func push(_ frame: UnsafeMutablePointer<AVFrame>) -> Int32 {
         guard let src = srcCtx else { return -1 }
-        return av_buffersrc_add_frame_flags(src, frame, 0)
+        return av_buffersrc_add_frame_flags(src, frame, Int32(AV_BUFFERSRC_FLAG_KEEP_REF))
+    }
+
+    /// DEC-203: tells the graph no more input is coming, so yadif/bwdif release the frame they hold as
+    /// `cur` while they wait for `next` (they synthesise the missing one on EOF). Pull until the sink
+    /// reports EOF after this. The graph is spent afterwards; the caller tears it down.
+    func sendEndOfStream() -> Int32 {
+        guard let src = srcCtx else { return -1 }
+        return av_buffersrc_add_frame_flags(src, nil, 0)
+    }
+
+    /// Graph errors survived in this session. A hardware graph that errors falls back to software for
+    /// the rebuild, and a software graph that keeps erroring stops being rebuilt (frames render as-is).
+    private(set) var graphErrorCount = 0
+    static let maxGraphErrors = 3
+    private var passthroughLatched = false
+
+    /// DEC-202: libavfilter latches a filter error on the link, so every later `pull` returns it at once
+    /// and every pushed frame piles up in the buffersrc FIFO. A pull result that is neither a frame, EAGAIN
+    /// nor EOF is therefore terminal for this graph: drop it, and let the next interlaced frame build a
+    /// fresh one. Returns true when `code` was such an error.
+    @discardableResult
+    func noteGraphError(afterPull code: Int32) -> Bool {
+        guard code < 0, code != FFmpegErr.eagain, code != FFmpegErr.eof else { return false }
+        graphErrorCount += 1
+        let wasHardware = engine == .hardware
+        teardown()
+        if wasHardware { hwDisabled = true }
+        if graphErrorCount >= Self.maxGraphErrors { passthroughLatched = true }
+        EngineLog.emit(
+            "[Deinterlace] graph error \(FFmpegErr.text(for: code)), graph dropped "
+            + "(\(graphErrorCount)/\(Self.maxGraphErrors))"
+            + (passthroughLatched ? "; rendering interlaced frames as-is from here" : ""),
+            category: .swPlayback
+        )
+        return true
     }
 
     /// Pull the next filtered frame into `out`. Returns >= 0 on success, AVERROR(EAGAIN) when the

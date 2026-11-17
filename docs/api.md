@@ -1704,6 +1704,8 @@ The way out is the one under [Where the token rotates](#live-the-retune-request)
 
 **`.writeTooSlow`: the engine drops the recording, not the picture.** Writes go into a bounded queue that is drained off the demux thread. When that queue fills, the recording ends and says so. Otherwise the demux thread would wait on a slow disk and stall playback, and the engine does not make that trade.
 
+**A bad timestamp does not end the recording.** The TS muxer refuses a packet whose decode timestamp does not rise past the stream's last one. The writer lifts such a timestamp to the previous one plus one tick and logs the first repair. A packet the muxer still refuses is dropped, and only a long run of refusals ends the recording as `.writeFailed`.
+
 **A reset ends the recording.** When `liveSourceReset` fires, or the host calls `reloadAtCurrentPosition`, the file is closed cleanly and `$recordingState` publishes `.ended(.sourceReset)`.
 
 - The recording does not continue in the same file. A reset can bring back different codecs, different parameter sets or a different program. Writing that into streams declared from the old source gives a file that is unplayable, or silently wrong, past the seam.
