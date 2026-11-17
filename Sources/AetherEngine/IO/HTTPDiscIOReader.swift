@@ -94,6 +94,37 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
                   residentSpans: prewarmed.map { [$0.head] + ($0.tail.map { [$0] } ?? []) } ?? [])
     }
 
+    /// Audit DMX-201: lets a stopped open reach the size probe, which runs before any reader exists
+    /// for `Demuxer.markClosed()` to cancel. `cancel()` invalidates the probe's session (which
+    /// completes the request in flight) and tells the retry loop to stop.
+    final class OpenHandle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        private var session: URLSession?
+
+        var isCancelled: Bool { lock.withLock { cancelled } }
+
+        func cancel() {
+            let toCancel: URLSession? = lock.withLock {
+                cancelled = true
+                defer { session = nil }
+                return session
+            }
+            toCancel?.invalidateAndCancel()
+        }
+
+        fileprivate func attach(_ newSession: URLSession) {
+            let alreadyCancelled: Bool = lock.withLock {
+                if cancelled { return true }
+                session = newSession
+                return false
+            }
+            if alreadyCancelled { newSession.invalidateAndCancel() }
+        }
+
+        fileprivate func detach() { lock.withLock { session = nil } }
+    }
+
     /// `init?` for a caller that has to say why a disc image cannot be read: an origin that answers the
     /// range probe with a 200 cannot address bytes, which is a different failure from an unreachable
     /// one, and a disc image is a filesystem that no reader can walk without ranges (audit NET-102).
@@ -106,11 +137,14 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
                      maxRetries: Int = 3,
                      requestTimeout: TimeInterval = 30,
                      sessionConfiguration: URLSessionConfiguration? = nil,
-                     prewarmed: PrewarmedSource? = nil) throws -> HTTPDiscIOReader? {
+                     prewarmed: PrewarmedSource? = nil,
+                     handle: OpenHandle? = nil) throws -> HTTPDiscIOReader? {
         let session = makeSession(sessionConfiguration)
+        handle?.attach(session)
+        defer { handle?.detach() }
         switch resolveSize(url: url, extraHeaders: extraHeaders, session: session,
                            requestTimeout: requestTimeout, maxRetries: maxRetries,
-                           knownSize: prewarmed?.contentLength) {
+                           knownSize: prewarmed?.contentLength, shouldAbort: handle.map { h in { h.isCancelled } }) {
         case .size(let size):
             return HTTPDiscIOReader(
                 url: url, extraHeaders: extraHeaders, baseChunkSize: baseChunkSize,
@@ -164,10 +198,10 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
     /// small file of a disc folder, read whole, where a range-blind origin costs nothing.
     private static func resolveSize(url: URL, extraHeaders: [String: String], session: URLSession,
                                     requestTimeout: TimeInterval, maxRetries: Int,
-                                    knownSize: Int64?) -> SizeProbe {
+                                    knownSize: Int64?, shouldAbort: (() -> Bool)? = nil) -> SizeProbe {
         if let knownSize, knownSize > 0 { return .size(knownSize) }
         return probeSize(url: url, extraHeaders: extraHeaders, session: session,
-                         timeout: requestTimeout, maxRetries: max(0, maxRetries))
+                         timeout: requestTimeout, maxRetries: max(0, maxRetries), shouldAbort: shouldAbort)
     }
 
     /// #647: take what a host warmed for this URL, under the rule `AVIOReader` adopts by (#551).
@@ -415,11 +449,20 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
     }
 
     private static func probeSize(url: URL, extraHeaders: [String: String], session: URLSession,
-                                  timeout: TimeInterval, maxRetries: Int) -> SizeProbe {
+                                  timeout: TimeInterval, maxRetries: Int,
+                                  shouldAbort: (() -> Bool)? = nil) -> SizeProbe {
         var attempt = 0
         while true {
+            if shouldAbort?() == true { return .unreachable }
+            // Audit DMX-201: the probe is a request to the origin like any other, so it takes a slot
+            // and cannot compete uncounted with the next item's pump. A stopped open gives its place up.
+            let ticket = OriginRequestBudget.shared.acquire(
+                for: url, label: "disc-probe", timeout: timeout, shouldAbort: shouldAbort)
+            defer { OriginRequestBudget.shared.release(ticket) }
+            if shouldAbort?() == true { return .unreachable }
             let r = rangeGet(url: url, extraHeaders: extraHeaders, session: session,
                              timeout: timeout, offset: 0, length: 1)
+            if shouldAbort?() == true { return .unreachable }
             if let r = r, r.status == 206, let cr = r.contentRange,
                let total = parseContentRangeTotal(cr) {
                 return .size(total)

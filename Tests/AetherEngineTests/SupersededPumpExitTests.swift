@@ -26,6 +26,16 @@ struct SupersededPumpExitTests {
         #expect(!engine.retryLiveSourceRecovery(), "unrelated source loss cannot masquerade as retained replay")
         engine.liveRecoveryHasVerifiedReplay = true
         engine.barrenReopenCycles = 3
+        let provider = VideoSegmentProvider(
+            cache: cache, segments: [], codecsString: "hvc1", supplementalCodecs: nil,
+            resolution: (1920, 1080), videoRange: .sdr, frameRate: 25.0, hdcpLevel: nil,
+            sourceBitrate: 8_000_000, isLive: true)
+        engine.provider = provider
+        let runningRetry = engine.retryLiveSourceRecovery()
+        #expect(runningRetry, "a retry on a session that is not parked coalesces as a success")
+        #expect(calls.seekSignals == 0, "audit HLS-202: and does not touch the running producer")
+        #expect(engine.liveRecoveryProducer == nil)
+        provider.markLiveProductionHalted()
         #expect(engine.retryLiveSourceRecovery())
         #expect(engine.retryLiveSourceRecovery())
         #expect(calls.seekSignals == 1, "duplicate calls cannot launch another source connection")

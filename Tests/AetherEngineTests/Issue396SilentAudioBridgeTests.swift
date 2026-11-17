@@ -187,7 +187,7 @@ struct Issue396SilentAudioBridgeTests {
 
         let engine = makeEngine()
         engine.audioBridge = bridge
-        engine.muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 0)
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 0)
         let surfaced = SurfacedFailure()
         engine.onVODSourceFailed = { code, reason, kind in surfaced.set(code, reason, kind) }
 
@@ -213,7 +213,7 @@ struct Issue396SilentAudioBridgeTests {
 
         let engine = makeEngine()
         engine.audioBridge = bridge
-        engine.muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 0)
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 0)
         let surfaced = SurfacedFailure()
         engine.onVODSourceFailed = { code, reason, kind in surfaced.set(code, reason, kind) }
 

@@ -61,7 +61,7 @@ struct SegmentStorageExhaustionTests {
         defer { cache.close() }
         cache.noteStorageExhausted()
         engine.cache = cache
-        engine.muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 0)
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 0)
         let surfaced = SurfacedFailure()
         engine.onVODSourceFailed = { code, reason, kind in surfaced.set(code, reason, kind) }
 
@@ -78,7 +78,7 @@ struct SegmentStorageExhaustionTests {
         let cache = makeCache()
         defer { cache.close() }
         engine.cache = cache
-        engine.muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 0)
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 0)
         let surfaced = SurfacedFailure()
         engine.onVODSourceFailed = { code, reason, kind in surfaced.set(code, reason, kind) }
 
@@ -112,7 +112,7 @@ struct SegmentStorageExhaustionTests {
         #expect(cache.storageExhausted == !cancelled)
         let engine = makeEngine()
         engine.cache = cache
-        engine.muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 0)
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 0)
         let surfaced = SurfacedFailure()
         engine.onVODSourceFailed = { surfaced.set($0, $1, $2) }
         engine.handleVODMuxerFailure()

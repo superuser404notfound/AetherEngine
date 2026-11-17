@@ -210,7 +210,10 @@ extension HLSVideoEngine {
             restartLock.unlock()
             return false
         }
-        guard liveRecoveryProducer !== current else {
+        // Audit HLS-202: only a parked session (halted at exhaustion) has anything to resume. A
+        // retry on a running one, or after the reopen already succeeded, is a successful no-op;
+        // acting on it would tear down the healthy producer and end a running recording.
+        guard provider?.liveProductionHalted == true, liveRecoveryProducer !== current else {
             restartLock.unlock()
             return true
         }
@@ -528,8 +531,9 @@ extension HLSVideoEngine {
         let metered = OriginRequestBudget.shared.refusedRecently(
             sourceURL, within: Self.rateLimitVerdictWindowSeconds)
 
+        let reviveProgress = cache?.totalStoredCount ?? 0
         restartLock.lock()
-        let admitted = metered ? rateLimitReviveGate.admit() : readErrorReviveGate.admit()
+        let admitted = metered ? rateLimitReviveGate.admit() : readErrorReviveGate.admit(progress: reviveProgress)
         let attempts = metered ? rateLimitReviveGate.attempts : readErrorReviveGate.attempts
         let cap = metered ? 0 : readErrorReviveGate.maxAttempts
         let spent = metered ? rateLimitReviveGate.elapsedSeconds() : 0
@@ -566,11 +570,7 @@ extension HLSVideoEngine {
             surfaceVODSourceFailure(code, "Source read failed")
             return
         }
-        let frozen = currentPlaybackPositionProvider?() ?? 0
-        let anchor = AetherEngine.recoveryAnchorPosition(
-            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?(),
-            currentRendered: frozen)
-        let idx = segmentIndexForPlaylistTime(anchor)
+        let (anchor, idx) = consumerRecoveryTarget()
 
         guard metered else {
             EngineLog.emit(
@@ -609,6 +609,16 @@ extension HLSVideoEngine {
             guard let self else { return }
             self.fireMeteredRevive(at: idx, deadProducer: deadProducer, sessionEpoch: sessionEpoch)
         }
+    }
+
+    /// Where a VOD revive re-anchors: a pending seek that never landed owns the aim, else the
+    /// consumer's frozen position (0 when the host has none yet), mapped to its segment index.
+    func consumerRecoveryTarget() -> (anchor: TimeInterval, index: Int) {
+        let frozen = currentPlaybackPositionProvider?() ?? 0
+        let anchor = AetherEngine.recoveryAnchorPosition(
+            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?(),
+            currentRendered: frozen)
+        return (anchor, segmentIndexForPlaylistTime(anchor))
     }
 
     /// AE#792 part 2: what a read error over a refused credential calls for. The store's revision says
@@ -664,8 +674,9 @@ extension HLSVideoEngine {
     }
 
     private func reviveAfterCredentialRenewal(refusal: RequestHeaderStore.CredentialRefusal) {
+        let reviveProgress = cache?.totalStoredCount ?? 0
         restartLock.lock()
-        let admitted = credentialReviveGate.admit()
+        let admitted = credentialReviveGate.admit(progress: reviveProgress)
         let attempts = credentialReviveGate.attempts
         if admitted { mainDemuxerSuspectDead = true }
         restartLock.unlock()
@@ -676,11 +687,7 @@ extension HLSVideoEngine {
             surfaceCredentialRefusal(refusal)
             return
         }
-        let frozen = currentPlaybackPositionProvider?() ?? 0
-        let anchor = AetherEngine.recoveryAnchorPosition(
-            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?(),
-            currentRendered: frozen)
-        let idx = segmentIndexForPlaylistTime(anchor)
+        let (anchor, idx) = consumerRecoveryTarget()
         EngineLog.emit(
             "[HLSVideoEngine] #792 request headers renewed after HTTP \(refusal.status); rebuilding the "
             + "producer at \(String(format: "%.2f", anchor))s -> seg\(idx) "
@@ -841,11 +848,7 @@ extension HLSVideoEngine {
             return
         }
 
-        let frozen = currentPlaybackPositionProvider?() ?? 0
-        let anchor = AetherEngine.recoveryAnchorPosition(
-            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?(),
-            currentRendered: frozen)
-        let idx = segmentIndexForPlaylistTime(anchor)
+        let (anchor, idx) = consumerRecoveryTarget()
         EngineLog.emit(
             "[HLSVideoEngine] AE#222 rebuilding producer + muxer with a \(prime.count) B audio moov prime at "
             + "\(String(format: "%.2f", anchor))s -> seg\(idx) (audio stream-copy preserved)",
@@ -904,11 +907,7 @@ extension HLSVideoEngine {
             surfaceVODSourceFailure(FFmpegErr.einval, "Source audio cannot be muxed")
             return
         }
-        let frozen = currentPlaybackPositionProvider?() ?? 0
-        let anchor = AetherEngine.recoveryAnchorPosition(
-            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?(),
-            currentRendered: frozen)
-        let idx = segmentIndexForPlaylistTime(anchor)
+        let (anchor, idx) = consumerRecoveryTarget()
         EngineLog.emit(
             "[HLSVideoEngine] #99 VOD pump died with muxerFailed; rebuilding producer + muxer at "
             + "\(String(format: "%.2f", anchor))s -> seg\(idx) "

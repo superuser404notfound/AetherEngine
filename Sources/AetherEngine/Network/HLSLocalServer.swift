@@ -27,6 +27,10 @@ protocol HLSSegmentProvider: AnyObject {
     /// has gone is answered with an error response rather than the bytes the bookkeeping promised.
     func mediaSegmentURL(at index: Int) -> URL?
 
+    /// Live only: the segment left the window and will never be served again, so the server answers
+    /// 404 (AVPlayer resyncs on it) instead of a retriable 503. Default false.
+    func liveSegmentIsGone(_ index: Int) -> Bool
+
     /// AE#418 round 7: what became of a media-segment request. `delivered` is true once the whole
     /// response went out; false when it was refused or the write failed on a client that hung up.
     /// The axis is a statement about bytes in AVPlayer's timeline, so a placement composed from a
@@ -190,6 +194,7 @@ extension HLSSegmentProvider {
         mediaSegment(at: index, onSlow: onSlow).map { .data($0) }
     }
     func mediaSegmentURL(at index: Int) -> URL? { nil }
+    func liveSegmentIsGone(_ index: Int) -> Bool { false }
     func didServeMediaSegment(index: Int, delivered: Bool) {}
     func didDeliverProgressiveChunk(index: Int) {}
     var staticMasterPlaylistBody: String? { nil }
@@ -1389,7 +1394,8 @@ final class HLSLocalServer: @unchecked Sendable {
                     let providerCount = provider?.segmentCount ?? -1
                     let reason = "segment[\(index)] empty (segmentCount=\(providerCount))"
                     switch Self.classifySegmentResponse(
-                        index: index, segmentCount: providerCount, hasData: false) {
+                        index: index, segmentCount: providerCount, hasData: false,
+                        liveGone: provider?.liveSegmentIsGone(index) ?? false) {
                     case .serve:
                         // Unreachable: hasData is false here.
                         return refused(send404(fd: fd, path: normalizedPath, reason: reason))
@@ -1658,8 +1664,12 @@ final class HLSLocalServer: @unchecked Sendable {
         case notFound
     }
 
-    static func classifySegmentResponse(index: Int, segmentCount: Int, hasData: Bool) -> SegmentResponseKind {
+    static func classifySegmentResponse(index: Int, segmentCount: Int, hasData: Bool,
+                                        liveGone: Bool = false) -> SegmentResponseKind {
         if hasData { return .serve }
+        // A live segment that left the window is a real 404: AVPlayer resyncs on it, and a 503
+        // would have it retry an index that never comes back (audit HLS-204).
+        if liveGone { return .notFound }
         if index >= 0, segmentCount > 0, index < segmentCount { return .retryLater }
         return .notFound
     }

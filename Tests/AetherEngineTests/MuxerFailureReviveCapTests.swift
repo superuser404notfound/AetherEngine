@@ -35,7 +35,7 @@ struct MuxerFailureReviveCapTests {
     @Test("an exhausted muxer-failure gate surfaces onVODSourceFailed instead of dying silently")
     func exhaustedGateSurfacesFailure() {
         let engine = makeEngine()
-        engine.muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 0)
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 0)
         let failed = Flag()
         engine.onVODSourceFailed = { code, reason, _ in failed.set(code, reason) }
 
@@ -51,7 +51,7 @@ struct MuxerFailureReviveCapTests {
     @Test("a failure inside the cap rebuilds instead of surfacing a terminal error")
     func admittedFailureDoesNotSurface() {
         let engine = makeEngine()
-        engine.muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 2)
         let failed = Flag()
         engine.onVODSourceFailed = { code, reason, _ in failed.set(code, reason) }
 

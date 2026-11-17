@@ -964,14 +964,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// #99: bounded revive for a VOD pump that died with muxerFailed (under `restartLock`).
     /// performRestart rebuilds muxer AND re-arms the audio bridge, so transient causes heal;
     /// a persistent cause exhausts the cap instead of restart-storming.
-    var muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
+    var muxerFailureReviveGate = ReviveBudget(maxAttempts: 2)
 
     /// AE#169 round 2: bounded revive for a VOD pump that died on a MID-SESSION read error (under
     /// `restartLock`). #126 only surfaced the nothing-ever-produced case as fatal and assumed the
     /// scrub/wedge arms covered the rest; a tail request within the forward-wait window of the dead
     /// producer's front reached neither (rrgomes: seg719 miss x11 into -12889), so the exit gets
     /// its own event-driven arm. Same gate shape as #99.
-    var readErrorReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
+    var readErrorReviveGate = ReviveBudget(maxAttempts: 2, reset: .onProgress)
     /// #377: a separate, larger budget for read errors caused by an origin REFUSING us rather than
     /// failing. Separate because the two must not spend each other: two attempts is right for a
     /// source that may be gone, and wrong for one that is merely refusing for a while, where each
@@ -983,7 +983,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var rateLimitReviveGate = RefusingSourceReviveBudget()
     /// AE#792 part 2: revives spent on a credential refusal the host has since renewed. Each one
     /// answers a renewal, so the bound only stops a host whose fresh credentials keep being refused.
-    var credentialReviveGate = MuxerFailureReviveGate(maxAttempts: 3)
+    var credentialReviveGate = ReviveBudget(maxAttempts: 3, reset: .onProgress)
 
     /// AE#169 round 2 (under `restartLock`): the demuxer's last read threw, so the next
     /// performRestart replaces it via the #79 fresh-demuxer path instead of seeking a connection
@@ -1004,12 +1004,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// AE#222 (under `restartLock`): bounded rebuild for a pump that deferred its first cut. One attempt is
     /// enough by construction (the prime is captured before the restart and reused for the session's whole
     /// life); the gate exists so a source that somehow defers again cannot restart-storm.
-    var audioSampleEntryPrimeGate = MuxerFailureReviveGate(maxAttempts: 1)
+    var audioSampleEntryPrimeGate = ReviveBudget(maxAttempts: 1)
 
     /// AE#169 round 3 (under `restartLock`): bounded re-anchor for a VOD pump whose restart
     /// scan-forward gate starved to EOF (no runtime keyframe at/after the targeted plan boundary,
     /// the unproducible tail segment). Same gate shape as #99.
-    var gateStarvationReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
+    var gateStarvationReviveGate = ReviveBudget(maxAttempts: 2)
 
     /// #93 residual: a stalled AVPlayer sometimes never resumes REQUESTING after a wedge re-anchor
     /// (device: plain playback, one -15628 errorLog, then zero segment GETs while parked in

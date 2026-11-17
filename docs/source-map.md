@@ -532,7 +532,7 @@ Notes:
 | `AetherEngine+FelProbe.swift` | `DualLayerDolbyVision` trait: FEL decode probe behind `aetherctl feltest`, and the `--cycle-el` residual switch. |
 | `AetherEngine+DolbyVisionTest.swift` | DEBUG-only, `DualLayerDolbyVision` trait: `@_spi(Diagnostics)` hook (not host API) that arms the pin test from a debug menu or `aetherctl play --dv-pin`. |
 | `Issue65LivelockBreakers.swift` | Pure backpressure-wedge detection (`BackpressureWedgeDetector`) that breaks the VOD HLS scrub-burst livelock (#65); `seekIsWedged` starvation check and `SeekResumeGuard` single-resume latch for the deadline-bounded seek. |
-| `Issue99MuxerFailureRevive.swift` | Bounded revive for a VOD pump that died with `muxerFailed` (#99): the first cut firing before any bridged audio reached the muxer (dec3 box) no longer ends the session. |
+| `ReviveBudget.swift` | Bounded revive count for a VOD producer rebuild (#99), with an explicit reset policy: never, or on progress for the read-error and credential arms (audit HLS-201). |
 | `SlowServeSignal.swift` | One-shot slow-serve timer that arms the server's early chunked header (keeps time-to-first-byte under AVPlayer's ~3.5 s -12889 window, #93 round 3). |
 | `VideoSegmentProvider.swift` | Native path: segment provider facing the playlist (live sliding window, restart heuristics, sparse-hole waits gated on producer coverage, #129). |
 | `MarchRateTracker.swift` | Native path: the producer's march rate from segment completions, cut at restarts and backpressure parks. Feeds the provider's wait-or-restart decision for a short forward jump (#932). |
