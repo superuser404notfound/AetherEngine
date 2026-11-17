@@ -110,6 +110,25 @@ the public-API contract.
 - **The software video host no longer drops the last audio at end of file.** Up to about 21 ms, and about
   58 ms with a dialogue lift, were lost.
 - **Normalized tracks end with a valid timestamp.** The last ~5 ms went to the renderer with an invalid PTS.
+- **A live PAFF channel keeps its fields paired after a programme change.** The field joiner re-arms from the
+  new SPS instead of staying off for the rest of the session.
+- **One damaged E-AC-3 frame no longer costs a discontinuity.** A new audio layout counts after three frames
+  in a row, and frames flagged corrupt are skipped.
+- **An audio or title switch on a remote disc image keeps its held connection and request headers.** A disc
+  title switch also shows the new title's track lists.
+- **Header updates reach a live stream the engine rerouted through its own ingest.** `updateRequestHeaders`
+  used to promise the next rebuild, which that reader never had.
+- **A non-seekable live source gets its live-reset hand-off.** A failed AE#627 live join is no longer
+  reported as `nativeItemFailed`.
+- **Sidecar subtitles on another origin keep their own headers across a reload.**
+- **One transient 5xx or reset on a VOD HLS segment no longer ends the ingest.** The segment is retried up to
+  three times. 1xx interim responses (103 Early Hints) no longer desync the persistent connection, and an
+  https to http redirect there is upgraded to https.
+- **Spools left by a killed software session are swept after one hour instead of one day.** Unrelated
+  entries in the temp directory no longer hide them.
+- **Log redaction also covers camelCase token names, whole `Cookie` headers, `Optional("...")`, short
+  `Basic` credentials and a raw `@` in a password.** A long run of `e-` in a logged URL no longer burns CPU.
+- **`SMB://` is accepted, and an `SMBURL` error never repeats the password.**
 - **Infinite or NaN float samples no longer crash or freeze the loudness target.** They are left out of
   the measurement.
 - **A live packet without a PTS no longer produces a segment that claims to last 1e14 seconds.** It cuts
