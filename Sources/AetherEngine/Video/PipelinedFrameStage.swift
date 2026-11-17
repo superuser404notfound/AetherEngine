@@ -8,14 +8,27 @@ import Metal
 /// completed: the GPU time in milliseconds, or the command buffer's error.
 struct EncodedGPUWork: @unchecked Sendable {
     let commandBuffer: MTLCommandBuffer
-    /// The plane textures (and their Core Video wrappers) the work reads and writes, held until it is done.
-    let keepAlive: Any
+    /// The plane textures the work reads and writes and the texture cache they came from, held until it
+    /// is done: the stage may drop its own cache while the work is still on the GPU (audit GPU-201).
+    let textures: MetalTextureLease?
     let failure: (MTLCommandBufferStatus, Error?) -> Error
 
-    func finish() throws -> Double {
-        withExtendedLifetime(keepAlive) {}
+    /// `forcedError` stands in for the command buffer's own error (the stages' test seam).
+    func finish(forcedError: Error? = nil) throws -> Double {
+        withExtendedLifetime(textures) {}
+        if let forcedError { throw failure(.error, forcedError) }
         guard commandBuffer.status == .completed else { throw failure(commandBuffer.status, commandBuffer.error) }
         return max(0, (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000)
+    }
+
+    /// A command buffer refused because the app is in the background (iOS), looked for through the
+    /// stages' own wrappers: not a fault of the stage, so no stage counts it as a failure (audit GPU-203).
+    static func isBackgroundRefusal(_ error: Error) -> Bool {
+        if let wrapped = error as? GPUStageFailure, let underlying = wrapped.underlying {
+            return isBackgroundRefusal(underlying)
+        }
+        let ns = error as NSError
+        return ns.domain == MTLCommandBufferErrorDomain && ns.code == Int(MTLCommandBufferError.Code.notPermitted.rawValue)
     }
 
     /// Commits and waits on the calling thread, as the stages did before the pipeline.
@@ -222,6 +235,11 @@ final class PipelinedFrameStage: @unchecked Sendable {
         slots.signal()
         undelivered.leave()
     }
+}
+
+/// A stage's error that wraps the one that caused it, which `EncodedGPUWork.isBackgroundRefusal` looks at.
+protocol GPUStageFailure: Error {
+    var underlying: Error? { get }
 }
 
 /// A stage hands a `Begun` from its ML callback to the pipeline; the buffers in it belong to one frame.

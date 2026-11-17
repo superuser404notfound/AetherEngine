@@ -554,10 +554,10 @@ struct FrameUpscalerTests {
     func backgroundRefusalIsClassified() {
         let notPermitted = NSError(domain: MTLCommandBufferErrorDomain,
                                    code: Int(MTLCommandBufferError.Code.notPermitted.rawValue))
-        #expect(FrameUpscaler.isBackgroundRefusal(notPermitted))
-        #expect(!FrameUpscaler.isBackgroundRefusal(NSError(domain: MTLCommandBufferErrorDomain,
+        #expect(EncodedGPUWork.isBackgroundRefusal(notPermitted))
+        #expect(!EncodedGPUWork.isBackgroundRefusal(NSError(domain: MTLCommandBufferErrorDomain,
                                                            code: Int(MTLCommandBufferError.Code.timeout.rawValue))))
-        #expect(!FrameUpscaler.isBackgroundRefusal(NSError(domain: NSCocoaErrorDomain,
+        #expect(!EncodedGPUWork.isBackgroundRefusal(NSError(domain: NSCocoaErrorDomain,
                                                            code: Int(MTLCommandBufferError.Code.notPermitted.rawValue))))
     }
 

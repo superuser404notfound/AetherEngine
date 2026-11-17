@@ -58,10 +58,13 @@ final class HeldStillPresenter {
         playerLayer = still
 
         let deadline = ContinuousClock.now + .seconds(budgetSeconds)
+        // Audit GPU-206: through `gateTick`, so a cancelled task ends the wait instead of spinning the main
+        // actor until the deadline (a cancelled `Task.sleep` returns at once).
         func waitFor(_ condition: () -> Bool) async -> Bool {
             while !condition() {
-                guard item.status != .failed, ContinuousClock.now < deadline, playerLayer === still else { return false }
-                try? await Task.sleep(for: .milliseconds(4))
+                guard item.status != .failed, ContinuousClock.now < deadline,
+                      await DisplayCriteriaController.gateTick(milliseconds: 4, isCurrent: { playerLayer === still })
+                else { return false }
             }
             return playerLayer === still
         }

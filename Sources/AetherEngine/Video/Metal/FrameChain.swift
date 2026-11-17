@@ -19,7 +19,7 @@ import Metal
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class FrameChain {
 
-    struct Failure: Error, CustomStringConvertible {
+    struct Failure: GPUStageFailure, CustomStringConvertible {
         let description: String
         let underlying: Error?
         init(_ description: String, underlying: Error? = nil) {
@@ -35,7 +35,7 @@ final class FrameChain {
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let kernels: FrameChainKernels
-    private let textureCache: CVMetalTextureCache
+    private let io: MetalFrameIO
     private let stages: [any FrameChainStage]
     /// Nil when the chain runs as one round-trip kernel (`isRoundTripOnly`).
     private let rgb: MTLTexture?
@@ -52,17 +52,22 @@ final class FrameChain {
     ]
 
     /// `fusesRoundTrip: false` keeps the two passes even where one kernel would do; for comparing the two.
+    /// `io` is the chain's own texture cache and dispatch; nil makes one for `device`.
     init(device: MTLDevice, queue: MTLCommandQueue, sourceWidth: Int, sourceHeight: Int,
-         targetWidth: Int, targetHeight: Int, stages: [any FrameChainStage], fusesRoundTrip: Bool = true) throws {
-        guard let kernels = FrameChainKernels.shared(for: device) else { throw Failure("chain kernels not built") }
-        var cache: CVMetalTextureCache?
-        guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache) == kCVReturnSuccess, let cache
-        else { throw Failure("no Metal texture cache") }
+         targetWidth: Int, targetHeight: Int, stages: [any FrameChainStage], fusesRoundTrip: Bool = true,
+         io: MetalFrameIO? = nil) throws {
+        let kernels: FrameChainKernels
+        do {
+            kernels = try FrameChainKernels.shared(for: device)
+        } catch {
+            throw Failure("chain kernels not built", underlying: error)
+        }
+        guard let io = io ?? MetalFrameIO(device: device) else { throw Failure("no Metal texture cache") }
         guard targetWidth % 2 == 0, targetHeight % 2 == 0 else { throw Failure("odd target size") }
         self.device = device
         self.queue = queue
         self.kernels = kernels
-        self.textureCache = cache
+        self.io = io
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
         self.targetWidth = targetWidth
@@ -78,7 +83,7 @@ final class FrameChain {
         // The one kernel runs a fused stage's arithmetic itself: nothing to allocate.
         for (i, stage) in stages.enumerated() where !isRoundTripOnly {
             let last = i == stages.count - 1
-            size = try stage.prepare(device: device, kernels: kernels, input: size,
+            size = try stage.prepare(io: io, kernels: kernels, input: size,
                                      finalTarget: last ? (targetWidth, targetHeight) : nil)
         }
     }
@@ -119,8 +124,8 @@ final class FrameChain {
     func encode(_ input: CVPixelBuffer, picture: FrameUpscaler.PictureRegion) throws
         -> (output: CVPixelBuffer, work: EncodedGPUWork) {
         // Here, not at completion: the cache is only touched on the encoding thread. A texture an
-        // earlier frame still uses stays alive through its `EncodedGPUWork`.
-        CVMetalTextureCacheFlush(textureCache, 0)
+        // earlier frame still uses stays alive in its work's lease, and so does the cache.
+        io.flush()
         let format = CVPixelBufferGetPixelFormatType(input)
         guard Self.supportedFormats.contains(format) else { throw Failure("pixel format \(format) not supported") }
         guard picture.width == sourceWidth, picture.height == sourceHeight else {
@@ -138,21 +143,22 @@ final class FrameChain {
         // The wide round trip sees luma and the output chroma as 4-sample texels (2 CbCr pairs for chroma).
         let wide = rgb == nil && Self.roundTripIsWide(targetWidth: targetWidth, pictureX: picture.x)
         let wideFormat: MTLPixelFormat = tenBit ? .rgba16Unorm : .rgba8Unorm
-        let iy = try planeTexture(input, plane: 0, format: wide ? wideFormat : lumaFormat, widthDivisor: wide ? 4 : 1)
-        let ic = try planeTexture(input, plane: 1, format: chromaFormat)
-        let oy = try planeTexture(output, plane: 0, format: wide ? wideFormat : lumaFormat, widthDivisor: wide ? 4 : 1)
-        let oc = try planeTexture(output, plane: 1, format: wide ? wideFormat : chromaFormat, widthDivisor: wide ? 2 : 1)
+        let lease = io.lease()
+        let iy = try planeTexture(input, plane: 0, format: wide ? wideFormat : lumaFormat, widthDivisor: wide ? 4 : 1, lease)
+        let ic = try planeTexture(input, plane: 1, format: chromaFormat, lease)
+        let oy = try planeTexture(output, plane: 0, format: wide ? wideFormat : lumaFormat, widthDivisor: wide ? 4 : 1, lease)
+        let oc = try planeTexture(output, plane: 1, format: wide ? wideFormat : chromaFormat, widthDivisor: wide ? 2 : 1, lease)
 
         guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
             throw Failure("no command buffer")
         }
         enc.setBytes(&params, length: MemoryLayout<FrameChainColorParams>.size, index: 0)
         if let rgb {
-            Self.dispatch(enc, kernels.toRGB, textures: [iy.0, ic.0, rgb], grid: (sourceWidth, sourceHeight))
+            Self.dispatch(enc, kernels.toRGB, textures: [iy, ic, rgb], grid: (sourceWidth, sourceHeight), io: io)
             var current = rgb
             var written = false
             for (i, stage) in stages.enumerated() {
-                if i == stages.count - 1, stage.encodeFinal(enc, input: current, luma: oy.0, chroma: oc.0) {
+                if i == stages.count - 1, stage.encodeFinal(enc, input: current, luma: oy, chroma: oc) {
                     written = true
                 } else {
                     current = stage.encode(enc, input: current)
@@ -160,8 +166,8 @@ final class FrameChain {
             }
             if !written {
                 enc.setBytes(&params, length: MemoryLayout<FrameChainColorParams>.size, index: 0)
-                Self.dispatch(enc, kernels.toYCbCr, textures: [current, oy.0, oc.0],
-                              grid: (targetWidth / 2, targetHeight / 2))
+                Self.dispatch(enc, kernels.toYCbCr, textures: [current, oy, oc],
+                              grid: (targetWidth / 2, targetHeight / 2), io: io)
             }
         } else {
             if var toneMap = roundTripToneMap {
@@ -170,15 +176,14 @@ final class FrameChain {
             let mapped = roundTripToneMap != nil
             if wide {
                 Self.dispatch(enc, mapped ? kernels.roundTripWideToneMapped : kernels.roundTripWide,
-                              textures: [iy.0, ic.0, oy.0, oc.0], grid: (targetWidth / 4, targetHeight / 2))
+                              textures: [iy, ic, oy, oc], grid: (targetWidth / 4, targetHeight / 2), io: io)
             } else {
                 Self.dispatch(enc, mapped ? kernels.roundTripToneMapped : kernels.roundTrip,
-                              textures: [iy.0, ic.0, oy.0, oc.0], grid: (targetWidth / 2, targetHeight / 2))
+                              textures: [iy, ic, oy, oc], grid: (targetWidth / 2, targetHeight / 2), io: io)
             }
         }
         enc.endEncoding()
-        let textures = (iy.1, ic.1, oy.1, oc.1)
-        return (output, EncodedGPUWork(commandBuffer: cb, keepAlive: textures) { status, error in
+        return (output, EncodedGPUWork(commandBuffer: cb, textures: lease) { status, error in
             Failure("command buffer \(status.rawValue): \(error.map { "\($0)" } ?? "no error")", underlying: error)
         })
     }
@@ -190,24 +195,20 @@ final class FrameChain {
     }
 
     static func dispatch(_ encoder: MTLComputeCommandEncoder, _ pipeline: MTLComputePipelineState,
-                         textures: [MTLTexture], grid: (Int, Int)) {
+                         textures: [MTLTexture], grid: (Int, Int), io: MetalFrameIO) {
         encoder.setComputePipelineState(pipeline)
         for (i, t) in textures.enumerated() { encoder.setTexture(t, index: i) }
         let w = pipeline.threadExecutionWidth
         let h = max(1, min(16, pipeline.maxTotalThreadsPerThreadgroup / w))
-        encoder.dispatchThreads(MTLSize(width: grid.0, height: grid.1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        io.dispatch(encoder, grid: grid, threadgroup: MTLSize(width: w, height: h, depth: 1))
     }
 
     private func planeTexture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat,
-                              widthDivisor: Int = 1) throws -> (MTLTexture, CVMetalTexture) {
-        var ref: CVMetalTexture?
-        let w = CVPixelBufferGetWidthOfPlane(buffer, plane) / widthDivisor, h = CVPixelBufferGetHeightOfPlane(buffer, plane)
-        guard CVMetalTextureCacheCreateTextureFromImage(
-                kCFAllocatorDefault, textureCache, buffer, nil, format, w, h, plane, &ref) == kCVReturnSuccess,
-              let ref, let texture = CVMetalTextureGetTexture(ref)
+                              widthDivisor: Int = 1, _ lease: MetalTextureLease) throws -> MTLTexture {
+        guard let texture = io.texture(buffer, plane: plane, format: format,
+                                       width: CVPixelBufferGetWidthOfPlane(buffer, plane) / widthDivisor, in: lease)
         else { throw Failure("no Metal texture for plane \(plane)") }
-        return (texture, ref)
+        return texture
     }
 
     private func makeOutput(format: OSType) throws -> CVPixelBuffer {
@@ -238,7 +239,7 @@ protocol FrameChainStage: AnyObject {
     /// Allocates what the stage needs for an input of `input` size and returns its output size.
     /// `finalTarget` is the chain's target size when this is the last stage, else nil. Not called when the
     /// chain runs as one round-trip kernel.
-    func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int)
+    func prepare(io: MetalFrameIO, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int)
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture
     /// True for a stage that leaves every sample as it is: a chain of only such stages needs no RGB texture.
     var isIdentity: Bool { get }
@@ -267,7 +268,7 @@ extension FrameChainStage {
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class PassThroughStage: FrameChainStage {
     var isIdentity: Bool { true }
-    func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
+    func prepare(io: MetalFrameIO, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
         input
     }
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture { input }
@@ -285,6 +286,7 @@ final class ToneMapStage: FrameChainStage {
     private var params: FrameChainToneMapParams
     private var pipeline: MTLComputePipelineState?
     private var output: MTLTexture?
+    private var io: MetalFrameIO?
 
     /// `source` is the title's HDR10 metadata; the declared volume is that metadata after the curve.
     init(curve: BT2390ToneCurve, source: HDR10StaticMetadata) {
@@ -295,16 +297,17 @@ final class ToneMapStage: FrameChainStage {
 
     var fusedToneMap: FrameChainToneMapParams? { params }
 
-    func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
+    func prepare(io: MetalFrameIO, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
+        self.io = io
         pipeline = kernels.toneMap
-        output = try FrameChain.texture(device, input.0, input.1)
+        output = try FrameChain.texture(io.device, input.0, input.1)
         return input
     }
 
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture {
-        guard let pipeline, let output else { return input }
+        guard let pipeline, let output, let io else { return input }
         encoder.setBytes(&params, length: MemoryLayout<FrameChainToneMapParams>.size, index: 1)
-        FrameChain.dispatch(encoder, pipeline, textures: [input, output], grid: (output.width, output.height))
+        FrameChain.dispatch(encoder, pipeline, textures: [input, output], grid: (output.width, output.height), io: io)
         return output
     }
 }
@@ -332,6 +335,7 @@ final class LineArtStage: FrameChainStage {
     private var stats: MTLTexture?
     private var output: MTLTexture?
     private var clamped: MTLTexture?
+    private var io: MetalFrameIO?
 
     /// True when the stage writes the chain's output itself.
     private(set) var writesOutputDirectly = false
@@ -340,7 +344,9 @@ final class LineArtStage: FrameChainStage {
         self.restores = restores
     }
 
-    func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
+    func prepare(io: MetalFrameIO, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
+        self.io = io
+        let device = io.device
         convolutions = kernels.lineArtConvolutions
         depthToSpace = kernels.lineArtDepthToSpace
         directOutput = restores ? kernels.lineArtOutputClamped : kernels.lineArtOutput
@@ -364,42 +370,42 @@ final class LineArtStage: FrameChainStage {
 
     /// The statistics and the restore pass when `restores`, then the upscale convolutions; returns the
     /// picture the depth-to-space step builds on and the last feature texture.
-    private func encodeNetworks(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> (MTLTexture, MTLTexture) {
+    private func encodeNetworks(_ encoder: MTLComputeCommandEncoder, input: MTLTexture, io: MetalFrameIO) -> (MTLTexture, MTLTexture) {
         var base = input
         if restores, let clampStats, let statsRows, let stats, let restored, restoreConvolutions.count == 4 {
             let grid = (input.width, input.height)
-            FrameChain.dispatch(encoder, clampStats.0, textures: [input, statsRows], grid: grid)
-            FrameChain.dispatch(encoder, clampStats.1, textures: [statsRows, stats], grid: grid)
+            FrameChain.dispatch(encoder, clampStats.0, textures: [input, statsRows], grid: grid, io: io)
+            FrameChain.dispatch(encoder, clampStats.1, textures: [statsRows, stats], grid: grid, io: io)
             let r = restoreFeatures
-            FrameChain.dispatch(encoder, restoreConvolutions[0], textures: [input, r[0]], grid: grid)
-            FrameChain.dispatch(encoder, restoreConvolutions[1], textures: [r[0], r[1]], grid: grid)
-            FrameChain.dispatch(encoder, restoreConvolutions[2], textures: [r[1], r[2]], grid: grid)
-            FrameChain.dispatch(encoder, restoreConvolutions[3], textures: [input, r[2], restored], grid: grid)
+            FrameChain.dispatch(encoder, restoreConvolutions[0], textures: [input, r[0]], grid: grid, io: io)
+            FrameChain.dispatch(encoder, restoreConvolutions[1], textures: [r[0], r[1]], grid: grid, io: io)
+            FrameChain.dispatch(encoder, restoreConvolutions[2], textures: [r[1], r[2]], grid: grid, io: io)
+            FrameChain.dispatch(encoder, restoreConvolutions[3], textures: [input, r[2], restored], grid: grid, io: io)
             base = restored
         }
         var previous = base
         for (pipeline, feature) in zip(convolutions, features) {
-            FrameChain.dispatch(encoder, pipeline, textures: [previous, feature], grid: (feature.width, feature.height))
+            FrameChain.dispatch(encoder, pipeline, textures: [previous, feature], grid: (feature.width, feature.height), io: io)
             previous = feature
         }
         return (base, previous)
     }
 
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture {
-        guard let depthToSpace, let output else { return input }
-        let (base, last) = encodeNetworks(encoder, input: input)
-        FrameChain.dispatch(encoder, depthToSpace, textures: [base, last, output], grid: (output.width, output.height))
+        guard let depthToSpace, let output, let io else { return input }
+        let (base, last) = encodeNetworks(encoder, input: input, io: io)
+        FrameChain.dispatch(encoder, depthToSpace, textures: [base, last, output], grid: (output.width, output.height), io: io)
         guard restores, let clampApply, let stats, let clamped else { return output }
-        FrameChain.dispatch(encoder, clampApply, textures: [output, stats, clamped], grid: (clamped.width, clamped.height))
+        FrameChain.dispatch(encoder, clampApply, textures: [output, stats, clamped], grid: (clamped.width, clamped.height), io: io)
         return clamped
     }
 
     func encodeFinal(_ encoder: MTLComputeCommandEncoder, input: MTLTexture, luma: MTLTexture, chroma: MTLTexture) -> Bool {
-        guard writesOutputDirectly, let directOutput else { return false }
-        let (base, last) = encodeNetworks(encoder, input: input)
+        guard writesOutputDirectly, let directOutput, let io else { return false }
+        let (base, last) = encodeNetworks(encoder, input: input, io: io)
         var textures = [base, last, luma, chroma]
         if restores, let stats { textures.append(stats) }
-        FrameChain.dispatch(encoder, directOutput, textures: textures, grid: (input.width, input.height))
+        FrameChain.dispatch(encoder, directOutput, textures: textures, grid: (input.width, input.height), io: io)
         return true
     }
 }
@@ -434,7 +440,7 @@ struct FrameChainColorParams {
     }
 }
 
-/// The chain's pipelines, compiled once per process and device.
+/// The chain's pipelines, compiled once per process and device (`MetalPipelineCache`).
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class FrameChainKernels: @unchecked Sendable {
     let toRGB: MTLComputePipelineState
@@ -453,8 +459,7 @@ final class FrameChainKernels: @unchecked Sendable {
     let clampStatsColumns: MTLComputePipelineState
     let clampHighlights: MTLComputePipelineState
 
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var byDevice: [UInt64: FrameChainKernels] = [:]
+    private static let cache = MetalPipelineCache<FrameChainKernels>()
 
     private init(toRGB: MTLComputePipelineState, toYCbCr: MTLComputePipelineState, roundTrip: MTLComputePipelineState,
                  roundTripWide: MTLComputePipelineState, roundTripToneMapped: MTLComputePipelineState,
@@ -480,11 +485,14 @@ final class FrameChainKernels: @unchecked Sendable {
         self.lineArtDepthToSpace = lineArtDepthToSpace
     }
 
-    static func shared(for device: MTLDevice) -> FrameChainKernels? {
-        lock.lock(); defer { lock.unlock() }
-        if let kernels = byDevice[device.registryID] { return kernels }
+    /// The device's kernels, compiled on first use; a failed build is kept and rethrown.
+    static func shared(for device: MTLDevice) throws -> FrameChainKernels {
+        try cache.resolve(device: device) { try compile(device) }
+    }
+
+    private static func compile(_ device: MTLDevice) throws -> FrameChainKernels {
         /// `constants` are bool function constants by index: 0 `clampsHighlights`, 1 `toneMapsInRoundTrip`.
-        func pipeline(_ library: MTLLibrary, _ name: String, constants: [Int: Bool] = [:]) -> MTLComputePipelineState? {
+        func pipeline(_ library: MTLLibrary, _ name: String, constants: [Int: Bool] = [:]) throws -> MTLComputePipelineState {
             let function: MTLFunction?
             if !constants.isEmpty {
                 let values = MTLFunctionConstantValues()
@@ -492,39 +500,30 @@ final class FrameChainKernels: @unchecked Sendable {
                     var v = value
                     values.setConstantValue(&v, type: .bool, index: index)
                 }
-                function = try? library.makeFunction(name: name, constantValues: values)
+                function = try library.makeFunction(name: name, constantValues: values)
             } else {
                 function = library.makeFunction(name: name)
             }
-            return function.flatMap { try? device.makeComputePipelineState(function: $0) }
+            guard let function else { throw FrameChain.Failure("kernel \(name) missing") }
+            return try device.makeComputePipelineState(function: function)
         }
-        guard let chain = try? device.makeLibrary(source: FrameChainShaderSource.source, options: nil),
-              let lineArt = try? device.makeLibrary(source: LineArtShaderSource.source, options: nil),
-              let toRGB = pipeline(chain, "frameChainToRGB"), let toYCbCr = pipeline(chain, "frameChainToYCbCr"),
-              let roundTrip = pipeline(chain, "frameChainRoundTrip", constants: [1: false]),
-              let roundTripWide = pipeline(chain, "frameChainRoundTripWide", constants: [1: false]),
-              let roundTripToneMapped = pipeline(chain, "frameChainRoundTrip", constants: [1: true]),
-              let roundTripWideToneMapped = pipeline(chain, "frameChainRoundTripWide", constants: [1: true]),
-              let toneMap = pipeline(chain, "frameChainToneMap"),
-              let lineArtOutput = pipeline(chain, "frameChainLineArtOutput", constants: [0: false]),
-              let lineArtOutputClamped = pipeline(chain, "frameChainLineArtOutput", constants: [0: true]),
-              let clampStatsRows = pipeline(chain, "frameChainClampStatsRows"),
-              let clampStatsColumns = pipeline(chain, "frameChainClampStatsColumns"),
-              let clampHighlights = pipeline(chain, "frameChainClampHighlights"),
-              let depthToSpace = pipeline(lineArt, LineArtShaderSource.depthToSpaceKernel)
-        else { return nil }
-        let convolutions = LineArtShaderSource.convolutionKernels.compactMap { pipeline(lineArt, $0) }
-        let restore = LineArtShaderSource.restoreKernels.compactMap { pipeline(lineArt, $0) }
-        guard convolutions.count == LineArtShaderSource.convolutionKernels.count,
-              restore.count == LineArtShaderSource.restoreKernels.count else { return nil }
-        let kernels = FrameChainKernels(
-            toRGB: toRGB, toYCbCr: toYCbCr, roundTrip: roundTrip, roundTripWide: roundTripWide,
-            roundTripToneMapped: roundTripToneMapped, roundTripWideToneMapped: roundTripWideToneMapped, toneMap: toneMap,
-            lineArtConvolutions: convolutions, lineArtDepthToSpace: depthToSpace,
-            lineArtOutput: lineArtOutput, lineArtOutputClamped: lineArtOutputClamped, restoreConvolutions: restore,
-            clampStatsRows: clampStatsRows, clampStatsColumns: clampStatsColumns, clampHighlights: clampHighlights)
-        byDevice[device.registryID] = kernels
-        return kernels
+        let chain = try device.makeLibrary(source: FrameChainShaderSource.source, options: nil)
+        let lineArt = try device.makeLibrary(source: LineArtShaderSource.source, options: nil)
+        return FrameChainKernels(
+            toRGB: try pipeline(chain, "frameChainToRGB"), toYCbCr: try pipeline(chain, "frameChainToYCbCr"),
+            roundTrip: try pipeline(chain, "frameChainRoundTrip", constants: [1: false]),
+            roundTripWide: try pipeline(chain, "frameChainRoundTripWide", constants: [1: false]),
+            roundTripToneMapped: try pipeline(chain, "frameChainRoundTrip", constants: [1: true]),
+            roundTripWideToneMapped: try pipeline(chain, "frameChainRoundTripWide", constants: [1: true]),
+            toneMap: try pipeline(chain, "frameChainToneMap"),
+            lineArtConvolutions: try LineArtShaderSource.convolutionKernels.map { try pipeline(lineArt, $0) },
+            lineArtDepthToSpace: try pipeline(lineArt, LineArtShaderSource.depthToSpaceKernel),
+            lineArtOutput: try pipeline(chain, "frameChainLineArtOutput", constants: [0: false]),
+            lineArtOutputClamped: try pipeline(chain, "frameChainLineArtOutput", constants: [0: true]),
+            restoreConvolutions: try LineArtShaderSource.restoreKernels.map { try pipeline(lineArt, $0) },
+            clampStatsRows: try pipeline(chain, "frameChainClampStatsRows"),
+            clampStatsColumns: try pipeline(chain, "frameChainClampStatsColumns"),
+            clampHighlights: try pipeline(chain, "frameChainClampHighlights"))
     }
 }
 

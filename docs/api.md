@@ -2856,6 +2856,7 @@ The load logs one `[Upscale] taken: <source> -> <target> (<stages>)` / `[Upscale
   - It is that generous because the GPU lowers its clock until a steady load fills most of the interval. On an A15, work that takes 14 ms back to back reads 32 ms at 24 fps. A stricter budget would trip on the clock, not on a stage that really falls behind.
   - A sustained overrun first drops MetalFX where VideoToolbox super resolution also runs. This is logged once as `[Upscale] degraded: ...` and published as `UpscaleStatus.degraded`.
   - The overrun is remembered for the process. A later session or in-session rebuild that is at least as heavy and as fast starts without MetalFX.
+- **In the background (iOS).** iOS refuses GPU work while the app is in the background. Such a frame is delivered as decoded and is no failure (logged once as `[Upscale] GPU work not permitted in the background, passing frames through`).
 - **A failing VideoToolbox pass.** Three ML failures in a row drop the pass instead of switching the stage off: MetalFX takes the source to the same target (logged as `[Upscale] degraded: ML pass failed ...`). When the pass never delivered a frame, `FrameUpscaler.mlScaleFactors` offers no factor for the rest of the process, so later loads plan MetalFX alone. A stage with no MetalFX, or already on its VideoToolbox-only step, still switches off.
 - **Switching off.** Repeated failures, or an overrun with nothing left to drop, switch it off for the session (logged once, and published through `$activeUpscale`).
   - A stage that switched itself off stays off for the rest of the session, also across in-session rebuilds (audio switch, background return), and `$activeUpscale` keeps its `disabledReason`.
@@ -2939,6 +2940,7 @@ The load logs one `[VideoProcessing] taken: <size>, tone map <source> nit (<mast
 
 - **Passing through.** A frame that is not PQ or not 4:2:0, or whose own metadata gives no curve to the target, is delivered as decoded, logged once as `[VideoProcessing] passing frames through: ...`. That is no failure.
 - **Overrun.** The same frame budget and window as the upscaler (see [`upscalesLowResolutionVideo`](#upscaleslowresolutionvideo)). A sustained overrun switches it off; there is no lighter step to drop to.
+- **In the background (iOS).** iOS refuses GPU work while the app is in the background. Such a frame is delivered as decoded and is no failure (logged once as `[VideoProcessing] GPU work not permitted in the background, passing frames through`).
 - **HDR10+.** HDR10+ metadata in a frame switches it off: the display applies HDR10+ to the picture it receives, which would then be mapped twice. The container does not declare HDR10+, so the load usually cannot see it before the first frames.
 - **Switching off.** Repeated failures, a sustained overrun or HDR10+ switch it off for the session (logged once as `[VideoProcessing] disabled: ...`, and published through `$activeVideoProcessing`).
   - It stays off for the rest of the session, also across in-session rebuilds, and `$activeVideoProcessing` keeps its `disabledReason`.

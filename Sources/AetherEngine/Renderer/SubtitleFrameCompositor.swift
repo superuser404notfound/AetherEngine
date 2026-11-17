@@ -79,12 +79,12 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
     private var cues: [SubtitleCue] = []
     private var enabled = false
     private var delaySeconds: Double = 0
-    /// Cache key of the overlay currently rendered (active cue ids); nil = no overlay cached.
-    private var cachedCueIDs: [Int]?
+    /// What the overlay currently rendered was drawn from; nil = no overlay cached.
+    private var cachedKey: OverlayKey?
     private var cachedOverlay: CIImage?
-    /// The style `cachedOverlay` was drawn in. Compared on a hit, so an overlay rendered from a
-    /// snapshot that a `setStyle` has since superseded can never be served.
-    private var cachedStyle: SubtitleCaptionStyle?
+    /// Overlays drawn so far (a cache miss each).
+    var overlaysRendered: Int { lock.lock(); defer { lock.unlock() }; return _overlaysRendered }
+    private var _overlaysRendered = 0
     private var loggedFailure = false
     private let styleProvider: @Sendable () -> SubtitleCaptionStyle
     private let observesSystemStyle: Bool
@@ -130,11 +130,56 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
         styleLoaded = true
         if new != style {
             style = new
-            cachedCueIDs = nil
+            cachedKey = nil
             cachedOverlay = nil
-            cachedStyle = nil
         }
         lock.unlock()
+    }
+
+    /// What a cached overlay was drawn from. Audit GPU-205: cue ids alone collided, because they are only
+    /// unique inside one cue list. Sidecar tracks number from 0 and the engine hands over primary and
+    /// secondary cues as one list, so a track switch, or a secondary cue with a primary cue's id, was
+    /// served the other cue's overlay. The overlay was also drawn at the size of the frame that built it.
+    /// So the key is what the drawing reads: each cue's content and placement, the frame size and the style.
+    struct OverlayKey: Equatable {
+        struct Cue: Equatable {
+            let id: Int
+            let placement: SubtitleTextPlacement?
+            let content: Content
+
+            enum Content: Equatable {
+                case text(String)
+                case richText([SubtitleTextRun])
+                /// The bitmap by identity (a decoded cue's image is never changed), held so its address
+                /// cannot be reused by another image while the key exists.
+                case image(CGImage, position: CGRect, canvas: CGSize)
+
+                static func == (a: Content, b: Content) -> Bool {
+                    switch (a, b) {
+                    case let (.text(x), .text(y)): return x == y
+                    case let (.richText(x), .richText(y)): return x == y
+                    case let (.image(x, xp, xc), .image(y, yp, yc)): return x === y && xp == yp && xc == yc
+                    default: return false
+                    }
+                }
+            }
+
+            init(_ cue: SubtitleCue) {
+                id = cue.id
+                placement = cue.placement
+                switch cue.body {
+                case let .text(text): content = .text(text)
+                case let .richText(runs): content = .richText(runs)
+                case let .image(image):
+                    content = .image(image.cgImage, position: image.position, canvas: image.canvasSize)
+                }
+            }
+        }
+
+        let cues: [Cue]
+        let width: Int
+        let height: Int
+        let style: SubtitleCaptionStyle
     }
 
     /// Render thread. Returns the input buffer untouched on passthrough or ANY failure.
@@ -149,15 +194,16 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
 
         let active = Self.activeCues(in: cues, at: ptsSeconds, delaySeconds: delay)
         guard !active.isEmpty else {
-            lock.lock(); cachedCueIDs = nil; cachedOverlay = nil; cachedStyle = nil; lock.unlock()
+            lock.lock(); cachedKey = nil; cachedOverlay = nil; lock.unlock()
             return buffer
         }
 
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
         let overlay: CIImage
+        let key = OverlayKey(cues: active.map(OverlayKey.Cue.init), width: width, height: height, style: style)
         lock.lock()
-        let cacheHit = cachedCueIDs == active.map(\.id) && cachedStyle == style ? cachedOverlay : nil
+        let cacheHit = cachedKey == key ? cachedOverlay : nil
         lock.unlock()
         if let cacheHit {
             overlay = cacheHit
@@ -169,9 +215,9 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
             }
             overlay = CIImage(cgImage: rendered)
             lock.lock()
-            cachedCueIDs = active.map(\.id)
+            cachedKey = key
             cachedOverlay = overlay
-            cachedStyle = style
+            _overlaysRendered += 1
             lock.unlock()
         }
 
@@ -495,9 +541,8 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
         lock.lock()
         cues = []
         enabled = false
-        cachedCueIDs = nil
+        cachedKey = nil
         cachedOverlay = nil
-        cachedStyle = nil
         pool = nil
         poolFormat = nil
         loggedFailure = false

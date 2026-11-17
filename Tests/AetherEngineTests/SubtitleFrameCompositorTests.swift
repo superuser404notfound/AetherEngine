@@ -136,6 +136,44 @@ struct SubtitleFrameCompositorTests {
         #expect(compositor.composite(buffer, ptsSeconds: 8.5) === buffer)
     }
 
+    /// Audit GPU-205: cue ids are unique only inside one cue list. Sidecar tracks number from 0, and the
+    /// compositor gets primary and secondary cues as one list, so the overlay cached for one cue was served
+    /// for another with the same id. It was also drawn at the size of the frame that built it.
+    @Test("a cached overlay is redrawn for another track's cue with the same id, and for another frame size")
+    func overlayCacheKeysOnTheCueAndTheFrame() throws {
+        let compositor = SubtitleFrameCompositor(styleProvider: { .standard }, observesSystemStyle: false)
+        let format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        let frame = try blackFrame(format)
+        compositor.update(cues: [SubtitleCue(id: 0, startTime: 0, endTime: 10, body: .text("Hello"))],
+                          enabled: true, delaySeconds: 0)
+        _ = compositor.composite(frame, ptsSeconds: 1)
+        _ = compositor.composite(frame, ptsSeconds: 2)
+        #expect(compositor.overlaysRendered == 1, "the same cue on the same frame size is a cache hit")
+
+        // Another sidecar track: its first cue is id 0 too, at the same time, in another language.
+        compositor.update(cues: [SubtitleCue(id: 0, startTime: 0, endTime: 10, body: .text("Hallo"))],
+                          enabled: true, delaySeconds: 0)
+        _ = compositor.composite(frame, ptsSeconds: 3)
+        #expect(compositor.overlaysRendered == 2)
+
+        // A primary and a secondary cue that share an id, one after the other.
+        compositor.update(cues: [SubtitleCue(id: 4, startTime: 0, endTime: 5, body: .text("primary")),
+                                 SubtitleCue(id: 4, startTime: 5, endTime: 10, body: .text("secondary"))],
+                          enabled: true, delaySeconds: 0)
+        _ = compositor.composite(frame, ptsSeconds: 4)
+        _ = compositor.composite(frame, ptsSeconds: 6)
+        #expect(compositor.overlaysRendered == 4)
+
+        // The upscaler's output size changed (a rung dropped) while the cue is up.
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        CVPixelBufferCreate(kCFAllocatorDefault, 1280, 720, format, attrs as CFDictionary, &pb)
+        let larger = try #require(pb)
+        let out = compositor.composite(larger, ptsSeconds: 7)
+        #expect(compositor.overlaysRendered == 5)
+        #expect(CVPixelBufferGetWidth(out) == 1280)
+    }
+
     private func blackFrame(_ format: OSType) throws -> CVPixelBuffer {
         var pb: CVPixelBuffer?
         let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]

@@ -368,6 +368,8 @@ See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.
 - After every decoder flush or drain (seek, error recovery, end of stream, a live seam) and in `stop()`, the host calls `settle()`. The frames still on the GPU reach the renderer before it flushes. `settle()` gives up after 0.5 s and logs `[FramePipeline] settle: ...`, because seek and stop call it on the main actor.
 - Each frame carries the generation its packet was read under, taken when the decoder hands it over, and goes out only while that generation is live (the AE#491 check). At delivery the demux loop may already read packets of the new position, so a check made only then would let a frame from before the seek through. A frame stale at hand-over never reaches the GPU.
 - A frame whose GPU work failed goes out as decoded.
+- A command buffer iOS refuses because the app is in the background (`notPermitted`) also delivers the frame as decoded, and neither stage counts it as a failure. Before, three refused frames switched the stage off for the title.
+- A frame's work holds its plane textures and the texture cache they came from (`MetalTextureLease`). A `CVMetalTexture` calls back into its cache when it is freed and does not retain it, so a stage can now drop or rebuild its chain while frames are still on the GPU.
 - The budget counts the time a frame holds the decoder's thread: waiting for a free slot, then encoding. In steady state that is the stage's cost per frame.
 - A frame that was in flight when its stage was rebuilt (an overrun rung, the ML fallback) is still delivered, but does not count against the new stage.
 - A completion only queues the frame's times, and the frame goes out at once. The stage counts them at its next frame, on the decoder's thread, so a completion never waits for the stage's lock.
@@ -376,6 +378,10 @@ See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.
   - The ML timeout (three frame intervals, at least 50 ms) is a timer. A pass that answers late keeps its buffers out of the pools until it does, as before.
   - A stage replaced while its pass ran (the MetalFX-only fallback, a rebuild) delivers that frame as decoded.
 - `FrameChain.encode` and the upscaler's `encode` return the work uncommitted, because Metal takes a completion handler only before the commit. The synchronous `process` and `upscale` (tests, the probe) commit and wait; `upscale` also waits for an off-thread ML pass. The benchmark still runs the ML pass in line, so its wall time is one frame start to finish.
+
+**Shared Metal plumbing.** The frame chain, the upscaler's MetalFX path, the FEL composer and `GPUFrameConverter` make their plane textures, dispatch their kernels and hold their textures through one helper, `MetalFrameIO`. Their pipelines are compiled once per device and process (`MetalPipelineCache`), and a failed build is kept, so it is not compiled again for every stage.
+
+A GPU without non-uniform threadgroups (the A10X in the first Apple TV 4K) cannot run `dispatchThreads`. There every kernel is dispatched in whole threadgroups, and each kernel's bounds guard drops the threads past the picture's edge.
 
 On the A12, 720p to 2160p through MetalFX holds the decoder's thread about 9.5 ms per frame instead of 29.5 ms. Numbers: [measurements.md › Two frames in flight on the A12](measurements.md#two-frames-in-flight-on-the-a12-ae957).
 
