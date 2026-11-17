@@ -65,6 +65,37 @@ struct HEVCConformanceCropTests {
         #expect(HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: annexB) == expected)
     }
 
+    /// The audit BIT-202 geometry: a 3840x2176 SPS with the crop window and 16400 units of `00 00 40` padding
+    /// that become `00 00 01` (and gain an emulation byte each) once the offsets shrink by 6 bits.
+    private func growingSPS(offsets: [Int]) -> [UInt8] {
+        func ue(_ v: Int) -> String { let b = String(v + 1, radix: 2); return String(repeating: "0", count: b.count - 1) + b }
+        let head = "0000" + "000" + "1" + String(repeating: "0", count: 96) + ue(0) + ue(1) + ue(3840) + ue(2176) + "1"
+        let window = offsets.map(ue).joined()
+        var bits = head + window + String(repeating: "1", count: 6)
+            + String(repeating: "000000000000000001000000", count: 16400) + "1"
+        bits += String(repeating: "0", count: (8 - bits.count % 8) % 8)
+        let raw = stride(from: 0, to: bits.count, by: 8).map { i -> UInt8 in
+            let start = bits.index(bits.startIndex, offsetBy: i)
+            return UInt8(bits[start..<bits.index(start, offsetBy: 8)], radix: 2)!
+        }
+        var out: [UInt8] = [0x42, 0x01]
+        var zeros = 0
+        for byte in raw {
+            if zeros >= 2, byte <= 3 { out.append(3); zeros = 0 }
+            out.append(byte)
+            zeros = byte == 0 ? zeros + 1 : 0
+        }
+        return out
+    }
+
+    @Test("BIT-202: a record whose rewritten SPS would pass 65535 bytes is left alone instead of trapping")
+    func recordRewriteThatDoesNotFit() {
+        let sps = growingSPS(offsets: [0, 0, 0, 8])
+        #expect(sps.count <= 0xFFFF)
+        #expect((HEVCConformanceCrop.removingUHDPaddingCrop(fromSPS: sps)?.count ?? 0) > 0xFFFF)
+        #expect(HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: record(sps)) == nil)
+    }
+
     @Test("An in-band cropped SPS is replaced and every other NAL is kept")
     func replacesInBandCopy() throws {
         let sample: [UInt8] = [vps, cropped, pps, idr].flatMap { [0, 0, 1] + $0 }
