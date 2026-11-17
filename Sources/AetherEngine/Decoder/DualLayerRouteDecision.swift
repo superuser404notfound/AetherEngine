@@ -252,7 +252,9 @@ extension DualLayerRouteDecision.Reason {
         case .geometryUnknown:
             return "base-layer size unknown"
         case let .overBudget(required, geometry):
-            let percent = Int((required / DualLayerRouteDecision.maximumPixelsPerSecond * 100).rounded())
+            // A container can declare Int32.max square pictures; Int(Double) traps past Int.max (audit DEC-205).
+            let ratio = required / DualLayerRouteDecision.maximumPixelsPerSecond * 100
+            let percent = ratio.isFinite ? Int(min(ratio, 1e9).rounded()) : 1_000_000_000
             return "over the real-time budget, \(geometry.text) needs \(percent)% of it"
         }
     }
