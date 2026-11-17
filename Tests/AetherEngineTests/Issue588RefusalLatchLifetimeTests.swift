@@ -72,7 +72,7 @@ struct Issue588RefusalLatchLifetimeTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("Sources/AetherEngine/AetherEngine.swift")
+            .appendingPathComponent("Sources/AetherEngine/AetherEngine+Background.swift")
         let text = try #require(try? String(contentsOf: source, encoding: .utf8))
         let observer = try #require(text.range(of: "UIApplication.didBecomeActiveNotification"))
         let site = String(text[observer.lowerBound...].prefix(900))

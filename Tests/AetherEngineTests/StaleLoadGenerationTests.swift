@@ -33,7 +33,7 @@ struct StaleLoadGenerationTests {
     /// mount its URL on the host the stop() had just torn down, and play it: sound with no player.
     @Test("A remote-HLS load stopped during its stand-in fetch mounts nothing", .timeLimit(.minutes(3)))
     func standInFetchThenStopMountsNothing() async throws {
-        let origin = try #require(HeldHTTPOrigin())
+        let origin = try #require(HeldHTTPOrigin(holds: { $0.hasSuffix(".m3u8") }))
         defer { origin.stop() }
         let engine = try AetherEngine()
         defer { engine.stop() }
@@ -59,7 +59,7 @@ struct StaleLoadGenerationTests {
     @Test("A remote-HLS load superseded during its stand-in fetch leaves the successor's item alone",
           .timeLimit(.minutes(3)))
     func standInFetchThenZapLeavesSuccessor() async throws {
-        let origin = try #require(HeldHTTPOrigin())
+        let origin = try #require(HeldHTTPOrigin(holds: { $0.hasSuffix(".m3u8") }))
         defer { origin.stop() }
         let engine = try AetherEngine()
         defer { engine.stop() }

@@ -106,14 +106,14 @@ public final class AetherScrubPreviewView: PlatformBaseView {
 
     /// Shows the one-keyframe file at `url`. False when a newer request superseded this one, or the
     /// item did not become displayable within two seconds; the previous picture stays up then.
-    func present(_ url: URL) async -> Bool {
+    func present(_ url: URL, budget: Duration = .seconds(2)) async -> Bool {
         if url == shownURL { return true }
         request &+= 1
         let mine = request
         let back = 1 - front
         let item = AVPlayerItem(url: url)
         players[back].replaceCurrentItem(with: item)
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + budget
         while !(item.status == .readyToPlay && playerLayers[back].isReadyForDisplay) {
             // Audit GPU-206: a cancelled task ends the wait at its next tick instead of spinning the main
             // actor until the deadline (a cancelled `Task.sleep` returns at once).
