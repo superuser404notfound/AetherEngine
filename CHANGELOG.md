@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+- **A DASH manifest can no longer collect your server credentials.** The token, cookie and Authorization
+  headers now go only to the host the manifest came from. A `BaseURL` on another host, port or plain http
+  gets the other headers without them.
+
+### Fixed
+
+- **A crafted DASH manifest or MP4 box no longer crashes the app.** Huge durations or byte ranges,
+  overflowing sidx times, cut mvhd/tkhd/elst/mdhd boxes, oversized box lengths and large
+  `base_data_offset` values now fail the open or leave the box unpatched.
+- **DASH manifest and head reads are bounded.** A manifest over 8 MB, or one that trickles for more than
+  120 s, fails the open instead of filling memory. A manifest with dozens of audio sets carries the first 16.
 
 ## [7.69.1] - 2026-11-17
 
