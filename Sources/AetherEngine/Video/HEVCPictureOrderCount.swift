@@ -142,16 +142,3 @@ struct HEVCPictureOrderCount {
         return Picture(poc: poc, startsSequence: startsSequence)
     }
 }
-
-extension H264SPS.BitReader {
-    /// Skips `n` bits; false when that runs past the end.
-    mutating func skip(_ n: Int) -> Bool {
-        var left = n
-        while left > 0 {
-            let step = min(left, 32)
-            guard u(step) != nil else { return false }
-            left -= step
-        }
-        return true
-    }
-}

@@ -17,6 +17,45 @@ import AetherLibavutil
 /// throughout, which is why the failure looks like a decoder problem.
 enum VideoConfigRecord {
 
+    /// One array of an `hvcC` record: its three header bytes and the NAL units behind them.
+    struct HVCCArray {
+        let header: Range<Int>
+        /// `NAL_unit_type` of the array (the header's low six bits).
+        let type: UInt8
+        let nals: [Range<Int>]
+    }
+
+    /// The arrays of an `hvcC` record (22-byte header, array count at byte 22), the one walk every
+    /// consumer shares (audit BIT-R203). `isComplete` is false when the record ends inside an array
+    /// header or a NAL, or holds a zero-length NAL; `arrays` then holds what was read before that.
+    /// `end` is where the walk stopped, so a caller can also refuse trailing bytes.
+    static func hvccArrays(_ record: UnsafeBufferPointer<UInt8>) -> (arrays: [HVCCArray], isComplete: Bool, end: Int) {
+        guard record.count > 23 else { return ([], false, 0) }
+        var arrays: [HVCCArray] = []
+        var cursor = 23
+        for _ in 0..<Int(record[22]) {
+            guard cursor + 3 <= record.count else { return (arrays, false, cursor) }
+            let header = cursor..<cursor + 3
+            let type = record[cursor] & 0x3F
+            let count = Int(record[cursor + 1]) << 8 | Int(record[cursor + 2])
+            cursor += 3
+            var nals: [Range<Int>] = []
+            for _ in 0..<count {
+                guard cursor + 2 <= record.count else { arrays.append(HVCCArray(header: header, type: type, nals: nals)); return (arrays, false, cursor) }
+                let length = Int(record[cursor]) << 8 | Int(record[cursor + 1])
+                cursor += 2
+                guard length > 0, cursor + length <= record.count else {
+                    arrays.append(HVCCArray(header: header, type: type, nals: nals))
+                    return (arrays, false, cursor)
+                }
+                nals.append(cursor..<cursor + length)
+                cursor += length
+            }
+            arrays.append(HVCCArray(header: header, type: type, nals: nals))
+        }
+        return (arrays, true, cursor)
+    }
+
     /// Will the mp4 muxer reformat every sample of this track? Mirrors movenc's own two tests rather
     /// than an equivalent-looking predicate: predicting this decision wrong is the whole defect.
     static func muxerWillReformatPackets(
@@ -301,4 +340,11 @@ enum VideoConfigRecord {
         let rb32 = (rb24 << 8) | UInt32(data[3])
         return rb24 == 1 || rb32 == 1
     }
+}
+
+/// VPS/SPS/PPS NALs from hvcC extradata, raw bytes without a length prefix or start code. A truncated
+/// record yields the units before the cut, which is what the dual-layer join wants to seed with.
+func parseHVCCParameterSets(_ ed: UnsafePointer<UInt8>, _ size: Int) -> [[UInt8]] {
+    let walk = VideoConfigRecord.hvccArrays(UnsafeBufferPointer(start: ed, count: max(0, size)))
+    return walk.arrays.flatMap { $0.nals.map { [UInt8](UnsafeBufferPointer(start: ed + $0.lowerBound, count: $0.count)) } }
 }

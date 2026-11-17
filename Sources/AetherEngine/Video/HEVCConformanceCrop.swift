@@ -18,17 +18,17 @@ enum HEVCConformanceCrop {
     /// place, no start code and no length prefix.
     static func removingUHDPaddingCrop(fromSPS nal: [UInt8]) -> [UInt8]? {
         guard nal.count > 16, nal[0] == 0x42, nal[1] & 0xF8 == 0, nal[1] & 7 != 0 else { return nil }
-        let rbsp = unescaped(nal[2...])
-        var reader = BitReader(rbsp)
+        let rbsp = A53SEIParser.unescapeRBSP(Array(nal[2...]))
+        var reader = H264SPS.BitReader(rbsp)
 
-        guard reader.skip(4), let maxSubLayersMinus1 = reader.bits(3), reader.skip(1) else { return nil }
+        guard reader.skip(4), let maxSubLayersMinus1 = reader.u(3), reader.skip(1) else { return nil }
         // general profile_tier_level: 88 bits of profile, 8 of level.
         guard reader.skip(96) else { return nil }
         if maxSubLayersMinus1 > 0 {
             var profilePresent: [Bool] = []
             var levelPresent: [Bool] = []
             for _ in 0..<maxSubLayersMinus1 {
-                guard let profile = reader.bits(1), let level = reader.bits(1) else { return nil }
+                guard let profile = reader.u(1), let level = reader.u(1) else { return nil }
                 profilePresent.append(profile == 1)
                 levelPresent.append(level == 1)
             }
@@ -38,15 +38,15 @@ enum HEVCConformanceCrop {
                 if levelPresent[index], !reader.skip(8) { return nil }
             }
         }
-        guard reader.exponentialGolomb() != nil, let chromaFormat = reader.exponentialGolomb() else { return nil }
+        guard reader.ue() != nil, let chromaFormat = reader.ue() else { return nil }
         // 4:2:0 only: the window's vertical unit is two luma lines there.
         guard chromaFormat == 1 else { return nil }
-        guard let width = reader.exponentialGolomb(), let height = reader.exponentialGolomb(),
+        guard let width = reader.ue(), let height = reader.ue(),
               width == 3840, height == 2176 else { return nil }
-        guard reader.bits(1) == 1 else { return nil }
+        guard reader.u(1) == 1 else { return nil }
         let offsetsStart = reader.position
-        guard let left = reader.exponentialGolomb(), let right = reader.exponentialGolomb(),
-              let top = reader.exponentialGolomb(), let bottom = reader.exponentialGolomb(),
+        guard let left = reader.ue(), let right = reader.ue(),
+              let top = reader.ue(), let bottom = reader.ue(),
               left == 0, right == 0, top == 0, bottom == 8 else { return nil }
         let offsetsEnd = reader.position
 
@@ -131,24 +131,15 @@ enum HEVCConformanceCrop {
     }
 
     private static func rewritingRecord(_ record: [UInt8]) -> [UInt8]? {
-        guard record.count > 23 else { return nil }
+        let walk = record.withUnsafeBufferPointer { VideoConfigRecord.hvccArrays($0) }
+        guard walk.isComplete, walk.end == record.count else { return nil }
         var out = [UInt8](record[0..<23])
         var changed = false
-        var cursor = 23
-        for _ in 0..<Int(record[22]) {
-            guard cursor + 3 <= record.count else { return nil }
-            let type = record[cursor] & 0x3F
-            let count = Int(record[cursor + 1]) << 8 | Int(record[cursor + 2])
-            out.append(contentsOf: record[cursor..<cursor + 3])
-            cursor += 3
-            for _ in 0..<count {
-                guard cursor + 2 <= record.count else { return nil }
-                let length = Int(record[cursor]) << 8 | Int(record[cursor + 1])
-                cursor += 2
-                guard length > 0, cursor + length <= record.count else { return nil }
-                var nal = [UInt8](record[cursor..<cursor + length])
-                cursor += length
-                if type == 33, let sps = removingUHDPaddingCrop(fromSPS: nal) {
+        for array in walk.arrays {
+            out.append(contentsOf: record[array.header])
+            for range in array.nals {
+                var nal = [UInt8](record[range])
+                if array.type == 33, let sps = removingUHDPaddingCrop(fromSPS: nal) {
                     nal = sps
                     changed = true
                 }
@@ -159,23 +150,7 @@ enum HEVCConformanceCrop {
                 out.append(contentsOf: nal)
             }
         }
-        guard changed, cursor == record.count else { return nil }
-        return out
-    }
-
-    private static func unescaped(_ bytes: ArraySlice<UInt8>) -> [UInt8] {
-        var out: [UInt8] = []
-        out.reserveCapacity(bytes.count)
-        var zeros = 0
-        for byte in bytes {
-            if zeros >= 2, byte == 3 {
-                zeros = 0
-                continue
-            }
-            out.append(byte)
-            zeros = byte == 0 ? zeros + 1 : 0
-        }
-        return out
+        return changed ? out : nil
     }
 
     private static func escaped(_ bytes: [UInt8]) -> [UInt8] {
@@ -191,49 +166,6 @@ enum HEVCConformanceCrop {
             zeros = byte == 0 ? zeros + 1 : 0
         }
         return out
-    }
-
-    private struct BitReader {
-        private let bytes: [UInt8]
-        private(set) var position = 0
-
-        init(_ bytes: [UInt8]) { self.bytes = bytes }
-
-        private var bitCount: Int { bytes.count * 8 }
-
-        mutating func skip(_ count: Int) -> Bool {
-            guard position + count <= bitCount else { return false }
-            position += count
-            return true
-        }
-
-        mutating func bits(_ count: Int) -> Int? {
-            guard count <= 32, position + count <= bitCount else { return nil }
-            var value = 0
-            for _ in 0..<count {
-                value = value << 1 | Int(bytes[position >> 3] >> (7 - UInt8(position & 7)) & 1)
-                position += 1
-            }
-            return value
-        }
-
-        mutating func exponentialGolomb() -> Int? {
-            var leadingZeros = 0
-            while true {
-                guard let bit = bits(1) else { return nil }
-                if bit == 1 { break }
-                leadingZeros += 1
-                guard leadingZeros <= 31 else { return nil }
-            }
-            guard let suffix = bits(leadingZeros) else { return nil }
-            return (1 << leadingZeros) - 1 + suffix
-        }
-
-        /// The RBSP stop bit: the last bit set in the payload.
-        var lastSetBit: Int? {
-            guard let index = bytes.lastIndex(where: { $0 != 0 }) else { return nil }
-            return index * 8 + 7 - bytes[index].trailingZeroBitCount
-        }
     }
 
     private struct BitWriter {

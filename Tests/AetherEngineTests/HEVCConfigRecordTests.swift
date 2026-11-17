@@ -147,4 +147,22 @@ struct HEVCConfigRecordTests {
     func tooShortReturnsNil() {
         #expect(HLSVideoEngine.canonicalizeHEVCConfigRecord([1, 2, 3]) == nil)
     }
+
+    /// Audit BIT-R203: one walk over the arrays. A cut record gives the units before the cut to the
+    /// seeding caller and gives the crop rewriter nothing.
+    @Test("A truncated hvcC yields its leading parameter sets and no walk that claims to be complete")
+    func truncatedRecordWalk() {
+        let vps: [UInt8] = [0x40, 0x01, 0xAA]
+        let sps: [UInt8] = [0x42, 0x01, 0xBB, 0xCC]
+        let whole = Self.buildHvcC([Self.encodeArray(type: 32, completeness: true, nals: [vps]),
+                                    Self.encodeArray(type: 33, completeness: true, nals: [sps])])
+        let walked = whole.withUnsafeBufferPointer { VideoConfigRecord.hvccArrays($0) }
+        #expect(walked.isComplete && walked.end == whole.count)
+        #expect(walked.arrays.map(\.type) == [32, 33])
+        let cut = Array(whole.dropLast(2))
+        let partial = cut.withUnsafeBufferPointer { VideoConfigRecord.hvccArrays($0) }
+        #expect(!partial.isComplete)
+        let nals = cut.withUnsafeBufferPointer { parseHVCCParameterSets($0.baseAddress!, $0.count) }
+        #expect(nals == [vps])
+    }
 }

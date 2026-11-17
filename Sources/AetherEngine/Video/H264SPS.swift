@@ -241,21 +241,8 @@ enum H264SPS {
         return sc + sps + sc + pps
     }
 
-    static func unescape(_ b: [UInt8]) -> [UInt8] {  // remove emulation-prevention bytes (00 00 03 -> 00 00)
-        var out = [UInt8](); out.reserveCapacity(b.count)
-        var zeros = 0
-        var i = 0
-        while i < b.count {
-            let v = b[i]
-            if zeros >= 2 && v == 0x03 && i + 1 < b.count && b[i + 1] <= 0x03 {
-                zeros = 0; i += 1; continue // drop the 0x03
-            }
-            out.append(v)
-            zeros = (v == 0) ? zeros + 1 : 0
-            i += 1
-        }
-        return out
-    }
+    /// Remove emulation-prevention bytes (00 00 03 -> 00 00), by the one rule every parser here shares.
+    static func unescape(_ b: [UInt8]) -> [UInt8] { A53SEIParser.unescapeRBSP(b) }
 
     private static func skipScalingList(_ r: inout BitReader, size: Int) {
         var lastScale = 8, nextScale = 8
@@ -287,6 +274,19 @@ enum H264SPS {
         }
 
         mutating func flag() -> Bool? { u(1).map { $0 == 1 } }
+
+        /// Skips `n` bits; false when that runs past the end.
+        mutating func skip(_ n: Int) -> Bool {
+            guard bit + n <= bytes.count * 8 else { return false }
+            bit += n
+            return true
+        }
+
+        /// The RBSP stop bit: the last bit set in the payload.
+        var lastSetBit: Int? {
+            guard let index = bytes.lastIndex(where: { $0 != 0 }) else { return nil }
+            return index * 8 + 7 - bytes[index].trailingZeroBitCount
+        }
 
         mutating func ue() -> Int? {
             var zeros = 0
