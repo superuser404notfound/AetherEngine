@@ -309,6 +309,8 @@ public final class Demuxer: @unchecked Sendable {
     /// representation readers it has opened before any of them belongs to a provider. Guarded by
     /// `providerLock`.
     private var pendingDASHOpener: DASHSourceOpener?
+    /// Audit DMX-201: the remote disc image's size probe, cancellable before any reader exists.
+    private var pendingDiscOpen: HTTPDiscIOReader.OpenHandle?
 
     private func adoptOwnedSourceReader(_ reader: IOReader) {
         providerLock.lock()
@@ -332,9 +334,11 @@ public final class Demuxer: @unchecked Sendable {
         providerLock.lock()
         let reader = _ownedSourceReader
         let dash = pendingDASHOpener
+        let discOpen = pendingDiscOpen
         providerLock.unlock()
         reader?.cancel()
         dash?.cancel()
+        discOpen?.cancel()
     }
 
     /// Audit HLS-2: `markClosed()` before the provider exists used to be a no-op, so a teardown
@@ -890,7 +894,34 @@ public final class Demuxer: @unchecked Sendable {
     /// recognizable disc, in which case any warm is back in the store for the streaming reader.
     private func openHTTPDiscImage(url: URL, extraHeaders: [String: String], selectTitleID: Int?) throws -> Bool {
         let warm = HTTPDiscIOReader.takePrewarm(for: url, extraHeaders: extraHeaders)
-        if let discReader = try HTTPDiscIOReader.open(url: url, extraHeaders: extraHeaders, prewarmed: warm) {
+        // Registered before the probe, and the close flag read after it: markClosed() sets the flag and
+        // then cancels, so whichever side runs second still stops the open (audit DMX-201).
+        let openHandle = HTTPDiscIOReader.OpenHandle()
+        providerLock.lock()
+        pendingDiscOpen = openHandle
+        providerLock.unlock()
+        defer {
+            providerLock.lock()
+            pendingDiscOpen = nil
+            providerLock.unlock()
+        }
+        if isCloseRequested {
+            if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+            throw DemuxerError.openFailed(code: -1)
+        }
+        let opened: HTTPDiscIOReader?
+        do {
+            opened = try HTTPDiscIOReader.open(url: url, extraHeaders: extraHeaders, prewarmed: warm,
+                                               handle: openHandle)
+        } catch {
+            if isCloseRequested, let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+            throw error
+        }
+        if opened == nil, isCloseRequested {
+            if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+            throw DemuxerError.openFailed(code: -1)
+        }
+        if let discReader = opened {
             adoptOwnedSourceReader(discReader)
             if isCloseRequested {
                 releaseOwnedSourceReader()
