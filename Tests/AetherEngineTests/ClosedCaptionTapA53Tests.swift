@@ -58,4 +58,25 @@ struct ClosedCaptionTapA53Tests {
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(!engine.subtitleTracks.contains { $0.id == AetherEngine.a53ClosedCaptionTrackID })
     }
+
+    /// Audit SUB-203: a reload resets the snapshot order to 0 and arms a new tap. The replaced tap,
+    /// still ingesting on an abandoned pump, published at its old count, passed the order check, put
+    /// its captions on the new session and held back the new tap's until they caught up.
+    @Test("A replaced tap's snapshot is ignored, the current tap's lands from its first one")
+    func replacedTapSnapshotIsIgnored() throws {
+        let engine = try AetherEngine()
+        let current = ClosedCaptionTap(engine: engine, ccStreamIndex: 3)
+        let replaced = ClosedCaptionTap(engine: engine, ccStreamIndex: 3)
+        engine.closedCaptionTap = current
+        engine.ccLastSnapshotSeq = 0
+        let stale = [SubtitleCue(id: 1, startTime: 100, endTime: 101, body: .text("old session"))]
+        let fresh = [SubtitleCue(id: 1, startTime: 1, endTime: 2, body: .text("new session"))]
+
+        engine.updateClosedCaptionCues(stale, seq: 412, ccStreamIndex: 3, from: replaced)
+        #expect(engine.ccCueSnapshot.isEmpty)
+        #expect(engine.ccLastSnapshotSeq == 0)
+
+        engine.updateClosedCaptionCues(fresh, seq: 1, ccStreamIndex: 3, from: current)
+        #expect(engine.ccCueSnapshot.map(\.startTime) == fresh.map(\.startTime))
+    }
 }
