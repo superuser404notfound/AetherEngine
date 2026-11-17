@@ -2633,6 +2633,9 @@ extension AetherEngine {
         }
         // Preserve codec so the decoder label can be reconstructed without re-probing.
         let preservedVideoCodec = lastDetectedVideoCodec
+        // stopInternal forgets the source's seekability. loadNative learns it again from its session; the
+        // software path reopens the same source without probing it, so it carries the answer across.
+        let preservedSourceSeekable = isSourceSeekable
         let preservedRequiresDeinterlaceWarmup =
             restoredDeinterlaceWarmupDecision ?? lastRequiresDeinterlaceWarmup
         let reloadStart = DispatchTime.now()
@@ -2843,6 +2846,7 @@ extension AetherEngine {
                     elType: sourceElType
                 )
                 EngineLog.emit("[AetherEngine] reload: loadSoftware done (\(elapsedMs(since: loadStart))ms)", category: .engine)
+                isSourceSeekable = preservedSourceSeekable
                 playbackBackend = .software
                 lastRequiresDeinterlaceWarmup = reopenedRequiresDeinterlaceWarmup
                 activeAudioTrackIndex = Self.softwareReloadAudioIndex(
