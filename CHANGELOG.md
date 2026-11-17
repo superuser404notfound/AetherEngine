@@ -135,6 +135,10 @@ the public-API contract.
 - **Log redaction also covers camelCase token names, whole `Cookie` headers, `Optional("...")`, short
   `Basic` credentials and a raw `@` in a password.** A long run of `e-` in a logged URL no longer burns CPU.
 - **`SMB://` is accepted, and an `SMBURL` error never repeats the password.**
+- **A Blu-ray seek by stream timestamp uses the disc's EP map.** `seek(to:streamIndex:)` checked only the
+  DVD time map and fell back to a byte estimate on Blu-ray.
+- **Dolby Vision layer joins and RPU walks no longer see empty NAL units.** One Annex-B scanner now serves
+  every walker; some used to emit zero-length units that were written into the joined stream.
 - **Infinite or NaN float samples no longer crash or freeze the loudness target.** They are left out of
   the measurement.
 - **A live packet without a PTS no longer produces a segment that claims to last 1e14 seconds.** It cuts
