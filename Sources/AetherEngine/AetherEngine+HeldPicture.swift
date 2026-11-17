@@ -21,11 +21,20 @@ extension AetherEngine {
     /// The default of `heldPictureFrameWaitSeconds`.
     static let defaultHeldPictureFrameWaitSeconds: Double = 0.5
 
-    /// The wait the native read runs with: the host's value, with a negative or non-finite one read
-    /// as "do not wait" so the switch can never hang on a bad setting.
-    static func heldPictureFrameWait(seconds: Double) -> Duration {
+    /// How long the native read waits once a read has come back empty. Some apps' outputs vend no
+    /// paused frame at all (Playova on macOS 26, the macOS CI runner), so every switch stood still
+    /// for the full wait. Where a frame does arrive it takes about 85 ms (PR #1082), so a short probe
+    /// still catches it.
+    static let heldPictureProbeAfterMissSeconds: Double = 0.15
+
+    /// The wait the native read runs with: the host's value, capped at the Dolby Vision budget so a
+    /// huge value cannot freeze the switch (or overflow), and a negative or non-finite one read as
+    /// "do not wait". After a miss it only probes, never longer than the host asked for.
+    static func heldPictureFrameWait(seconds: Double, afterMiss: Bool = false) -> Duration {
         guard seconds.isFinite, seconds > 0 else { return .zero }
-        return .milliseconds(Int64((seconds * 1000).rounded()))
+        var capped = min(seconds, heldPictureDolbyVisionBudgetSeconds)
+        if afterMiss { capped = min(capped, heldPictureProbeAfterMissSeconds) }
+        return .milliseconds(Int64((capped * 1000).rounded()))
     }
 
     /// AE#711 follow-up: hold the picture on screen across the rebuild of an audio switch.
@@ -78,9 +87,17 @@ extension AetherEngine {
                 held = await reshapedDolbyVisionStill(itemSeconds: host.avPlayer.currentTime().seconds)
                     .map { ($0, false, "Dolby Vision reshaped") }
             } else {
-                let wait = Self.heldPictureFrameWait(seconds: heldPictureFrameWaitSeconds)
-                held = wait > .zero ? await host.captureDisplayedFrame(timeout: wait)
-                    .map { ($0, Self.heldPictureIsHDR(videoFormat), "native output") } : nil
+                let wait = Self.heldPictureFrameWait(seconds: heldPictureFrameWaitSeconds,
+                                                     afterMiss: heldPictureNativeReadMissed)
+                let frame = wait > .zero ? await host.captureDisplayedFrame(timeout: wait) : nil
+                // Only a read that ran its whole wait on the same item counts as a miss; one cut short
+                // by a superseding load says nothing about the output.
+                if frame != nil {
+                    heldPictureNativeReadMissed = false
+                } else if wait > .zero, ContinuousClock.now - started >= wait, nativeHost === host {
+                    heldPictureNativeReadMissed = true
+                }
+                held = frame.map { ($0, Self.heldPictureIsHDR(videoFormat), "native output") }
             }
         } else if let host = softwareSource {
             held = host.displayedFrame().map { ($0, Self.heldPictureIsHDR(videoFormat), "software renderer") }

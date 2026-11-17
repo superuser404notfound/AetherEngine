@@ -1763,7 +1763,10 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
   - With the trait, the frame is a 960-wide still decoded through the scrub stills' RPU reshaping.
   - Either way the switch waits for it (up to 3 s, with the outgoing picture paused meanwhile).
 - Other profiles hold their base layer.
-- **How long the native read waits.** The frame is read from the paused outgoing item, which answers in about 20 ms. The switch waits up to 0.5 s for that frame and swaps with nothing held when none arrives. `heldPictureFrameWaitSeconds` changes that bound: lower it if your app's output vends no paused frame and every switch stands still for the full wait. 0 holds nothing on the native path. The Dolby Vision bullet above and the software path are not affected.
+- **How long the native read waits.** The frame is read from the paused outgoing item, which answers in about 20 ms. The switch waits up to 0.5 s for that frame and swaps with nothing held when none arrives.
+  - Some apps' outputs vend no paused frame at all. After one read comes back empty, later switches only wait 0.15 s, until a read succeeds again. So a switch stands still for the full wait once, not every time.
+  - `heldPictureFrameWaitSeconds` changes the bound. 0 holds nothing on the native path, and values above 3 s are read as 3 s.
+  - The Dolby Vision bullet above and the software path are not affected.
 - Nothing is held in PiP or on external playback.
 
 ### Picture in Picture on the software path

@@ -22,6 +22,15 @@ the public-API contract.
 - **A hostile PGS or other bitmap subtitle can no longer allocate about 1 GB.** Subtitle decoders cap the
   canvas at 4096x4096 pixels, video decoders at 8192x8192 (8K still plays).
 
+### Added
+
+- **A host can choose how long a native audio switch waits for the frame it holds** (PR #1082,
+  thanks to playovahq). `heldPictureFrameWaitSeconds` (default 0.5 s, as before, at most 3 s) bounds the read of
+  the outgoing picture. 0 holds nothing.
+- **An audio switch stands still for the full wait only once where the output vends no paused frame.**
+  It used to wait 0.5 s on every switch and then show black anyway. After one empty read, later switches
+  probe for 0.15 s until a read succeeds again.
+
 ### Fixed
 
 - **Backing out of a remote HLS stream while it was still starting no longer leaves its sound playing.** A
@@ -148,13 +157,6 @@ the public-API contract.
   `base_data_offset` values now fail the open or leave the box unpatched.
 - **DASH manifest and head reads are bounded.** A manifest over 8 MB, or one that trickles for more than
   120 s, fails the open instead of filling memory. A manifest with dozens of audio sets carries the first 16.
-
-### Added
-
-- **A host can choose how long a native audio switch waits for the frame it holds.**
-  `heldPictureFrameWaitSeconds` (default 0.5 s, as before) bounds the read of the outgoing picture. Where
-  the output vends no paused frame the switch used to stand still for the full 0.5 s and then show black
-  anyway; such a host can now shorten the wait, or set 0 to hold nothing.
 
 ### Performance
 
