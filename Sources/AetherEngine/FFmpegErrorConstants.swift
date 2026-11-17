@@ -19,6 +19,8 @@ enum FFmpegErr {
     /// `AVERROR(EIO)`; EIO is POSIX 5. "The source is lost", as distinct from `eof`, which every
     /// consumer reads as played-to-the-end and deliberately never retries.
     static let eio: Int32 = -5
+    /// `AVERROR(ENOMEM)`; ENOMEM is POSIX 12.
+    static let enomem: Int32 = -12
     /// `AVERROR(ENOSPC)`; ENOSPC is POSIX 28. The volume a write went to is full.
     static let enospc: Int32 = -28
 

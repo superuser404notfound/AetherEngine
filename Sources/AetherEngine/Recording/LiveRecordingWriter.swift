@@ -40,6 +40,16 @@ final class LiveRecordingWriter: LiveRecordingSink, @unchecked Sendable {
 
     private var queue: LiveRecordingQueue!
 
+    /// SUB-202: the mpegts muxer is not AVFMT_TS_NONSTRICT, so a packet whose dts does not rise
+    /// past the stream's last one returns EINVAL. Touched only by `write`, which runs on the drain
+    /// queue, so it needs no lock.
+    private var lastOutDts: [Int32: Int64] = [:]
+    private var repairedDtsCount = 0
+    private var droppedPacketCount = 0
+    private var consecutiveRejections = 0
+    /// A run of rejected packets this long is a broken muxer, not a bad timestamp.
+    private static let maxConsecutiveRejections = 64
+
     private let url: URL
     private let onFailure: @Sendable (RecordingFailure) -> Void
 
@@ -215,8 +225,21 @@ final class LiveRecordingWriter: LiveRecordingSink, @unchecked Sendable {
         pkt.pointee.duration = item.duration
         if item.isKeyframe { pkt.pointee.flags |= AV_PKT_FLAG_KEY }
         av_packet_rescale_ts(pkt, map.inTb, map.outTb)
+        repairNonMonotonicDts(pkt, outStream: map.out)
 
         let rc = av_interleaved_write_frame(context, pkt)
+        if rc == -EINVAL, consecutiveRejections < Self.maxConsecutiveRejections {
+            // The muxer refused this one packet and is not corrupted by it. Losing a frame beats
+            // ending a multi-hour recording.
+            consecutiveRejections += 1
+            droppedPacketCount += 1
+            if droppedPacketCount == 1 {
+                EngineLog.emit("[Recording] muxer rejected a packet (EINVAL), dropped; the recording "
+                               + "continues (logged once, url=\(url.lastPathComponent))",
+                               category: .session)
+            }
+            return
+        }
         if rc < 0 {
             let failure: RecordingFailure = rc == -ENOSPC
                 ? .diskFull(bytesWritten: bytesWritten)
@@ -226,9 +249,31 @@ final class LiveRecordingWriter: LiveRecordingSink, @unchecked Sendable {
             scheduleTeardown(failure: failure)
             return
         }
+        consecutiveRejections = 0
         ctxLock.lock()
         _bytesWritten += Int64(item.bytes.count)
         ctxLock.unlock()
+    }
+
+    /// Lifts a dts that does not rise past the stream's previous one to `previous + 1`, and keeps
+    /// pts at or above dts. The first repair is logged, the rest are counted.
+    private func repairNonMonotonicDts(_ pkt: UnsafeMutablePointer<AVPacket>, outStream: Int32) {
+        let dts = pkt.pointee.dts
+        guard dts != Int64.min else { return }
+        if let last = lastOutDts[outStream], dts <= last {
+            pkt.pointee.dts = last + 1
+            if pkt.pointee.pts != Int64.min, pkt.pointee.pts < pkt.pointee.dts {
+                pkt.pointee.pts = pkt.pointee.dts
+            }
+            repairedDtsCount += 1
+            if repairedDtsCount == 1 {
+                EngineLog.emit("[Recording] non-increasing dts on output stream \(outStream) "
+                               + "(\(dts) after \(last)), repaired; later ones are not logged "
+                               + "(url=\(url.lastPathComponent))",
+                               category: .session)
+            }
+        }
+        lastOutDts[outStream] = pkt.pointee.dts
     }
 
     // MARK: - Teardown

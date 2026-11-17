@@ -241,6 +241,7 @@ The producer parks once the segments it has written ahead of the consumer target
 - A fetch waiting on an in-flight restart follows that restart's progress instead of burning a fixed retry budget into a 503. It never re-fires a restart at its own stale index.
 - The fresh reopen after a wedged restart skips `find_stream_info`, because the session already holds saved codec configs and the segment plan.
 - Lazy native subtitle readers wait while a restart runs.
+- A native subtitle reader that fails mid-read (a transport error, not EOF) restarts under the same budget as the forward prefetcher (#231). Only a real EOF marks a whole-program store finished. When the budget runs out the store is marked failed and serves what it has, so a truncated file is never taken for a complete one.
 - The first producer of a resumed session anchors directly at the resume segment, instead of producing seg0 into an immediate teardown.
 
 **Holes in the cache.** Scrubbing leaves retained bands of segments with gaps between them, inside the cache's stored min/max index range. So an index inside that range is no proof the segment exists. A fetch inside the range waits (2 s) only when the active producer's forward march actually covers the requested index. Otherwise it restarts at once (#129).

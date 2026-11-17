@@ -490,6 +490,7 @@ Live recording (AE#560): `AetherEngine+Recording.swift` starts it; these files c
 | `SubtitleOverlayDrainer.swift` | Playhead-paced decode planning for the overlay (#112 rework). See note. |
 | `SubtitleCaptionStyle.swift` | The user's system caption style (font, size, colours, opacity, edge style) for the software host's text rendering, with `current()` and `observeChanges(_:)`. A field is set only where it differs from the system default. |
 | `SubtitleForwardPrefetcher.swift` | VOD-only subtitle side reader that fills the same store up to playhead + drain lead, past the producer's own forward park, so a host advance sync offset finds cues (#151). |
+| `SideReaderLoop.swift` | The read step (EOF told from a transport error) and the link-yield valve both subtitle side readers share (audit SUB-201, SUB-R201). |
 | `SideReaderLinkPolicy.swift` | Who gets the source link when the video path and a subtitle side reader both want it. On Matroska a "subtitle-only" reader still pulls every block off the wire, so the video path has priority, with a bounded grace and a yield ceiling (#240). |
 | `PQSubtitlePalette.swift` | Converts a PQ-coded PGS palette entry (UHD Blu-ray HDR) to sRGB against the BT.2408 graphics white, applied per display set on a PQ source (#1006). |
 | `SubtitleImageOCR.swift` | On-device recognition of bitmap subtitle images (PGS / DVB / DVD) into plain-text cues for the native rendition. Lossy by design; the fullscreen overlay keeps the pixel-accurate bitmaps. |

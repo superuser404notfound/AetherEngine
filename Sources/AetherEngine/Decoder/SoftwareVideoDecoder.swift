@@ -442,32 +442,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 if deinterlacer.ensureGraph(frame: f, timeBase: timeBase),
                    deinterlacer.push(f) >= 0 {
                     decodedFormatKey?.deinterlace = deinterlacer.activeDeinterlace
+                    av_frame_unref(f)
                     if filtered == nil { filtered = av_frame_alloc() }
-                    if let out = filtered {
-                        while deinterlacer.pull(into: out) >= 0 {  // filter holds 1-2 frames lookahead; push can yield EAGAIN
-                            // Untimestamped output is unschedulable: yadif's SECOND field is
-                            // cur.pts + next.pts, which is NOPTS whenever either source frame
-                            // lacked a PTS (live TS delivers those); an invalid-PTS sample
-                            // can't be paced by the render synchronizer and can wedge the
-                            // display queue. Drop it; at field rate the neighbor field covers.
-                            if out.pointee.pts == Int64.min {
-                                droppedUntimestampedFields += 1
-                                if droppedUntimestampedFields == 1 || droppedUntimestampedFields % 250 == 0 {
-                                    EngineLog.emit(
-                                        "[SWDecoder] dropped \(droppedUntimestampedFields) untimestamped deinterlaced frame(s)",
-                                        category: .swPlayback
-                                    )
-                                }
-                                av_frame_unref(out)
-                                continue
-                            }
-                            // Filtered PTS rides the sink's time_base, NOT the stream's: yadif/bwdif
-                            // halve the link time_base, and send_field puts the two fields of a frame
-                            // on odd/even ticks of that halved base (see DeinterlaceFilter class doc).
-                            emit(out, timeBase: deinterlacer.outputTimeBase)
-                            av_frame_unref(out)
-                        }
-                    }
+                    if let out = filtered { emitFilteredFramesLocked(out) }
                     lock.unlock()
                     continue
                 }
@@ -481,6 +458,39 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
         av_frame_free(&frame)
         if filtered != nil { av_frame_free(&filtered) }
+    }
+
+    /// Pulls everything the deinterlacer can produce into `out` and emits it. Called under `lock`.
+    /// A pull error other than EAGAIN or EOF drops the graph (DEC-202).
+    private func emitFilteredFramesLocked(_ out: UnsafeMutablePointer<AVFrame>) {
+        while true {
+            let ret = deinterlacer.pull(into: out)  // filter holds 1-2 frames lookahead; push can yield EAGAIN
+            guard ret >= 0 else {
+                deinterlacer.noteGraphError(afterPull: ret)
+                break
+            }
+            // Untimestamped output is unschedulable: yadif's SECOND field is
+            // cur.pts + next.pts, which is NOPTS whenever either source frame
+            // lacked a PTS (live TS delivers those); an invalid-PTS sample
+            // can't be paced by the render synchronizer and can wedge the
+            // display queue. Drop it; at field rate the neighbor field covers.
+            if out.pointee.pts == Int64.min {
+                droppedUntimestampedFields += 1
+                if droppedUntimestampedFields == 1 || droppedUntimestampedFields % 250 == 0 {
+                    EngineLog.emit(
+                        "[SWDecoder] dropped \(droppedUntimestampedFields) untimestamped deinterlaced frame(s)",
+                        category: .swPlayback
+                    )
+                }
+                av_frame_unref(out)
+                continue
+            }
+            // Filtered PTS rides the sink's time_base, NOT the stream's: yadif/bwdif
+            // halve the link time_base, and send_field puts the two fields of a frame
+            // on odd/even ticks of that halved base (see DeinterlaceFilter class doc).
+            emit(out, timeBase: deinterlacer.outputTimeBase)
+            av_frame_unref(out)
+        }
     }
 
     /// Convert + deliver one decoded (or deinterlaced) frame: skip threshold, pixel buffer
@@ -581,6 +591,17 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lock.unlock()
         guard ret >= 0 else { return }
         drainDecodedFrames()
+        // DEC-203: the deinterlacer still holds the last picture, waiting for a next one that never comes.
+        lock.lock()
+        defer { lock.unlock() }
+        guard codecContext != nil, deinterlacer.isActive else { return }
+        if deinterlacer.sendEndOfStream() >= 0 {
+            var out = av_frame_alloc()
+            if let out { emitFilteredFramesLocked(out) }
+            av_frame_free(&out)
+        }
+        // An EOF'ed graph takes no more input, whatever the caller's flush asks for.
+        deinterlacer.teardown()
     }
 
     func flush(resetFilterGraph: Bool) {

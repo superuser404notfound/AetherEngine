@@ -1262,7 +1262,7 @@ It is per engine instance, so several engines at once can be told apart without 
 
 - `frame` is a `VideoStreamFormat` for the decoded picture: libavcodec's output pixel format, or the libav name of the VideoToolbox buffer on the software host's hardware decoder.
 - `pixelBufferFormat` is the CoreVideo buffer it was displayed from (`420v`, `x420`); `pixelBufferLabel` reads "P010 (x420)".
-- `deinterlace` is a `VideoDeinterlace?` (AE#983) naming the deinterlace graph the frames pass through: `filter` (`yadif_videotoolbox`, `bwdif`, `yadif`), `isHardware`, `fieldRate`, and `outputFramesPerSourceFrame` (2 at field rate, so "deinterlaced to 50 fps" is `sourceVideoFrameRate * 2`). nil while frames go out as decoded. The graph starts on the first frame flagged interlaced and stays until a seek.
+- `deinterlace` is a `VideoDeinterlace?` (AE#983) naming the deinterlace graph the frames pass through: `filter` (`yadif_videotoolbox`, `bwdif`, `yadif`), `isHardware`, `fieldRate`, and `outputFramesPerSourceFrame` (2 at field rate, so "deinterlaced to 50 fps" is `sourceVideoFrameRate * 2`). nil while frames go out as decoded. The graph starts on the first frame flagged interlaced and stays until a seek. A filter error drops the graph and the next interlaced frame builds a new one (a hardware graph that failed is replaced by the software one). After three errors in a session the frames go out as decoded. At the end of a stream the graph is flushed first, so the last picture is not lost.
 - Republished when any of these changes mid-stream.
 - **nil on every native route.** AVPlayer decodes there, and its frames never pass through the engine. A panel shows `$sourceVideoStreamFormat` and names AVPlayer as the decoder, instead of inventing a pixel format nobody measured.
 
@@ -1703,6 +1703,8 @@ The way out is the one under [Where the token rotates](#live-the-retune-request)
 - Published through `$recordingState` as `.failed`: conditions that only show up while writing, long after the call returned. `.diskFull`, `.writeFailed`, `.writeTooSlow`.
 
 **`.writeTooSlow`: the engine drops the recording, not the picture.** Writes go into a bounded queue that is drained off the demux thread. When that queue fills, the recording ends and says so. Otherwise the demux thread would wait on a slow disk and stall playback, and the engine does not make that trade.
+
+**A bad timestamp does not end the recording.** The TS muxer refuses a packet whose decode timestamp does not rise past the stream's last one. The writer lifts such a timestamp to the previous one plus one tick and logs the first repair. A packet the muxer still refuses is dropped, and only a long run of refusals ends the recording as `.writeFailed`.
 
 **A reset ends the recording.** When `liveSourceReset` fires, or the host calls `reloadAtCurrentPosition`, the file is closed cleanly and `$recordingState` publishes `.ended(.sourceReset)`.
 

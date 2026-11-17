@@ -2196,7 +2196,9 @@ final class SoftwarePlaybackHost {
                            category: .swPlayback)
             return false
         }
-        let target = currentTime
+        // NAT-202: the published currentTime lags the clock by up to a tick, and the seek flushes the
+        // audio, so seeking to it plays that stretch a second time.
+        let target = recoveryPlayheadSeconds()
         EngineLog.emit(
             "[SWHost] AE#739 video session rebuilt, repositioning to the playhead at "
             + "\(String(format: "%.3f", target))s",
