@@ -122,9 +122,11 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
                     guard hops < Self.maxRedirects else {
                         throw PersistentHTTP1Connection.ConnectionError.tooManyRedirects
                     }
-                    guard let next = URL(string: location, relativeTo: target)?.absoluteURL else {
+                    guard let resolved = URL(string: location, relativeTo: target)?.absoluteURL else {
                         throw PersistentHTTP1Connection.ConnectionError.malformed("unresolvable Location: \(location)")
                     }
+                    // Audit NET-207: the URLSession paths ask for the same address over https; so does this one.
+                    let next = RedirectHeaderPolicy.upgradedDowngrade(resolved, from: target) ?? resolved
                     trace.record(.redirect, originalURL: url, url: next, status: head.status)
                     hops += 1
                     target = next
@@ -238,7 +240,9 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
 
     /// Ends the claim `connection` holds: back to the pool when `refusal` is nil, closed otherwise,
     /// and the next waiting request goes ahead. Idempotent.
-    fileprivate func release(_ connection: PersistentHTTP1Connection, refusal: String?) {
+    fileprivate func release(_ connection: PersistentHTTP1Connection, refusal inRefusal: String?) {
+        // Audit NET-206: bytes left after a complete response belong to no request, so the next one would read them.
+        let refusal = inRefusal ?? (connection.hasUnreadBytes ? "bytes left after the response" : nil)
         lock.lock()
         var waiters: [CheckedContinuation<Void, Never>] = []
         if let claim = claims[connection.origin], claim.connection === connection {
@@ -708,14 +712,12 @@ final class PersistentHTTP1Connection: @unchecked Sendable {
     }
 
     static func framing(for head: HeldSourceConnection.ResponseHead) -> Framing {
-        if (100..<200).contains(head.status) || head.status == 204 || head.status == 304 { return .empty }
-        if head.headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
-            return .chunked(ChunkedBodyDecoder())
+        switch HeldSourceConnection.bodyFramingKind(for: head) {
+        case .empty: return .empty
+        case .chunked: return .chunked(ChunkedBodyDecoder())
+        case .identity(let length): return .identity(remaining: length)
+        case .untilClose: return .untilClose
         }
-        if let raw = head.headers["content-length"], let length = Int64(raw), length >= 0 {
-            return .identity(remaining: length)
-        }
-        return .untilClose
     }
 
     // MARK: - Wire
@@ -759,7 +761,18 @@ final class PersistentHTTP1Connection: @unchecked Sendable {
 
     static let lateHeadReadTimeout: TimeInterval = 0.5
 
+    /// Skips interim 1xx heads (a 103 Early Hints, a stray 100), so the answer is the real one and the
+    /// connection stays in step with the pool (audit NET-206). The bytes after an interim head stay in `pending`.
     private func readHead(
+        _ task: URLSessionStreamTask, reused: Bool, deadline: Date
+    ) async throws -> HeldSourceConnection.ResponseHead {
+        while true {
+            let head = try await readHeadOnce(task, reused: reused, deadline: deadline)
+            if !HeldSourceConnection.isInterim(head) { return head }
+        }
+    }
+
+    private func readHeadOnce(
         _ task: URLSessionStreamTask, reused: Bool, deadline: Date
     ) async throws -> HeldSourceConnection.ResponseHead {
         let separator = Data("\r\n\r\n".utf8)
@@ -817,6 +830,8 @@ final class PersistentHTTP1Connection: @unchecked Sendable {
             throw ConnectionError.stalled(seconds: readTimeout, progress: progress())
         }
     }
+
+    var hasUnreadBytes: Bool { stateLock.withLock { !pending.isEmpty } }
 
     private func takePending() -> Data {
         stateLock.withLock {

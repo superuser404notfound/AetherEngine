@@ -76,10 +76,7 @@ struct HLSByteRange: Equatable {
 
     /// The first byte position of a `Content-Range: bytes <first>-<last>/<total>` value.
     static func contentRangeStart(_ value: String) -> Int? {
-        let text = value.trimmingCharacters(in: .whitespaces)
-        guard text.lowercased().hasPrefix("bytes "),
-              let dash = text.firstIndex(of: "-") else { return nil }
-        return Int(text[text.index(text.startIndex, offsetBy: 6)..<dash].trimmingCharacters(in: .whitespaces))
+        ContentRange(value).flatMap { Int(exactly: $0.start) }
     }
 }
 

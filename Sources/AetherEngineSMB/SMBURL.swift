@@ -19,8 +19,10 @@ public struct SMBURL: Sendable {
     }
 
     public static func parse(_ raw: String) throws -> SMBURL {
-        guard let comps = URLComponents(string: raw), comps.scheme == "smb" else {
-            throw ParseError(message: "not an smb:// URL: \(raw)")
+        // Case-insensitive scheme (RFC 3986), and the error names the scheme only: `raw` can hold a password (audit NET-209).
+        let parsed = URLComponents(string: raw)
+        guard let comps = parsed, comps.scheme?.lowercased() == "smb" else {
+            throw ParseError(message: "not an smb:// URL (scheme: \(parsed?.scheme ?? "none"))")
         }
         guard let host = comps.host, !host.isEmpty else {
             throw ParseError(message: "missing host")

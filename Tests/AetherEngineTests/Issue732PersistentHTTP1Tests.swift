@@ -38,6 +38,67 @@ final class Issue732PersistentHTTP1Tests: XCTestCase {
         XCTAssertTrue(log.allSatisfy { $0.headers["x-fixture"] == "allowed" })
     }
 
+    /// Audit NET-R201: one transient 503 on a VOD segment no longer ends the ingest.
+    func testATransientSegmentRefusalIsRetried() async throws {
+        let server = try XCTUnwrap(KeepAliveOrigin())
+        defer { server.stop() }
+        let segments = (0..<3).map { "seg\($0).ts" }
+        let refused = NSLock()
+        nonisolated(unsafe) var seg1Requests = 0
+        server.route = { path in
+            if path == "/vod.m3u8" { return .init(body: Self.mediaPlaylist(segments)) }
+            guard let index = segments.firstIndex(where: { "/" + $0 == path }) else { return .init(status: 404) }
+            if index == 1 {
+                let attempt = refused.withLock { () -> Int in seg1Requests += 1; return seg1Requests }
+                if attempt == 1 { return .init(status: 503) }
+            }
+            return .init(body: Self.transportStream(marker: UInt8(index)))
+        }
+        let made = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
+            playlistURL: server.url("/vod.m3u8"), httpHeaders: [:], persistentHTTP1: true)
+        let reader = try XCTUnwrap(made)
+        defer { reader.close() }
+
+        let stream = await Self.offPool { Self.drain(reader) }
+        XCTAssertEqual(stream.count, 3 * 188 * 3)
+        XCTAssertEqual((0..<3).map { stream[$0 * 188 * 3 + Self.markerOffset] }, [0, 1, 2])
+        XCTAssertEqual(refused.withLock { seg1Requests }, 2)
+    }
+
+    func testSegmentFailureClassification() {
+        XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 404)))
+        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 503)))
+        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 429)))
+        XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.unsupportedSegmentFormat))
+        XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(CancellationError()))
+        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(URLError(.networkConnectionLost)))
+        XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(URLError(.cancelled)))
+        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(PersistentHTTP1Connection.ConnectionError.staleKeepAlive))
+    }
+
+    func testRetryingSegmentGivesUpAfterItsAttempts() async throws {
+        nonisolated(unsafe) var calls = 0
+        do {
+            _ = try await HLSVODIngestReader.retryingSegment(delay: { _ in 0 }) { () async throws -> Int in
+                calls += 1
+                throw HLSIngestError.playlistUnreachable(status: 502)
+            }
+            XCTFail("a refusal that never clears must end the ingest")
+        } catch {
+            XCTAssertEqual(calls, HLSVODIngestReader.maxSegmentAttempts)
+        }
+        calls = 0
+        do {
+            _ = try await HLSVODIngestReader.retryingSegment(delay: { _ in 0 }) { () async throws -> Int in
+                calls += 1
+                throw HLSIngestError.playlistUnreachable(status: 404)
+            }
+            XCTFail("a 404 is not retried into success")
+        } catch {
+            XCTAssertEqual(calls, 1)
+        }
+    }
+
     func testReaderSurvivesASeekThatCancelsAFetchMidBody() async throws {
         let server = try XCTUnwrap(KeepAliveOrigin())
         defer { server.stop() }
@@ -408,6 +469,45 @@ final class Issue732PersistentHTTP1Tests: XCTestCase {
         XCTAssertEqual(server.connectionCount, 3)
     }
 
+    /// Audit NET-206: a 1xx interim head is not the answer, and the connection stays in step.
+    func testInterimHeadIsSkippedAndTheNextRequestGetsItsOwnAnswer() async throws {
+        let server = try XCTUnwrap(KeepAliveOrigin())
+        defer { server.stop() }
+        server.route = { path in
+            var reply = KeepAliveOrigin.Reply(body: Data(path.utf8))
+            reply.interimHead = true
+            return reply
+        }
+        let transport = PersistentHTTP1Transport(label: "test")
+        defer { transport.close() }
+
+        for path in ["/a", "/b", "/c"] {
+            let answer = try await transport.get(server.url(path), headers: [:], limit: 1024)
+            XCTAssertEqual(answer.response.statusCode, 200)
+            XCTAssertEqual(String(decoding: answer.body, as: UTF8.self), path)
+        }
+        XCTAssertEqual(server.connectionCount, 1)
+    }
+
+    /// Audit NET-R204: one framing rule for the held and the persistent connection.
+    func testBothFramersAgreeOnBodilessStatusesAndNegativeLength() throws {
+        func head(_ status: Int, _ headers: String) throws -> HeldSourceConnection.ResponseHead {
+            try HeldSourceConnection.ResponseHead(
+                rawHead: Data("HTTP/1.1 \(status) X\r\n\(headers)".utf8))
+        }
+        for status in [100, 103, 204, 304] {
+            let h = try head(status, "Content-Length: 12")
+            XCTAssertEqual(HeldSourceConnection.bodyFramingKind(for: h), .empty)
+            guard case .empty = PersistentHTTP1Connection.framing(for: h) else { return XCTFail("status \(status)") }
+        }
+        let negative = try head(200, "Content-Length: -5")
+        XCTAssertEqual(HeldSourceConnection.bodyFramingKind(for: negative), .untilClose)
+        guard case .untilClose = PersistentHTTP1Connection.framing(for: negative) else { return XCTFail("negative") }
+        XCTAssertEqual(HeldSourceConnection.bodyFramingKind(for: try head(200, "Content-Length: 7")), .identity(7))
+        XCTAssertTrue(HeldSourceConnection.isInterim(try head(103, "")))
+        XCTAssertFalse(HeldSourceConnection.isInterim(try head(101, "")))
+    }
+
     func testChunkedBodyIsDecodedAndKeepsTheConnection() async throws {
         let server = try XCTUnwrap(KeepAliveOrigin())
         defer { server.stop() }
@@ -624,6 +724,8 @@ final class KeepAliveOrigin: @unchecked Sendable {
         var trickleUs: useconds_t = 0
         /// Sends this many body bytes, then nothing more until the origin stops.
         var stallAfter: Int?
+        /// Writes an interim `103 Early Hints` head before the real one.
+        var interimHead = false
 
         init(status: Int = 200, headers: [String: String] = [:], body: Data = Data(),
              chunked: Bool = false, connectionClose: Bool = false, silentClose: Bool = false,
@@ -741,7 +843,8 @@ final class KeepAliveOrigin: @unchecked Sendable {
     }
 
     private func respond(_ fd: Int32, _ reply: Reply) -> Bool {
-        var head = "HTTP/1.1 \(reply.status) X\r\n"
+        var head = reply.interimHead ? "HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\n" : ""
+        head += "HTTP/1.1 \(reply.status) X\r\n"
         for (name, value) in reply.headers { head += "\(name): \(value)\r\n" }
         if reply.chunked {
             head += "Transfer-Encoding: chunked\r\n"

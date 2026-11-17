@@ -235,19 +235,12 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
 
     /// Total size from a `Content-Range` value (`bytes 0-0/12345` -> 12345). Nil for `*` or junk.
     static func parseContentRangeTotal(_ value: String) -> Int64? {
-        guard let slash = value.lastIndex(of: "/") else { return nil }
-        let total = value[value.index(after: slash)...].trimmingCharacters(in: .whitespaces)
-        guard total != "*" else { return nil }
-        return Int64(total)
+        ContentRange(value)?.total
     }
 
     /// Start offset from a `Content-Range` value (`bytes 100-200/12345` -> 100). Nil for junk.
     static func parseContentRangeStart(_ value: String) -> Int64? {
-        let trimmed = value.trimmingCharacters(in: .whitespaces)
-        guard trimmed.hasPrefix("bytes ") else { return nil }
-        let rest = trimmed.dropFirst("bytes ".count)
-        guard let dash = rest.firstIndex(of: "-") else { return nil }
-        return Int64(rest[rest.startIndex..<dash])
+        ContentRange(value)?.start
     }
 
     /// Next adaptive window: `base` when `position` is not the sequential continuation of the last
