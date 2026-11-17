@@ -681,6 +681,7 @@ A custom source (`IOReader`, the disc-folder readers) is described under [Custom
 - The kept transport includes a pause the viewer made in AVKit's own controls, which call the `AVPlayer` directly.
 - **Position.** A VOD session comes back at the playhead; a playhead at or below 1 s restarts from the beginning. A live session does not keep its position: it rejoins at the live edge, and the DVR window starts over.
 - **It ends an active recording** with `.ended(.sourceReset)`, because the reopened source can bring back different codecs (see [Recording a live stream](#recording-a-live-stream)).
+- **Cancelling the caller's Task.** A URL source reopens through `load()`, so a cancel ends it the way [Cancelling a load](#cancelling-a-load) describes. A custom source rebuilds in place and does not stop for a cancel: only a `stop()` or a newer `load()` supersedes it, and then it throws `CancellationError`. If that rebuild fails, it throws the failure and publishes `.error`, cancelled Task or not.
 
 To change options at the same time, use [`reloadAtCurrentPosition(applying:)`](#correcting-a-loadoption-without-restarting-the-item).
 

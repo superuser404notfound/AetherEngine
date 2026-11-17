@@ -2672,8 +2672,10 @@ extension AetherEngine {
             if keepAudioSwitchItem { nativeHost?.pause() }
             let heldGeneration = loadGeneration
             await holdPictureAcrossItemSwap()
-            // A stop() or load() that landed while the frame was read owns the engine now.
-            guard loadGeneration == heldGeneration, !Task.isCancelled else {
+            // A stop() or load() that landed while the frame was read owns the engine now. A caller that
+            // cancelled its task does not (audit LIF-204): nothing is torn down yet, and leaving here
+            // would strand the session paused in `.loading`, so the rebuild carries on.
+            guard loadGeneration == heldGeneration else {
                 releaseHeldPicture(reason: "rebuild superseded")
                 return nil
             }
@@ -2726,8 +2728,9 @@ extension AetherEngine {
                     return d
                 }.value
             } catch {
-                // A superseded or caller-cancelled reopen is not a reload failure.
-                if loadGeneration != gen || Task.isCancelled {
+                // A superseded reopen is not this rebuild's failure. A caller that cancelled its task
+                // still owns the session this rebuild tore down, so its failure is published (audit LOAD-209).
+                if loadGeneration != gen {
                     EngineLog.emit("[AetherEngine] reload superseded during custom reader reopen; unwinding", category: .engine)
                     return nil
                 }
@@ -2756,8 +2759,9 @@ extension AetherEngine {
                     return d
                 }.value
             } catch {
-                // A superseded or caller-cancelled reopen is not a reload failure.
-                if loadGeneration != gen || Task.isCancelled {
+                // A superseded reopen is not this rebuild's failure. A caller that cancelled its task
+                // still owns the session this rebuild tore down, so its failure is published (audit LOAD-209).
+                if loadGeneration != gen {
                     EngineLog.emit("[AetherEngine] reload superseded during disc URL reopen; unwinding", category: .engine)
                     return nil
                 }
@@ -2991,11 +2995,12 @@ extension AetherEngine {
                 armLiveReloadWatchdog(generation: gen)
             }
             EngineLog.emit("[AetherEngine] reload: state=\(state == .playing ? ".playing" : ".paused") total=\(elapsedMs(since: reloadStart))ms", category: .engine)
-        } catch is CancellationError {
+        } catch is CancellationError where loadGeneration != gen {
             // Superseded by a newer load/stop: it owns the engine state.
             return nil
         } catch {
-            guard loadGeneration == gen, !Task.isCancelled else { return nil }
+            // Audit LOAD-209: supersession by generation alone, as above.
+            guard loadGeneration == gen else { return nil }
             releaseHeldPicture(reason: "rebuild failed")
             EngineLog.emit(
                 "[AetherEngine] selectAudioTrack reload failed: \(error), playback stopped",

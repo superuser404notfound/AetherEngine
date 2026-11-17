@@ -496,4 +496,109 @@ struct CancellableLoadTests {
         #expect(engine.state == .idle)
         #expect(engine.errorInfo == nil)
     }
+
+    /// Serves the fixture until armed. Armed, a read from the head of the file (where a reopen
+    /// starts) parks until the test or the engine lets it go, and then fails, as does every later
+    /// one there: a share that dropped while the rebuild was reopening it. The playing session's
+    /// reads further in are served, so only the reopen fails.
+    final class ReopenFailsReader: IOReader, @unchecked Sendable {
+        private let bytes: Data
+        private let condition = NSCondition()
+        private var position = 0
+        private var armed = false
+        private var released = false
+        private var parked = 0
+
+        init(_ bytes: Data) { self.bytes = bytes }
+
+        func arm() { condition.withLock { armed = true } }
+        func release() { condition.withLock { released = true; condition.broadcast() } }
+        var parkedCount: Int { condition.withLock { parked } }
+
+        func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
+            guard let buffer, size > 0 else { return -1 }
+            condition.lock()
+            defer { condition.unlock() }
+            if armed, position == 0 {
+                parked += 1
+                let deadline = Date().addingTimeInterval(120)
+                while !released, condition.wait(until: deadline) {}
+                return -1
+            }
+            let n = min(Int(size), bytes.count - position)
+            guard n > 0 else { return -1 }
+            bytes.withUnsafeBytes { raw in _ = memcpy(buffer, raw.baseAddress! + position, n) }
+            position += n
+            return Int32(n)
+        }
+        func seek(offset: Int64, whence: Int32) -> Int64 {
+            condition.withLock {
+                switch whence {
+                case 65536: return Int64(bytes.count)
+                case SEEK_SET: position = Int(max(0, min(offset, Int64(bytes.count))))
+                case SEEK_CUR: position = max(0, min(position + Int(offset), bytes.count))
+                case SEEK_END: position = max(0, min(bytes.count + Int(offset), bytes.count))
+                default: return -1
+                }
+                return Int64(position)
+            }
+        }
+        func close() { release() }
+        // The rebuild's teardown cancels the reader to stop the old pump; the reopen's park must
+        // outlast that, or the reopen fails before the test cancels the caller.
+        func cancel() {}
+        func makeIndependentReader() -> IOReader? { nil }
+        var discImageProbeEnabled: Bool { false }
+    }
+
+    /// Audit LOAD-209: the rebuild had already torn the session down when its reopen failed, and it
+    /// read the cancelled caller as a supersede. Nothing was published, the state stayed `.loading`
+    /// and `reloadAtCurrentPosition()` returned as if the rebuild had worked.
+    @Test("A custom-source reload whose caller cancelled it still reports a reopen that failed")
+    func cancelledCallerSeesTheFailedReopen() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let reader = ReopenFailsReader(try Self.fixture())
+        _ = try await engine.load(source: .custom(reader, formatHint: "mp4"))
+        reader.arm()
+
+        let reload = Task { @MainActor in try await engine.reloadAtCurrentPosition() }
+        try await waitFor { reader.parkedCount > 0 }
+        reload.cancel()
+        reader.release()
+
+        let outcome = await reload.result
+        switch outcome {
+        case .success: Issue.record("the failed rebuild reported success")
+        case .failure(let error): #expect(!(error is CancellationError), "got \(error)")
+        }
+        #expect(engine.state != .loading)
+        #expect(engine.errorInfo != nil)
+    }
+
+    /// Audit LIF-204: an audio-switch rebuild pauses the native player and reads the held picture
+    /// before its teardown. A caller that had cancelled its task by then left the session mounted,
+    /// paused and in `.loading`, with nothing left to settle it.
+    @Test("An audio-switch rebuild whose caller is cancelled still finishes")
+    func cancelledCallerAudioSwitchFinishes() async throws {
+        let url = try await ItemSwapStillTests.fixtureURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        _ = try await engine.load(url: url)
+        let audio = try #require(engine.activeAudioTrackIndex)
+        try #require(engine.nativeHost?.avPlayer.currentItem != nil)
+
+        let generation = engine.loadGeneration
+        let reload = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await engine.reloadWithAudioOverride(
+                url: url, audioStreamIndex: Int32(audio), expectedGeneration: generation)
+        }
+        let failure = await reload.value
+
+        #expect(failure == nil, "\(String(describing: failure))")
+        #expect(engine.loadGeneration == generation &+ 1, "the rebuild never tore down and rebuilt")
+        #expect(engine.state == .playing || engine.state == .paused, "state \(engine.state)")
+    }
 }
