@@ -65,7 +65,7 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
     private let bytesPerFrame: Int
     private let bedFormat: CMAudioFormatDescription
     private let timeBase: AVRational
-    private let stream: UnsafeMutablePointer<AVStream>
+    private let tap: LazyTapDecoder
     private var converter: AudioConverterRef?
     private let lock = NSLock()
     private var _feedEpoch: UInt64 = 0
@@ -76,9 +76,6 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
     private var nextSeconds: Double?
     private var output: [UInt8]
     private var loggedError = false
-    private var tapDecoder: AudioDecoder?
-    private var tapOpenFailed = false
-    private var closed = false
 
     /// The packet the input callback hands the converter, one per `decode`.
     private final class Pending {
@@ -125,7 +122,7 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
         self.bytesPerFrame = Int(out.mBytesPerFrame)
         self.bedFormat = bed
         self.timeBase = stream.pointee.time_base
-        self.stream = stream
+        self.tap = LazyTapDecoder(stream: stream)
         self.converter = made
         self.output = [UInt8](repeating: 0, count: Self.framesPerPacket * 2 * Int(out.mBytesPerFrame))
     }
@@ -227,22 +224,10 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
         let seconds = anchor + Double(producedFrames + Self.leadingFrameOffset) / Self.sampleRate
         producedFrames += Int64(frames)
         let count = frames * bytesPerFrame
-        var block: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: count,
-            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
-            dataLength: count, flags: 0, blockBufferOut: &block) == noErr, let block else { return nil }
-        let copied = output.withUnsafeBytes {
-            CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block,
-                                          offsetIntoDestination: 0, dataLength: count)
+        return output.withUnsafeBytes {
+            AudioSampleBuffers.make(bytes: UnsafeRawBufferPointer(rebasing: $0.prefix(count)), seconds: seconds,
+                                    formatDescription: bedFormat, sampleCount: frames, compressedPacket: false)
         }
-        guard copied == noErr else { return nil }
-        var sample: CMSampleBuffer?
-        guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(
-            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: bedFormat,
-            sampleCount: frames, presentationTimeStamp: CMTime(seconds: seconds, preferredTimescale: 90_000),
-            packetDescriptions: nil, sampleBufferOut: &sample) == noErr else { return nil }
-        return sample
     }
 
     /// The decoder's last frames once the source has ended.
@@ -267,31 +252,19 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
             pending.bytes = nil
             pending.consumed = true
         }
-        let tap = lock.withLock { tapDecoder }
-        tap?.flush()
+        tap.flush()
     }
 
     func close() {
-        let tap: AudioDecoder? = lock.withLock {
-            closed = true
+        lock.withLock {
             if let converter { AudioConverterDispose(converter) }
             converter = nil
-            let tap = tapDecoder
-            tapDecoder = nil
-            return tap
         }
-        tap?.close()
+        tap.close()
     }
 
     /// PCM for the audio tap, which wants the source's own channels: the 5.1 core, decoded by libavcodec.
     func tapBuffers(for packet: UnsafeMutablePointer<AVPacket>, produced: [CMSampleBuffer]) -> [CMSampleBuffer] {
-        let tap: AudioDecoder? = lock.withLock {
-            if tapDecoder == nil, !tapOpenFailed, !closed {
-                let decoder = AudioDecoder()
-                if (try? decoder.open(stream: stream)) != nil { tapDecoder = decoder } else { tapOpenFailed = true }
-            }
-            return tapDecoder
-        }
-        return tap?.decode(packet: packet) ?? []
+        tap.buffers(for: packet)
     }
 }

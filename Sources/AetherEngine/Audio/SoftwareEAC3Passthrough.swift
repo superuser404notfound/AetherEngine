@@ -58,13 +58,8 @@ final class SoftwareEAC3Passthrough: SoftwareAudioProducing, @unchecked Sendable
 
     private let formatDescription: CMAudioFormatDescription
     private let timeBase: AVRational
-    private let stream: UnsafeMutablePointer<AVStream>
-    /// Decodes for the audio tap only: `decode` itself never runs it. Opened on the first tap, since
-    /// most sessions never tap, and under the lock because the tap runs on the demux thread while
-    /// `close` can come from the main actor.
-    private var tapDecoder: AudioDecoder?
-    private var tapOpenFailed = false
-    private var closed = false
+    /// Decodes for the audio tap only: `decode` itself never runs it.
+    private let tap: LazyTapDecoder
     private let lock = NSLock()
     /// Where the next packet sits when the container left its stamps out.
     private var nextSeconds: Double?
@@ -72,7 +67,7 @@ final class SoftwareEAC3Passthrough: SoftwareAudioProducing, @unchecked Sendable
     init(stream: UnsafeMutablePointer<AVStream>, formatDescription: CMAudioFormatDescription) throws {
         self.formatDescription = formatDescription
         self.timeBase = stream.pointee.time_base
-        self.stream = stream
+        self.tap = LazyTapDecoder(stream: stream)
     }
 
     // MARK: - Format description
@@ -223,49 +218,22 @@ final class SoftwareEAC3Passthrough: SoftwareAudioProducing, @unchecked Sendable
     static func sampleBuffer(
         bytes: UnsafeRawBufferPointer, seconds: Double, formatDescription: CMAudioFormatDescription
     ) -> CMSampleBuffer? {
-        var block: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: bytes.count,
-            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
-            dataLength: bytes.count, flags: 0, blockBufferOut: &block) == noErr, let block,
-              CMBlockBufferReplaceDataBytes(
-                with: bytes.baseAddress!, blockBuffer: block, offsetIntoDestination: 0,
-                dataLength: bytes.count) == noErr else { return nil }
-        var description = AudioStreamPacketDescription(
-            mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(bytes.count))
-        var sample: CMSampleBuffer?
-        guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(
-            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: formatDescription,
-            sampleCount: 1, presentationTimeStamp: CMTime(seconds: seconds, preferredTimescale: 90_000),
-            packetDescriptions: &description, sampleBufferOut: &sample) == noErr else { return nil }
-        return sample
+        AudioSampleBuffers.make(bytes: bytes, seconds: seconds, formatDescription: formatDescription,
+                                sampleCount: 1, compressedPacket: true)
     }
 
     func flush() {
         lock.lock()
         nextSeconds = nil
-        let tap = tapDecoder
         lock.unlock()
-        tap?.flush()
+        tap.flush()
     }
 
     func close() {
-        lock.lock()
-        closed = true
-        let tap = tapDecoder
-        tapDecoder = nil
-        lock.unlock()
-        tap?.close()
+        tap.close()
     }
 
     func tapBuffers(for packet: UnsafeMutablePointer<AVPacket>, produced: [CMSampleBuffer]) -> [CMSampleBuffer] {
-        lock.lock()
-        if tapDecoder == nil, !tapOpenFailed, !closed {
-            let decoder = AudioDecoder()
-            if (try? decoder.open(stream: stream)) != nil { tapDecoder = decoder } else { tapOpenFailed = true }
-        }
-        let tap = tapDecoder
-        lock.unlock()
-        return tap?.decode(packet: packet) ?? []
+        tap.buffers(for: packet)
     }
 }
