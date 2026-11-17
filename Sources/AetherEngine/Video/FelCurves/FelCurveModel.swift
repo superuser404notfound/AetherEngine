@@ -60,12 +60,19 @@ struct FelNlq: Equatable, Sendable {
     var vdrInMax: Int64
     var shift: Int64
 
+    /// Saturating: a crafted RPU can carry parameters whose product overflows Int64 (audit GPU-202).
     func residual(elCode: Int) -> Int32 {
         let r = Int64(elCode) - Int64(offset)
         if r == 0 { return 0 }
-        var mag = ((2 * r.magnitude.asInt64 - 1) * scale + 2 * threshold) >> (shift + 1)
+        let steps = 2 * r.magnitude.asInt64 - 1
+        let (product, productOverflow) = steps.multipliedReportingOverflow(by: scale)
+        let (sum, sumOverflow) = (productOverflow ? (scale < 0 ? Int64.min : Int64.max) : product)
+            .addingReportingOverflow(2 &* threshold)
+        let total = sumOverflow ? (threshold < 0 ? Int64.min : Int64.max) : sum
+        var mag = total >> (shift + 1)
         if vdrInMax > 0, mag > vdrInMax { mag = vdrInMax }
         if mag < 0 { mag = 0 }
+        mag = min(mag, Int64(Int32.max))
         return Int32(r < 0 ? -mag : mag)
     }
 
@@ -115,7 +122,11 @@ struct FelRpuInfo: Sendable {
         if residualOn, isFEL, mapping.pointee.nlq_method_idc == 0, denom >= vdrBits, elBits <= 12,
            let nlq = mapping.pointee.nlq {
             let shift = Int64(denom - vdrBits)
-            func fixed(_ int: UInt64, _ frac: UInt64) -> Int64 { (Int64(clamping: int) << Int64(denom)) + Int64(clamping: frac) }
+            // Out of range reads as -1, which fails the checks below the way the composer drops such a component.
+            func fixed(_ int: UInt64, _ frac: UInt64) -> Int64 {
+                guard int <= UInt64(Int32.max), frac < UInt64(1) << UInt64(denom) else { return -1 }
+                return (Int64(int) << Int64(denom)) + Int64(frac)
+            }
             let n = nlq.pointee
             let offsets = [n.nlq_offset.0, n.nlq_offset.1, n.nlq_offset.2]
             let slopes = [fixed(n.linear_deadzone_slope_int.0, n.linear_deadzone_slope.0),
@@ -131,7 +142,14 @@ struct FelRpuInfo: Sendable {
                 FelNlq(offset: Int32(offsets[$0]), scale: slopes[$0], threshold: thresholds[$0],
                        vdrInMax: maxima[$0] >> shift, shift: shift)
             }
-            if params.allSatisfy({ $0.scale > 0 }) { info.nlq = params }
+            // The composer's ranges (DoviFelComposer.parseNlqParams): a ceiling of 0 contributes nothing, so
+            // dropping the residual is exact.
+            let limit = Int64(Int32.max)
+            let usable = params.allSatisfy {
+                $0.scale > 0 && $0.scale <= limit && $0.threshold >= 0 && $0.threshold <= limit
+                    && $0.vdrInMax > 0 && $0.vdrInMax <= limit
+            }
+            if usable { info.nlq = params }
         }
         return info
     }
