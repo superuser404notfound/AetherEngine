@@ -51,7 +51,7 @@ struct BackgroundDecisionWaitsForLoadTests {
 
     private static func installPolicy(on engine: AetherEngine) -> PolicyRuns {
         let runs = PolicyRuns()
-        engine.owedBackgroundPolicyForTesting = { engine in
+        engine.backgroundPolicyForTesting = { engine in
             runs.states.append(engine.state)
             engine.releaseVideoPipelineForBackground()
         }
@@ -143,7 +143,7 @@ struct BackgroundDecisionWaitsForLoadTests {
         let engine = try AetherEngine()
         defer { engine.stop() }
         var actions: [AetherEngine.BackgroundAction] = []
-        engine.owedBackgroundPolicyForTesting = { engine in
+        engine.backgroundPolicyForTesting = { engine in
             let action = AetherEngine.backgroundAction(
                 isAudioBackend: false, hasSoftwareHost: false, softwareHostHasAudio: false,
                 keepVideoAlive: false, pipActive: false, state: engine.state,

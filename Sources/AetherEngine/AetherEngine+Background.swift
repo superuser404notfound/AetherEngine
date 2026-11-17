@@ -30,7 +30,7 @@ extension AetherEngine {
             Task { @MainActor in
                 guard let self = self else { return }
                 self.noteDidEnterBackground()
-                await self.applyBackgroundPolicy()
+                await self.runBackgroundDecision(.enteredBackground)
             }
         }
         retainLifecycleObserver(bgObserver)
@@ -220,6 +220,9 @@ extension AetherEngine {
 
     func beginLoadInFlight(_ generation: UInt64) {
         loadInFlightGeneration = generation
+        // Audit LIF-201: a load that runs in the background (next-episode autoplay, a playlist advance)
+        // settles into a state nothing has judged yet, paused included. It owes the decision.
+        if isBackgrounded { backgroundActionOwed = true }
     }
 
     /// Called from the load's own exit, which is the settle point a state it passes through is not.
@@ -251,9 +254,7 @@ extension AetherEngine {
     /// the wedge-safe teardown is due. Through the owed funnel, so a load or seek in flight in the
     /// window is torn down once it settles instead of never.
     func settleBackgroundDecisionAfterPictureInPictureClosed() {
-        guard isBackgrounded, !audioAVPlayerActive, audioHost == nil, softwareHost == nil else { return }
-        backgroundActionOwed = true
-        settleOwedBackgroundAction()
+        requestBackgroundDecision(.pictureInPictureClosed)
     }
 
     /// Called from the `state` didSet and from a load's exit. A decision owed since the app went to
@@ -267,17 +268,141 @@ extension AetherEngine {
             + "retained paused session resuming, AE#870; state=\(state)); applying the background "
             + "policy now (audit CORE-2)",
             category: .engine)
-        Task { @MainActor [weak self] in await self?.runOwedBackgroundPolicy() }
+        Task { @MainActor [weak self] in await self?.runBackgroundDecision(.owedDecisionSettled) }
     }
 
-    private func runOwedBackgroundPolicy() async {
-        if let policy = owedBackgroundPolicyForTesting {
-            await policy(self)
+    // MARK: One background decision (audit LIF-R201)
+
+    /// What asks for a background decision. Only the grace-window expiries change the answer: they
+    /// perform the action instead of deferring it a second time.
+    enum BackgroundTrigger: Equatable, Sendable {
+        case enteredBackground
+        /// A load or seek that owed the decision settled (CORE-2, LIF-101, AE#870).
+        case owedDecisionSettled
+        /// A pause while backgrounded, from `pause()` or from the player itself (LIF-201, LIF-202).
+        case paused
+        /// tvOS: the PiP window closed while backgrounded (LIF-105).
+        case pictureInPictureClosed
+        /// #127: the grace window ran out.
+        case graceWindowExpired
+        /// #127: the system reclaimed the grace assertion early. Nothing can wait any more.
+        case graceAssertionReclaimed
+    }
+
+    /// Everything a background decision reads, so the whole policy is one pure function.
+    struct BackgroundDecisionInputs: Equatable, Sendable {
+        var isTV = false
+        var isBackgrounded = true
+        var loadInFlight = false
+        var state: PlaybackState = .playing
+        /// The background teardown already ran and nothing reloaded since (`needsForegroundVideoRestore`).
+        var pipelineReleased = false
+        var isAudioBackend = false
+        var hasSoftwareHost = false
+        var softwareHostHasAudio = false
+        var pipActive = false
+        var backgroundPlaybackEnabled = true
+        var retainsPausedVideoPipeline = false
+        var graceSeconds: Double = 15
+    }
+
+    enum BackgroundDecision: Equatable, Sendable {
+        /// Not backgrounded, or nothing is left to release.
+        case none
+        /// A load or seek is still deciding the state; settled from its exit.
+        case owe
+        case step(BackgroundStep)
+    }
+
+    nonisolated static func backgroundKeepsVideoAlive(_ i: BackgroundDecisionInputs) -> Bool {
+        i.isTV
+            ? shouldKeepVideoAliveTV(enabled: i.backgroundPlaybackEnabled, pipActive: i.pipActive)
+            : shouldKeepVideoAlive(enabled: i.backgroundPlaybackEnabled, pipActive: i.pipActive, state: i.state)
+    }
+
+    /// The one background decision every entry point asks (audit LIF-R201). Before it, `pause()`
+    /// carried its own copy, which skipped the owed rule and tore a load down under itself (LIF-201),
+    /// and a pause the player took on its own reached no copy at all (LIF-202).
+    nonisolated static func backgroundDecision(
+        _ i: BackgroundDecisionInputs, trigger: BackgroundTrigger
+    ) -> BackgroundDecision {
+        guard i.isBackgrounded else { return .none }
+        if trigger != .graceAssertionReclaimed,
+           !backgroundDecisionSettles(state: i.state, loadInFlight: i.loadInFlight) { return .owe }
+        if i.pipelineReleased { return .none }
+        let action = backgroundAction(
+            isAudioBackend: i.isAudioBackend,
+            hasSoftwareHost: i.hasSoftwareHost,
+            softwareHostHasAudio: i.softwareHostHasAudio,
+            keepVideoAlive: backgroundKeepsVideoAlive(i),
+            pipActive: i.pipActive,
+            state: i.state,
+            retainPausedVideoPipeline: i.retainsPausedVideoPipeline)
+        switch trigger {
+        case .graceWindowExpired, .graceAssertionReclaimed:
+            return .step(.perform(action))
+        default:
+            return .step(backgroundStep(
+                action: action, state: i.state, supportsGraceWindow: !i.isTV, graceSeconds: i.graceSeconds))
+        }
+    }
+
+    var backgroundDecisionInputs: BackgroundDecisionInputs {
+        #if os(tvOS)
+        let isTV = true
+        #else
+        let isTV = false
+        #endif
+        return BackgroundDecisionInputs(
+            isTV: isTV,
+            isBackgrounded: isBackgrounded,
+            loadInFlight: loadInFlight,
+            state: state,
+            pipelineReleased: backgroundTeardownSelection != nil,
+            isAudioBackend: audioAVPlayerActive || audioHost != nil,
+            hasSoftwareHost: softwareHost != nil,
+            softwareHostHasAudio: softwareHost?.deliversAudio == true,
+            pipActive: pictureInPictureActive,
+            backgroundPlaybackEnabled: backgroundPlaybackEnabled,
+            retainsPausedVideoPipeline: retainsVideoPipelineWhenBackgrounded,
+            graceSeconds: backgroundTeardownGraceSeconds)
+    }
+
+    /// Whether a state change is a pause that owes the background decision. Whoever paused: the
+    /// engine's `pause()`, AVPlayer on a removed route, AVKit on its own controls (LIF-202).
+    nonisolated static func stateChangeRequestsBackgroundDecision(from: PlaybackState, to: PlaybackState) -> Bool {
+        from == .playing && to == .paused
+    }
+
+    /// The synchronous entry. A decision that has to wait for a load or seek is owed right here, so
+    /// the load's own exit settles it (LIF-101); everything else is decided on the next main-actor turn.
+    func requestBackgroundDecision(_ trigger: BackgroundTrigger) {
+        guard isBackgrounded else { return }
+        if backgroundDecisionMustWait {
+            backgroundActionOwed = true
             return
         }
-        #if os(iOS) || os(tvOS)
-        await applyBackgroundPolicy()
-        #endif
+        Task { @MainActor [weak self] in await self?.runBackgroundDecision(trigger) }
+    }
+
+    func runBackgroundDecision(_ trigger: BackgroundTrigger) async {
+        let inputs = backgroundDecisionInputs
+        let decision = Self.backgroundDecision(inputs, trigger: trigger)
+        backgroundDecisionObserverForTesting?(trigger, decision)
+        switch decision {
+        case .none:
+            return
+        case .owe:
+            backgroundActionOwed = true
+        case .step(let step):
+            if let policy = backgroundPolicyForTesting {
+                await policy(self)
+                return
+            }
+            #if os(iOS) || os(tvOS)
+            await performBackgroundStep(step, trigger: trigger, inputs: inputs)
+            #endif
+        }
     }
 
     /// The synchronous half of the background teardown. stopInternal's replaceCurrentItem(nil) +
@@ -326,52 +451,20 @@ extension AetherEngine {
     }
 
     #if os(iOS) || os(tvOS)
-    /// What didEnterBackground does with the running session. Runs again when a load or seek that
-    /// was in flight at that moment settles while the app is still in the background (audit CORE-2).
-    private func applyBackgroundPolicy() async {
-        guard isBackgrounded else { return }
-        // Audit LIF-101: a load in flight settles this from its own exit (`endLoadInFlight`).
-        if backgroundDecisionMustWait {
-            backgroundActionOwed = true
-            return
-        }
-        #if os(iOS)
-        // Keep the video pipeline alive for PiP / background audio while the app stays running.
-        // Wedge-safe: a pause while backgrounded tears down via pause(), so nothing crosses
-        // an idle suspension.
-        let keepAlive = Self.shouldKeepVideoAlive(enabled: backgroundPlaybackEnabled,
-                                                  pipActive: pictureInPictureActive,
-                                                  state: state)
-        let supportsGrace = true
-        #else
-        // tvOS: only an active PiP window defers the wedge-safe teardown (the system keeps the app
-        // running while its PiP window lives); no grace window, no background-audio case. The
-        // pictureInPictureActive didSet tears down the moment PiP ends while still backgrounded.
-        let keepAlive = Self.shouldKeepVideoAliveTV(enabled: backgroundPlaybackEnabled,
-                                                    pipActive: pictureInPictureActive)
-        let supportsGrace = false
-        #endif
-        let action = Self.backgroundAction(
-            isAudioBackend: audioAVPlayerActive || audioHost != nil,
-            hasSoftwareHost: softwareHost != nil,
-            softwareHostHasAudio: softwareHost?.deliversAudio == true,
-            keepVideoAlive: keepAlive,
-            pipActive: pictureInPictureActive,
-            state: state,
-            retainPausedVideoPipeline: retainsVideoPipelineWhenBackgrounded
-        )
-        switch Self.backgroundStep(
-            action: action,
-            state: state,
-            supportsGraceWindow: supportsGrace,
-            graceSeconds: backgroundTeardownGraceSeconds
-        ) {
+    private func performBackgroundStep(
+        _ step: BackgroundStep, trigger: BackgroundTrigger, inputs: BackgroundDecisionInputs
+    ) async {
+        switch step {
         case .perform(.doNothing):
-            return
+            if trigger == .graceWindowExpired {
+                EngineLog.emit("[AetherEngine] background grace window expired, session now kept alive (#127)", category: .engine)
+            }
         case .perform(.enterSoftwareAudioOnly):
             softwareHost?.enterBackgroundAudioOnly()
         case .perform(.teardownVideo):
-            if keepAlive {
+            if trigger == .graceWindowExpired {
+                EngineLog.emit("[AetherEngine] background grace window expired, tearing down paused pipeline (#127)", category: .engine)
+            } else if inputs.hasSoftwareHost && Self.backgroundKeepsVideoAlive(inputs) {
                 EngineLog.emit("[AetherEngine] AE#739 the software host renders no audio, releasing it "
                                + "instead of entering background audio-only", category: .engine)
             }
@@ -404,13 +497,16 @@ extension AetherEngine {
     func scheduleBackgroundGraceTeardown(afterSeconds seconds: Double) {
         guard backgroundGraceTask == nil else { return }  // window already armed
         let app = UIApplication.shared
+        // The handler needs the identifier the call returns, so it reads it from a box filled after.
+        let identity = GraceAssertionIdentity()
         let assertion = app.beginBackgroundTask(withName: "AetherEngine.bgGraceWindow") { [weak self] in
             // System reclaimed the window early. UIKit calls this on the main thread; the synchronous
             // stopInternal releases the decode session, the 3.5 s socket drain is skipped (no time).
             MainActor.assumeIsolated {
-                self?.expireBackgroundGraceNow()
+                self?.expireBackgroundGraceNow(identity.value)
             }
         }
+        identity.value = assertion
         guard assertion != .invalid else {
             // Background execution unavailable: fall back to the immediate teardown.
             Task { @MainActor in await self.teardownVideoForBackground() }
@@ -424,75 +520,56 @@ extension AetherEngine {
         backgroundGraceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(window * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
-            await self.fireBackgroundGraceTeardown()
+            await self.fireBackgroundGraceTeardown(assertion)
         }
+    }
+
+    @MainActor
+    private final class GraceAssertionIdentity {
+        var value: UIBackgroundTaskIdentifier = .invalid
     }
 
     /// Grace expiry: re-evaluate the background action (PiP can start and lock-screen play can resume
-    /// mid-window) and perform it without further deferral.
-    private func fireBackgroundGraceTeardown() async {
+    /// mid-window) and perform it without further deferral. A load the host started inside the window
+    /// gets the decision at its exit (audit LIF-101).
+    ///
+    /// Audit LIF-206: ends only the assertion this window armed. The teardown drains for 3.5 s, and a
+    /// foreground return plus a new background trip inside that drain arms a second window whose
+    /// assertion this one must not end.
+    private func fireBackgroundGraceTeardown(_ assertion: UIBackgroundTaskIdentifier) async {
         backgroundGraceTask = nil
-        if isBackgrounded, backgroundDecisionMustWait {
-            // Audit LIF-101: a load the host started inside the window gets the decision at its exit.
-            backgroundActionOwed = true
-        } else if isBackgrounded {
-            switch currentBackgroundAction() {
-            case .teardownVideo:
-                EngineLog.emit("[AetherEngine] background grace window expired, tearing down paused pipeline (#127)", category: .engine)
-                await teardownVideoForBackground()
-            case .enterSoftwareAudioOnly:
-                softwareHost?.enterBackgroundAudioOnly()
-            case .doNothing:
-                EngineLog.emit("[AetherEngine] background grace window expired, session now kept alive (#127)", category: .engine)
-            }
-        }
-        endBackgroundGraceAssertion()
+        await runBackgroundDecision(.graceWindowExpired)
+        endBackgroundGraceAssertion(assertion)
     }
 
     /// Expiration-handler backstop: synchronous minimal teardown before the assertion is force-ended.
-    private func expireBackgroundGraceNow() {
+    private func expireBackgroundGraceNow(_ assertion: UIBackgroundTaskIdentifier) {
+        guard backgroundGraceAssertion == assertion, assertion != .invalid else { return }
         backgroundGraceTask?.cancel()
         backgroundGraceTask = nil
-        if isBackgrounded, currentBackgroundAction() == .teardownVideo {
+        if Self.backgroundDecision(backgroundDecisionInputs, trigger: .graceAssertionReclaimed)
+            == .step(.perform(.teardownVideo)) {
             EngineLog.emit("[AetherEngine] background grace assertion expired early, synchronous teardown (#127)", category: .engine)
             captureBackgroundTeardownSelection()   // #357, as in teardownVideoForBackground
             stopInternal(resetDisplayCriteria: false, keepNativeHost: true, keepCustomReader: true)
             releaseSubtitleProxyForBackground()
             state = .paused
         }
-        endBackgroundGraceAssertion()
+        endBackgroundGraceAssertion(assertion)
     }
 
     private func cancelBackgroundGraceWindow() {
         guard backgroundGraceTask != nil || backgroundGraceAssertion != .invalid else { return }
         backgroundGraceTask?.cancel()
         backgroundGraceTask = nil
-        endBackgroundGraceAssertion()
+        endBackgroundGraceAssertion(backgroundGraceAssertion)
         EngineLog.emit("[AetherEngine] background grace window cancelled, session survives the app switch (#127)", category: .engine)
     }
 
-    private func endBackgroundGraceAssertion() {
-        guard backgroundGraceAssertion != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(backgroundGraceAssertion)
+    private func endBackgroundGraceAssertion(_ assertion: UIBackgroundTaskIdentifier) {
+        guard assertion != .invalid, backgroundGraceAssertion == assertion else { return }
+        UIApplication.shared.endBackgroundTask(assertion)
         backgroundGraceAssertion = .invalid
-    }
-
-    /// Live recomputation of the keepalive + background action for grace-window re-evaluation.
-    private func currentBackgroundAction() -> BackgroundAction {
-        let keepAlive = Self.shouldKeepVideoAlive(
-            enabled: backgroundPlaybackEnabled,
-            pipActive: pictureInPictureActive,
-            state: state
-        )
-        return Self.backgroundAction(
-            isAudioBackend: audioAVPlayerActive || audioHost != nil,
-            hasSoftwareHost: softwareHost != nil,
-            softwareHostHasAudio: softwareHost?.deliversAudio == true,
-            keepVideoAlive: keepAlive,
-            pipActive: pictureInPictureActive,
-            state: state,
-            retainPausedVideoPipeline: retainsVideoPipelineWhenBackgrounded
-        )
     }
     #endif
     #endif

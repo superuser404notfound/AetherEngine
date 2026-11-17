@@ -72,6 +72,9 @@ public final class AetherEngine: ObservableObject {
                 backgroundActionOwed = true
             }
             settleOwedBackgroundAction()
+            if Self.stateChangeRequestsBackgroundDecision(from: oldValue, to: state) {
+                requestBackgroundDecision(.paused)   // audit LIF-202
+            }
             // A renderer path has no player for the Atmos output activator to observe; it follows this.
             atmosOutputActivator?.refresh()
             if let logTag { EngineLog.emit("[AetherEngine:\(logTag)] state=\(state)", category: .engine) }
@@ -1325,8 +1328,11 @@ public final class AetherEngine: ObservableObject {
     }
     /// AE#1061: picks parked until the load in flight returns. See `awaitLoadInFlightSettled`.
     var loadSettleWaiters: [CheckedContinuation<Void, Never>] = []
-    /// Test seam for the owed background decision on a platform without an app lifecycle.
-    var owedBackgroundPolicyForTesting: (@MainActor (AetherEngine) async -> Void)?
+    /// Test seam: runs in place of the platform's execution of every background decision that has a
+    /// step to take, on a platform without an app lifecycle.
+    var backgroundPolicyForTesting: (@MainActor (AetherEngine) async -> Void)?
+    /// Test seam: sees every decision the background funnel makes, with what asked for it.
+    var backgroundDecisionObserverForTesting: (@MainActor (BackgroundTrigger, BackgroundDecision) -> Void)?
     #if os(iOS)
     /// #127: pending grace-window teardown (sleep task + the background-task assertion holding it).
     var backgroundGraceTask: Task<Void, Never>?
@@ -6725,28 +6731,14 @@ public final class AetherEngine: ObservableObject {
         userPauseCount &+= 1
         activeTransportHost?.pause()
         isBuffering = false
+        // Paused while backgrounded: the background funnel decides (audit LIF-R201). From `.playing`
+        // the `state` didSet asks it; from any other state (a load or seek in flight, an AVPlayer that
+        // already paused itself) this does, so a pause during a load is owed to the load's exit (LIF-201).
         if state == .playing {
             state = .paused
+        } else {
+            requestBackgroundDecision(.paused)
         }
-        #if os(iOS)
-        // Paused while backgrounded with no PiP: the app will idle-suspend, so release the video pipeline
-        // (wedge-safe, mirrors the unconditional background teardown). Audio backends are already spared.
-        // #127: same grace window as the didEnterBackground path, so pause-after-background quick switches
-        // also skip the rebuild.
-        if isBackgrounded && !retainsVideoPipelineWhenBackgrounded && !pictureInPictureActive && !audioAVPlayerActive && audioHost == nil && softwareHost == nil {
-            switch Self.backgroundStep(
-                action: .teardownVideo,
-                state: state,
-                supportsGraceWindow: true,
-                graceSeconds: backgroundTeardownGraceSeconds
-            ) {
-            case .deferTeardown(let seconds):
-                scheduleBackgroundGraceTeardown(afterSeconds: seconds)
-            default:
-                Task { @MainActor in await self.teardownVideoForBackground() }
-            }
-        }
-        #endif
     }
 
     public func togglePlayPause() {

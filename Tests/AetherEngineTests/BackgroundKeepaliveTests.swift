@@ -150,7 +150,7 @@ struct BackgroundKeepaliveTests {
         let engine = try AetherEngine()
         defer { engine.stop() }
         var runs: [PlaybackState] = []
-        engine.owedBackgroundPolicyForTesting = { runs.append($0.state) }
+        engine.backgroundPolicyForTesting = { runs.append($0.state) }
         engine.retainsVideoPipelineWhenBackgrounded = retains
         engine.state = .paused
         engine.noteDidEnterBackground()
@@ -185,7 +185,7 @@ struct BackgroundKeepaliveTests {
         let engine = try AetherEngine()
         defer { engine.stop() }
         var actions: [AetherEngine.BackgroundAction] = []
-        engine.owedBackgroundPolicyForTesting = { engine in
+        engine.backgroundPolicyForTesting = { engine in
             actions.append(AetherEngine.backgroundAction(
                 isAudioBackend: false, hasSoftwareHost: software, softwareHostHasAudio: true,
                 keepVideoAlive: AetherEngine.shouldKeepVideoAlive(
