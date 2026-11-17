@@ -122,7 +122,7 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         // An option the decoder does not know stays in the dictionary: an FFmpegBuild without the patch.
         let unknown = av_dict_get(options, "x_heights", nil, 0) != nil
         av_dict_free(&options)
-        var parser = av_parser_init(Int32(AV_CODEC_ID_DTS.rawValue))
+        var parser = parserInit(AV_CODEC_ID_DTS)
         var packet = av_packet_alloc()
         var frame = av_frame_alloc()
         guard opened >= 0, !unknown, let parser, let packet, let frame else {
@@ -223,7 +223,7 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         dropPending()
         avcodec_flush_buffers(context)
         av_parser_close(parser)
-        parser = av_parser_init(Int32(AV_CODEC_ID_DTS.rawValue))!
+        parser = parserInit(AV_CODEC_ID_DTS)!
         inputFrames = 0
         priming = Self.primingFrames
         discontinuity = true
@@ -236,7 +236,7 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         releaseLent()
         try? parse(nil) { [self] in try takeFrame() }
         av_parser_close(parser)
-        parser = av_parser_init(Int32(AV_CODEC_ID_DTS.rawValue))!
+        parser = parserInit(AV_CODEC_ID_DTS)!
     }
 
     // MARK: - Decoding
