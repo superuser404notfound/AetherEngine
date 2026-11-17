@@ -5159,6 +5159,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         restorePumpQoSForUnwind()
 
+        // R-P3-2: close the exit gate before the exit reason is decided. An abort that ran first is
+        // latched by now and maps to `.segmentStall` below; one that comes later runs nothing. Retiring
+        // after the decision let a tick close the demuxer while the pump reported `.muxerFailed` or
+        // `.videoConfigurationChanged`, and the live in-place rebuild then reused the closed demuxer.
+        stopNoCutWatchdog()
+
         // AE#406: the watchdog decides off this thread, so its verdict lands while the loop is
         // parked in a read that has no upper bound of its own. The abort that lets the loop observe
         // the verdict surfaces here as a read error, and `.readError` sends a reopenable source into

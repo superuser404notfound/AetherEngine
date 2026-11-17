@@ -295,6 +295,28 @@ struct Issue406NoCutWatchdogTests {
         #expect(aborts == 1)
     }
 
+    /// R-P3-2: the pump retires the watchdog before it decides its exit reason, and reads the latch
+    /// after. The latch must survive the retirement, and a verdict that lands later must not abort.
+    @Test("the latch stays readable after retire, and a later verdict aborts nothing")
+    func latchSurvivesRetire() {
+        let w = makeWatchdog()
+        w.noteFinalize(at: t0)
+        var aborts = 0
+        #expect(w.evaluate(now: t0.addingTimeInterval(36)) != nil)
+        #expect(w.performExit { aborts += 1 })
+        w.retire()
+        #expect(w.hasLatchedExit)
+        #expect(!w.performExit { aborts += 1 })
+        #expect(aborts == 1)
+
+        let late = makeWatchdog()
+        late.noteFinalize(at: t0)
+        late.retire()
+        #expect(late.evaluate(now: t0.addingTimeInterval(36)) != nil)
+        #expect(!late.performExit { aborts += 1 })
+        #expect(aborts == 1)
+    }
+
     @Test("retire waits for an abort already running", .timeLimit(.minutes(3)))
     func retireWaitsForRunningAbort() async throws {
         let w = makeWatchdog()
