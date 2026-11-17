@@ -866,7 +866,7 @@ final class H264PictureOrderReader {
         self.context = context
         guard avcodec_parameters_to_context(context, codecParameters) >= 0 else { return nil }
         context.pointee.pkt_timebase = timeBase
-        guard let parser = av_parser_init(Int32(codecID.rawValue)) else { return nil }
+        guard let parser = parserInit(codecID) else { return nil }
         self.parser = parser
         // MP4 samples are whole access units; without this the parser hunts for start codes that
         // length-prefixed payloads do not contain.
@@ -885,7 +885,7 @@ final class H264PictureOrderReader {
     func reset() {
         guard let parser else { return }
         av_parser_close(parser)
-        self.parser = av_parser_init(Int32(codecID.rawValue))
+        self.parser = parserInit(codecID)
         self.parser?.pointee.flags |= Int32(PARSER_FLAG_COMPLETE_FRAMES)
     }
 

@@ -33,6 +33,10 @@ the public-API contract.
 
 ### Fixed
 
+- **The `av_parser_init` calls compile against FFmpeg 9 headers too.** The function takes an
+  `enum AVCodecID` there and an `int` in FFmpeg 8, and the six calls were written for the `int`. They now
+  go through one helper that compiles against either. Nothing changes with the bundled FFmpegBuild; this
+  matters to a host that links its own FFmpeg 9.
 - **Backing out of a remote HLS stream while it was still starting no longer leaves its sound playing.** A
   stop or a channel change during the engine's trust probe or subtitle-playlist fetch used to mount and play
   the old URL on the torn-down player, or over the new channel's item.

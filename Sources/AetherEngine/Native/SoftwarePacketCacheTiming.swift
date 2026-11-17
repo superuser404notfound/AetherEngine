@@ -59,7 +59,7 @@ final class SoftwarePacketCacheTiming: SoftwarePacketCacheTimingSource, @uncheck
         releaseParser()
         byteOffset = 0
         parserEpoch = token
-        parser = av_parser_init(Int32(AV_CODEC_ID_MPEG4.rawValue))
+        parser = parserInit(AV_CODEC_ID_MPEG4)
         context = avcodec_alloc_context3(nil)
         if let parser, let context {
             parser.pointee.flags |= PARSER_FLAG_USE_CODEC_TS
