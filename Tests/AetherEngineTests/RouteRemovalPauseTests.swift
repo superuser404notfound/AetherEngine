@@ -76,6 +76,21 @@ struct RouteRemovalPauseTests {
         #expect(engine.state == .playing)
     }
 
+    /// Review R-P5-2: AirPods taken out during a call left the interruption armed, so ENDED with
+    /// `shouldResume` restarted the film on the phone speaker. AVPlayer's own pause on the removal does
+    /// not reach `pause()`, so the native path disarmed nothing.
+    @Test("a route removal disarms the interruption resume on every path and in every state (review R-P5-2)",
+          arguments: [false, true], [PlaybackState.playing, .paused, .loading, .seeking, .idle])
+    func removalDisarmsInterruptionResume(software: Bool, state: PlaybackState) throws {
+        let engine = try engine(software: software, state: state)
+        defer { engine.stop() }
+        engine.resumeAfterInterruption = true
+        engine.playDeferredByInterruption = true
+        engine.noteOutputRouteRemoved()
+        #expect(!engine.resumeAfterInterruption)
+        #expect(!engine.playDeferredByInterruption)
+    }
+
     @Test("a route removal during a seek still pauses")
     func pausesDuringSeek() throws {
         let engine = try engine(state: .seeking)

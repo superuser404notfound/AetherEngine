@@ -3250,6 +3250,15 @@ extension AetherEngine {
                 // sourceTime re-folds on next $renderedTime tick; keeping it there tracks the rendered picture, not the optimistic clock (#49).
                 // AE#422: read off-main before building the line (see `avPlayerBufferAheadSeconds`).
                 let avBufAhead = await self.avPlayerBufferAheadSeconds()
+                // Review R-P3-1: a zap inside that read owns the placement check and the loaded ranges
+                // below; this one would cancel its check and measure the old session against them.
+                guard self.loadGeneration == generation else {
+                    EngineLog.emit(
+                        "[AetherEngine] VOD shift relay superseded during its buffer read "
+                        + "(shift \(String(format: "%.3f", seconds))s); nothing applied after it",
+                        category: .session)
+                    return
+                }
                 EngineLog.emit(
                     "[AetherEngine] VOD shift published: \(String(format: "%.3f", seconds))s "
                     + "(prev \(String(format: "%.3f", prevShift))s, delta \(String(format: "%.3f", delta))s, "

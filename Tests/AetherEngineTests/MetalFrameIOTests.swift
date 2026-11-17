@@ -82,4 +82,44 @@ struct MetalFrameIOTests {
         #expect(try cache.resolve(device: device) { compiles.bump(); return 8 } == 7)
         #expect(compiles.count == 2)
     }
+
+    private final class FakeClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var instant = ContinuousClock.now
+        var now: ContinuousClock.Instant { lock.lock(); defer { lock.unlock() }; return instant }
+        func advance(_ by: Duration) { lock.lock(); instant = instant.advanced(by: by); lock.unlock() }
+    }
+
+    /// Review R-P4-1: a failure kept for the life of the process turned a transient compiler-service
+    /// failure (an MTLCompilerService XPC interruption under memory pressure) into no tone mapping and
+    /// no upscaling until the app relaunched. A failure now expires; inside the interval it still fails
+    /// fast, so GPU-R202's no-recompile-per-stage-build holds.
+    @Test("a kept failure expires after the retry interval and the next caller compiles again (review R-P4-1)")
+    func keptFailureExpires() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let clock = FakeClock()
+        let cache = MetalPipelineCache<Int>(failureRetryInterval: .seconds(60), now: { clock.now })
+        let compiles = Counter()
+        #expect(throws: BuildFailed.self) { try cache.resolve(device: device) { compiles.bump(); throw BuildFailed() } }
+        clock.advance(.seconds(59))
+        #expect(throws: BuildFailed.self) { try cache.resolve(device: device) { compiles.bump(); return 1 } }
+        #expect(compiles.count == 1)
+        clock.advance(.seconds(1))
+        #expect(try cache.resolve(device: device) { compiles.bump(); return 2 } == 2)
+        clock.advance(.seconds(3600))
+        #expect(try cache.resolve(device: device) { compiles.bump(); return 3 } == 2, "a success is kept for good")
+        #expect(compiles.count == 2)
+    }
+
+    @Test("without a retry interval a failure is kept for the process, as the FEL composer wants (review R-P4-1)")
+    func failureWithoutRetryIntervalIsKept() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let clock = FakeClock()
+        let cache = MetalPipelineCache<Int>(failureRetryInterval: nil, now: { clock.now })
+        let compiles = Counter()
+        #expect(throws: BuildFailed.self) { try cache.resolve(device: device) { compiles.bump(); throw BuildFailed() } }
+        clock.advance(.seconds(86_400))
+        #expect(throws: BuildFailed.self) { try cache.resolve(device: device) { compiles.bump(); return 1 } }
+        #expect(compiles.count == 1)
+    }
 }

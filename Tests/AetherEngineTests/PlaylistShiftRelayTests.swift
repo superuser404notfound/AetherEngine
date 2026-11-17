@@ -33,10 +33,22 @@ struct PlaylistShiftRelayTests {
 
         engine.stop()
         engine.clock.currentTime = 42
+        // Review R-P3-1: the successor's own placement check, which the stale relay used to cancel when it
+        // measured the old session against the new item's loaded ranges.
+        let successorsCheck = Task<Void, Never> { @MainActor in
+            do { try await Task.sleep(for: .seconds(600)) } catch { return }
+        }
+        defer { successorsCheck.cancel() }
+        engine.placementVerificationTask = successorsCheck
         gate.signal()
         gateOpen = true
-        try await waitFor { !log.matching("VOD shift published: 7123.250s").isEmpty }
+        try await waitFor {
+            !log.matching("VOD shift published: 7123.250s").isEmpty
+                || !log.matching("VOD shift relay superseded").isEmpty
+        }
 
         #expect(engine.clock.currentTime == 42)
+        #expect(!successorsCheck.isCancelled, "the superseded relay must not touch the successor's placement check")
+        #expect(engine.placementVerificationTask == successorsCheck)
     }
 }
