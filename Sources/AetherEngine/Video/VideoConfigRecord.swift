@@ -232,23 +232,7 @@ enum VideoConfigRecord {
     /// one with a leading `trailing_zero_8bits`), so they are trimmed off the preceding NAL. A
     /// parameter set never ends in `0x00`: its last byte carries the rbsp_stop_one_bit.
     static func splitAnnexBNALs(_ bytes: [UInt8]) -> [[UInt8]] {
-        var starts: [Int] = []
-        var i = 0
-        while i + 3 <= bytes.count {
-            if bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 1 {
-                starts.append(i + 3)
-                i += 3
-            } else {
-                i += 1
-            }
-        }
-        var out: [[UInt8]] = []
-        for (idx, start) in starts.enumerated() {
-            var end = idx + 1 < starts.count ? starts[idx + 1] - 3 : bytes.count
-            while end > start, bytes[end - 1] == 0 { end -= 1 }
-            if end > start { out.append(Array(bytes[start..<end])) }
-        }
-        return out
+        AnnexB.nalRanges(bytes).map { Array(bytes[$0]) }
     }
 
     /// First payload of a top-level-or-nested box with this four-character code. The probe header is

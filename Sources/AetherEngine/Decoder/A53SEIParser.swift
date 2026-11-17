@@ -104,22 +104,7 @@ enum A53SEIParser {
     ) {
         switch framing {
         case .annexB:
-            var i = 0
-            var nalStart = -1
-            while i + 3 <= size {
-                if data[i] == 0x00, data[i + 1] == 0x00, data[i + 2] == 0x01 {
-                    if nalStart >= 0 {
-                        var end = i
-                        if end > nalStart, data[end - 1] == 0x00 { end -= 1 }   // 4-byte start code
-                        body(data + nalStart, end - nalStart)
-                    }
-                    nalStart = i + 3
-                    i += 3
-                } else {
-                    i += data[i + 2] > 0x01 ? 3 : 1   // no start code can begin within the next 3 bytes
-                }
-            }
-            if nalStart >= 0, nalStart < size { body(data + nalStart, size - nalStart) }
+            AnnexB.forEachNALRange(data, count: size) { body(data + $0.lowerBound, $0.count) }
         case .lengthPrefixed(let lenSize):
             var i = 0
             while i + lenSize <= size {

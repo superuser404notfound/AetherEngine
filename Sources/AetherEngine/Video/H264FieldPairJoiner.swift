@@ -170,16 +170,12 @@ final class H264FieldPairJoiner {
             }
             return nil
         case .annexB:
-            var i = 0
-            while i + 3 < bytes.count {
-                if bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 1 {
-                    let start = i + 3
-                    let type = bytes[start] & 0x1f
-                    if type == 1 || type == 5 { return head(start, bytes.count) }
-                    i = start
-                } else {
-                    i += 1
-                }
+            let ranges = bytes.baseAddress.map { base in
+                AnnexB.nalRanges(UnsafeRawBufferPointer(start: base, count: bytes.count))
+            } ?? []
+            for range in ranges {
+                let type = bytes[range.lowerBound] & 0x1f
+                if type == 1 || type == 5 { return head(range.lowerBound, range.upperBound) }
             }
             return nil
         }

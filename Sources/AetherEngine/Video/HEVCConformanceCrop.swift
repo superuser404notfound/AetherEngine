@@ -70,7 +70,7 @@ enum HEVCConformanceCrop {
     /// An Annex-B buffer with the padding crop removed from every SPS it holds, or nil when it holds
     /// none of that geometry. Start codes come out four bytes long.
     static func removingUHDPaddingCrop(fromAnnexB bytes: UnsafeRawBufferPointer) -> [UInt8]? {
-        let ranges = AnnexBSampleConverter.nalRanges(bytes)
+        let ranges = AnnexB.nalRanges(bytes)
         return removingUHDPaddingCrop(fromAnnexB: bytes, ranges: ranges)
     }
 

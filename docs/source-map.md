@@ -232,6 +232,7 @@ Notes:
 | --- | --- |
 | `AVIOProvider.swift` | Internal seam over a custom-AVIO byte source. `AVIOReader` and `CustomIOReaderBridge` both plug into the Demuxer through it, including the bounded-seek read deadline and the resolved byte size behind the byte-estimate seek fallback (#112). |
 | `AVIOReader.swift` | URLSession-backed `avio_alloc_context` with three modes. See note. |
+| `AVIOReader+ForwardOnly.swift` | The forward-only half of `AVIOReader`: the sequential read, the background streaming download and its URLSession delegate. |
 | `ResidentSpan.swift` | Bytes already in memory that a read can be served from without a round trip: the open window kept across a parse seek, and the speculative tail fetch. Not a cache (no fetch on miss, no eviction, no block alignment); it either covers an offset or it does not (#281). |
 | `RangeHonestyProbe.swift` | Checks a ranged reconnect against bytes already held. The request starts a few KB early, and delivery waits until those KB match. A mismatch latches the reader into failing reads and records the origin, so the session fails as `sourceFabricatesRanges` instead of playing another chunk's bytes (AE#958). |
 | `ContentRange.swift` | One parser for a `Content-Range: bytes first-last/total` value, used by every ranged reader so they agree on case, order and the total (audit DMX-R202). |
@@ -525,6 +526,7 @@ Notes:
 | `HLSVideoEngine+SegmentPlanning.swift` | Native path: keyframe / uniform segment plans, extradata and AAC fixups. |
 | `HLSVideoEngine+LiveReopen.swift` | Native path: live source-loss recovery (capped-backoff reopen on the same timeline), and the VOD backpressure-wedge re-anchor plus consumer re-engage nudge. The nudge re-reads the rendered position at nudge time, so the zero-tolerance seek never lands behind the on-screen frame (#115). |
 | `CodecRoutePolicy.swift` | Native path: DV / HDR / codec routing decisions (track types, CODECS strings, VIDEO-RANGE). |
+| `AnnexB.swift` | The one Annex-B NAL scanner (3- and 4-byte start codes, leading bytes skipped, trailing zeros trimmed, empty NALs dropped). Every NAL walker goes through it. |
 | `AnnexBSampleConverter.swift` | Native path: the session muxer rewrites Annex-B HEVC samples to length-prefixed NALs, keeping in-band VPS/SPS/PPS. movenc's own conversion under `hvc1` drops them, so a stream that sends a new PPS mid-title stopped decoding at the change (PR #703). |
 | `HEVCConformanceCrop.swift` | tvOS native path: clears the SPS conformance window of HEVC coded 3840x2176 and cropped to 2160, in the init segment and in-band, because an Apple TV restarts on it; the muxer crops with `clap` instead (PR #1072). |
 | `FelCurves/` | `DolbyVisionFelCurves` trait. See note. |
@@ -542,6 +544,8 @@ Notes:
 | `VideoSegmentProvider.swift` | Native path: segment provider facing the playlist (live sliding window, restart heuristics, sparse-hole waits gated on producer coverage, #129). |
 | `MarchRateTracker.swift` | Native path: the producer's march rate from segment completions, cut at restarts and backpressure parks. Feeds the provider's wait-or-restart decision for a short forward jump (#932). |
 | `HLSSegmentProducer.swift` | Native path: pump loop that reads from the Demuxer, feeds `MP4SegmentMuxer`, and cuts fragments keyframe-gated in decode order so the IRAP opens its segment (#92). Also SSAI program-switch detection and the no-cut watchdog. |
+| `HLSSegmentProducer+LiveReplay.swift` | The producer's live replay buffer: commit, rollback, forward and free of buffered packets, and the replay sample. |
+| `HLSSegmentProducer+MoovPrime.swift` | AE#222 audio moov prime: the bounded forward scan and seek hunt for one audio frame on the `.muxerFailed` exit. |
 | `VODSegmentCutter.swift` | Native path: decode-order, keyframe-gated VOD segment cutter (the IRAP opens its segment, #92). |
 | `PlanBoundaryAxis.swift` | Which axis a container stamps its index entries on, and so which packet timestamp the cutter gate may compare with a plan boundary: decode for a mov/mp4 sample table, presentation for a Matroska Cue (#358, AE#561). |
 | `VideoConfigRecord.swift` | The `hvcC` / `avcC` config record and the framing question that hangs off it (#365). See note. |

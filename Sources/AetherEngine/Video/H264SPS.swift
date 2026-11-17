@@ -140,29 +140,19 @@ enum H264SPS {
         return (width, height, frameMbsOnly, signature, slice)
     }
 
+    private static func nalRanges(_ data: UnsafeBufferPointer<UInt8>) -> [Range<Int>] {
+        AnnexB.nalRanges(UnsafeRawBufferPointer(data))
+    }
+
     /// Scan Annex-B for the first SPS (NAL type 7) and PPS (NAL type 8), returned with their 1-byte NAL header.
     static func extractSPSandPPS(fromAnnexB data: UnsafeBufferPointer<UInt8>) -> (sps: [UInt8], pps: [UInt8])? {
         var sps: [UInt8]?
         var pps: [UInt8]?
-        var i = 0
-        let n = data.count
-        func startCode(at p: Int) -> Int {
-            if p + 3 < n, data[p] == 0, data[p+1] == 0, data[p+2] == 0, data[p+3] == 1 { return 4 }
-            if p + 2 < n, data[p] == 0, data[p+1] == 0, data[p+2] == 1 { return 3 }
-            return 0
-        }
-        while i < n {
-            let sc = startCode(at: i)
-            if sc == 0 { i += 1; continue }
-            let start = i + sc
-            guard start < n else { break }
-            var j = start
-            while j < n, startCode(at: j) == 0 { j += 1 }
-            let type = data[start] & 0x1f
-            if type == 7, sps == nil { sps = Array(data[start..<j]) }
-            else if type == 8, pps == nil { pps = Array(data[start..<j]) }
+        for range in nalRanges(data) {
+            let type = data[range.lowerBound] & 0x1f
+            if type == 7, sps == nil { sps = Array(data[range]) }
+            else if type == 8, pps == nil { pps = Array(data[range]) }
             if sps != nil, pps != nil { break }
-            i = j
         }
         if let sps, let pps { return (sps, pps) }
         return nil
@@ -178,20 +168,8 @@ enum H264SPS {
         var recoversHere = false
         var sawSlice = false
         var allIntra = true
-        var i = 0
-        let n = data.count
-        func startCode(at p: Int) -> Int {
-            if p + 3 < n, data[p] == 0, data[p+1] == 0, data[p+2] == 0, data[p+3] == 1 { return 4 }
-            if p + 2 < n, data[p] == 0, data[p+1] == 0, data[p+2] == 1 { return 3 }
-            return 0
-        }
-        while i < n {
-            let sc = startCode(at: i)
-            if sc == 0 { i += 1; continue }
-            let start = i + sc
-            guard start < n else { break }
-            var j = start
-            while j < n, startCode(at: j) == 0 { j += 1 }
+        for range in nalRanges(data) {
+            let start = range.lowerBound, j = range.upperBound
             switch data[start] & 0x1f {
             case 5:
                 return true
@@ -209,7 +187,6 @@ enum H264SPS {
             default:
                 break
             }
-            i = j
         }
         return recoversHere && sawSlice && allIntra
     }
