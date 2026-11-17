@@ -1829,7 +1829,12 @@ On tvOS only a PiP window (and the retention opt-in) keeps a video session; ever
 
 **Loads and seeks wait.** A decision that falls into a `load()` or seek is made when it returns, never under it. That includes a pause pressed during a load, and a load the host starts in the background (next-episode autoplay, a playlist advance).
 
-**Phone calls and Siri.** An interruption that pauses a playing session holds the decision until it ends. When the system grants `.shouldResume`, the session resumes, native video in the background included. When it ends without that grant, the paused session gets the normal decision, so the grace window starts then.
+**Phone calls and Siri.** A pause from an interruption is a pause like any other, so a paused video in the background is released after the grace window.
+
+- When the interruption ends inside that window and the system grants `.shouldResume`, the session resumes, native video in the background included.
+- A longer call finds the session released. It stays paused, and `needsForegroundVideoRestore` is true as after any background teardown.
+- With `backgroundPlaybackEnabled` off, the end of an interruption never restarts a video in the background.
+- On tvOS a video session is released at background entry, interruption or not.
 
 **`retainsVideoPipelineWhenBackgrounded`** (default false; set before backgrounding):
 

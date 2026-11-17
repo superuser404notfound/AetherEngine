@@ -95,14 +95,54 @@ struct BackgroundDecisionFunnelTests {
         #expect(decide(Inputs(isTV: true, state: .paused), .pictureInPictureClosed) == .step(.perform(.teardownVideo)))
     }
 
-    @Test("a call that paused a playing session holds the decision until it ends (audit LIF-203)")
-    func interruptionHoldsTheDecision() {
-        let held = Inputs(state: .paused, interruptionHoldsResume: true)
-        #expect(decide(held, .paused) == .owe)
-        #expect(decide(held, .graceWindowExpired) == .owe)
-        #expect(decide(held, .graceAssertionReclaimed) == .step(.perform(.teardownVideo)))
-        // Ended without a resume: the hold is gone and the paused session gets the normal decision.
-        #expect(decide(Inputs(state: .paused), .owedDecisionSettled) == .step(.deferTeardown(afterSeconds: 15)))
+    /// Review R-P5-1: the LIF-203 hold owed the decision for as long as the interruption lasted, which
+    /// armed no assertion, so a call that never sent ENDED let the app suspend with the whole pipeline
+    /// (the AE#597 wedge), on tvOS too. The hold is now the grace window: a paused session during a call
+    /// gets the same decision as any other paused session, whatever the trigger.
+    @Test("an interruption does not hold the background decision beyond the grace window (review R-P5-1)")
+    func interruptionHoldIsTheGraceWindow() {
+        let paused = Inputs(state: .paused)
+        for trigger in [Trigger.enteredBackground, .paused, .owedDecisionSettled] {
+            #expect(decide(paused, trigger) == .step(.deferTeardown(afterSeconds: 15)), "\(trigger)")
+        }
+        #expect(decide(paused, .graceWindowExpired) == .step(.perform(.teardownVideo)),
+                "no ENDED inside the window: the expiry tears down")
+        #expect(decide(paused, .graceAssertionReclaimed) == .step(.perform(.teardownVideo)))
+    }
+
+    @Test("tvOS: an interruption active at background entry still tears down at once (review R-P5-1)")
+    func tvOSInterruptionTearsDown() {
+        #expect(decide(Inputs(isTV: true, state: .paused), .enteredBackground) == .step(.perform(.teardownVideo)))
+        #expect(decide(Inputs(isTV: true, state: .paused), .paused) == .step(.perform(.teardownVideo)))
+    }
+
+    private func endResumes(backgrounded: Bool = true, audioBackend: Bool = false,
+                            backgroundPlayback: Bool = true, softwareHost: Bool = false,
+                            nativeKept: Bool = false, shouldResume: Bool = true) -> Bool {
+        let safe = AetherEngine.interruptionResumeIsBackgroundSafe(
+            isBackgrounded: backgrounded, isAudioBackend: audioBackend,
+            backgroundPlaybackEnabled: backgroundPlayback, hasSoftwareHost: softwareHost,
+            nativeSessionKeptForAudio: nativeKept)
+        return AetherEngine.interruptionEndShouldPlay(
+            armed: true, shouldResume: shouldResume, deferredPlay: false, backgroundSafe: safe)
+    }
+
+    @Test("iOS: ENDED with shouldResume inside the grace window resumes, after the teardown it does not (review R-P5-1)")
+    func endedInsideTheWindowResumes() {
+        #expect(endResumes(nativeKept: true), "native video still up inside the window")
+        #expect(endResumes(softwareHost: true), "software session still up inside the window")
+        #expect(!endResumes(nativeKept: false), "the window expired and released the native video")
+        #expect(!endResumes(nativeKept: true, shouldResume: false))
+    }
+
+    @Test("iOS with background playback off: an interruption end never restarts video in the background (review R-P5-1)")
+    func backgroundPlaybackOffDoesNotResume() {
+        #expect(decide(Inputs(state: .paused, backgroundPlaybackEnabled: false), .enteredBackground)
+                == .step(.deferTeardown(afterSeconds: 15)))
+        #expect(!endResumes(backgroundPlayback: false, softwareHost: true))
+        #expect(!endResumes(backgroundPlayback: false, nativeKept: false))
+        #expect(endResumes(audioBackend: true, backgroundPlayback: false), "music is not video")
+        #expect(endResumes(backgrounded: false, backgroundPlayback: false, softwareHost: true), "foreground")
     }
 
     @Test("only a pause from playing asks for the decision (audit LIF-202)")
@@ -117,11 +157,11 @@ struct BackgroundDecisionFunnelTests {
     @Test("the end of a call may resume a native video kept playing in the background (audit LIF-203)")
     func interruptionResumeIsBackgroundSafe() {
         let safe = AetherEngine.interruptionResumeIsBackgroundSafe
-        #expect(safe(false, false, false, false), "foreground always resumes")
-        #expect(safe(true, true, false, false), "audio backend")
-        #expect(safe(true, false, true, false), "software host in audio-only mode")
-        #expect(safe(true, false, false, true), "native video kept for its audio (AE#1080)")
-        #expect(!safe(true, false, false, false), "a released video never restarts unseen")
+        #expect(safe(false, false, true, false, false), "foreground always resumes")
+        #expect(safe(true, true, true, false, false), "audio backend")
+        #expect(safe(true, false, true, true, false), "software host in audio-only mode")
+        #expect(safe(true, false, true, false, true), "native video kept for its audio (AE#1080)")
+        #expect(!safe(true, false, true, false, false), "a released video never restarts unseen")
     }
 }
 
@@ -210,8 +250,8 @@ struct BackgroundDecisionEngineTests {
         #expect(engine.needsForegroundVideoRestore)
     }
 
-    @Test("a call that paused a playing session holds it until the call ends (audit LIF-203)")
-    func interruptionHoldsUntilItEnds() async throws {
+    @Test("a call that pauses a playing session in the background arms the grace window, not an open hold (review R-P5-1)")
+    func interruptionPauseArmsTheGraceWindow() async throws {
         let engine = try AetherEngine()
         defer { engine.stop() }
         let log = Self.observe(engine)
@@ -221,14 +261,7 @@ struct BackgroundDecisionEngineTests {
         engine.noteAudioInterruptionBegan()
         engine.state = .paused
         try await waitFor { !log.entries.isEmpty }
-        #expect(log.entries.map(\.1) == [.owe])
-
-        // Ended without a resume: the owed decision is settled and the grace window starts.
-        _ = engine.noteAudioInterruptionEnded()
-        engine.resumeAfterInterruption = false
-        engine.settleOwedBackgroundAction()
-        try await waitFor { log.entries.count == 2 }
-        #expect(log.entries.last?.0 == .owedDecisionSettled)
-        #expect(log.entries.last?.1 == .step(.deferTeardown(afterSeconds: 15)))
+        #expect(log.entries.map(\.1) == [.step(.deferTeardown(afterSeconds: 15))])
+        #expect(!engine.backgroundActionOwed)
     }
 }

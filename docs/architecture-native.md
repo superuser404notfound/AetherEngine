@@ -734,9 +734,10 @@ See [TrueHD Atmos with heights](formats.md#truehd-atmos-with-heights) and [DTS:X
 
 When the app goes to the background while playing, the engine keeps audio going instead of tearing the pipeline down.
 
-**The decision.** Every entry point asks one pure, unit-tested function, `backgroundDecision(_:trigger:)` in `AetherEngine+Background.swift` (audit LIF-R201). The entry points are `didEnterBackground`, a pause (from `pause()` or from the player itself), a load, seek or interruption that settles, a PiP window closing, and the grace window's expiry.
+**The decision.** Every entry point asks one pure, unit-tested function, `backgroundDecision(_:trigger:)` in `AetherEngine+Background.swift` (audit LIF-R201). The entry points are `didEnterBackground`, a pause (from `pause()` or from the player itself), a load or seek that settles, a PiP window closing, and the grace window's expiry.
 
-- It first owes the decision while a load or seek is in flight, or while an interruption holds a session it will resume. The load's own exit, or the interruption's end, settles it.
+- It first owes the decision while a load or seek is in flight. The load's own exit settles it.
+- An interruption gets no hold of its own (review R-P5-1). A session a call paused gets the grace window like any other paused one. Only that window's background-task assertion keeps the app running, so a hold past it would let the app suspend with the whole pipeline, which is the `mediaserverd` wedge the teardown exists for. iOS does not promise an interruption ENDED at all.
 - It does nothing for a session the background teardown already released.
 - Otherwise it applies `backgroundAction(isAudioBackend:hasSoftwareHost:softwareHostHasAudio:keepVideoAlive:pipActive:state:retainPausedVideoPipeline:)` and, for the step, `backgroundStep(action:state:supportsGraceWindow:graceSeconds:)`.
 
