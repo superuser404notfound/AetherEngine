@@ -160,6 +160,14 @@ final class FrameUpscaler: @unchecked Sendable {
     /// pass before its frame could go out.
     private let completionLock = NSLock()
     private var completions: [Completion] = []
+    private var _forcedCommandBufferError: Error?
+
+    /// Test seam: stands in for the command buffer's error on every frame that completes while set.
+    /// Under `completionLock`, which the completion takes anyway.
+    var forcedCommandBufferError: Error? {
+        get { completionLock.lock(); defer { completionLock.unlock() }; return _forcedCommandBufferError }
+        set { completionLock.lock(); _forcedCommandBufferError = newValue; completionLock.unlock() }
+    }
     private struct Completion {
         let stage: Stage
         let times: StageTimes
@@ -428,7 +436,7 @@ final class FrameUpscaler: @unchecked Sendable {
         let result: CVPixelBuffer?
         let completion: Completion
         do {
-            times.metalGPU = try work.finish()
+            times.metalGPU = try work.finish(forcedError: forcedCommandBufferError)
             times.total = holdMs
             completion = Completion(stage: ran, times: times, error: nil)
             result = output
@@ -550,15 +558,6 @@ final class FrameUpscaler: @unchecked Sendable {
     }
 
     // MARK: - Accounting
-
-    /// A command buffer refused because the app is in the background (iOS): not a fault of the stage.
-    static func isBackgroundRefusal(_ error: Error) -> Bool {
-        if let wrapped = error as? UpscaleError, let underlying = wrapped.underlying {
-            return isBackgroundRefusal(underlying)
-        }
-        let ns = error as NSError
-        return ns.domain == MTLCommandBufferErrorDomain && ns.code == Int(MTLCommandBufferError.Code.notPermitted.rawValue)
-    }
 
     private func recordSuccess(_ times: StageTimes, stage: Stage) {
         consecutiveFailures = 0
@@ -739,7 +738,8 @@ final class FrameUpscaler: @unchecked Sendable {
     }
 
     private func recordFailure(_ error: Error) {
-        if Self.isBackgroundRefusal(error) {
+        // The line-art chain's errors are `FrameChain.Failure`, which this did not look through (audit GPU-203).
+        if EncodedGPUWork.isBackgroundRefusal(error) {
             if !backgroundRefusalNoted {
                 backgroundRefusalNoted = true
                 EngineLog.emit("[Upscale] GPU work not permitted in the background, passing frames through",
@@ -892,7 +892,7 @@ extension FrameUpscaler {
 // MARK: - GPU state shared across rebuilds
 
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
-private struct UpscaleError: Error, CustomStringConvertible {
+private struct UpscaleError: GPUStageFailure, CustomStringConvertible {
     let description: String
     let underlying: Error?
     init(_ description: String, underlying: Error? = nil) {
@@ -1307,7 +1307,7 @@ private final class MLScaler: @unchecked Sendable {
                 return try run(input, original: input, frameIndex: frameIndex, timeout: timeout, submit: submit, times: &times)
             } catch let error as MLTimeout {
                 throw error
-            } catch where FrameUpscaler.isBackgroundRefusal(error) {
+            } catch where EncodedGPUWork.isBackgroundRefusal(error) {
                 throw error
             } catch {
                 copiesInput = true
@@ -1382,7 +1382,7 @@ private final class MLScaler: @unchecked Sendable {
                 var times = times
                 times.ml += elapsedMs(since: t0)
                 if let error {
-                    if direct, !FrameUpscaler.isBackgroundRefusal(error) {
+                    if direct, !EncodedGPUWork.isBackgroundRefusal(error) {
                         // As in `process`: VT may refuse the decoder's buffer; copy it from now on.
                         copiesInput = true
                         EngineLog.emit("[Upscale] ML scaler refused the decoder buffer (\(error)), copying input from now on",
@@ -1392,7 +1392,7 @@ private final class MLScaler: @unchecked Sendable {
                         return
                     }
                     gate.signal()
-                    done(.failure(FrameUpscaler.isBackgroundRefusal(error) ? error : MLPassFailure(underlying: error)), times)
+                    done(.failure(EncodedGPUWork.isBackgroundRefusal(error) ? error : MLPassFailure(underlying: error)), times)
                     return
                 }
                 let result: Result<UncheckedSendable<CVPixelBuffer>, Error>
@@ -1456,7 +1456,7 @@ private final class MLScaler: @unchecked Sendable {
             throw MLTimeout(seconds: timeout, outstanding: abandoned.count)
         }
         if let error = result {
-            throw FrameUpscaler.isBackgroundRefusal(error) ? error : MLPassFailure(underlying: error)
+            throw EncodedGPUWork.isBackgroundRefusal(error) ? error : MLPassFailure(underlying: error)
         }
         times.ml += elapsedMs(since: t0)
         mlTimed = true

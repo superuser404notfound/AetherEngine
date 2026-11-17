@@ -95,6 +95,14 @@ final class FrameToneMapper: @unchecked Sendable {
     private var consecutiveFailures = 0
     private var lastPassThroughNote: String?
     private var isDisabled = false
+    private var backgroundRefusalNoted = false
+    private var _forcedCommandBufferError: Error?
+
+    /// Test seam: stands in for the command buffer's error on every frame that completes while set.
+    var forcedCommandBufferError: Error? {
+        get { processLock.lock(); defer { processLock.unlock() }; return _forcedCommandBufferError }
+        set { processLock.lock(); _forcedCommandBufferError = newValue; processLock.unlock() }
+    }
 
     init(plan: VideoProcessingPlan, frameInterval: Double, device: MTLDevice? = MTLCreateSystemDefaultDevice()) {
         self.plan = plan
@@ -175,7 +183,7 @@ final class FrameToneMapper: @unchecked Sendable {
         processLock.lock()
         defer { processLock.unlock() }
         do {
-            _ = try work.finish()
+            _ = try work.finish(forcedError: _forcedCommandBufferError)
         } catch {
             if !isDisabled { recordFailure(error) }
             return nil
@@ -245,6 +253,16 @@ final class FrameToneMapper: @unchecked Sendable {
     }
 
     private func recordFailure(_ error: Error) {
+        // Audit GPU-203: iOS refuses GPU work in the background. Counted, three refused frames switched the
+        // stage off for good and the engine latched that for the title and the process.
+        if EncodedGPUWork.isBackgroundRefusal(error) {
+            if !backgroundRefusalNoted {
+                backgroundRefusalNoted = true
+                EngineLog.emit("[VideoProcessing] GPU work not permitted in the background, passing frames through",
+                               category: .swPlayback)
+            }
+            return
+        }
         consecutiveFailures += 1
         stateLock.lock()
         _stats.failures += 1

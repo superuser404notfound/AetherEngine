@@ -19,7 +19,7 @@ import Metal
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class FrameChain {
 
-    struct Failure: Error, CustomStringConvertible {
+    struct Failure: GPUStageFailure, CustomStringConvertible {
         let description: String
         let underlying: Error?
         init(_ description: String, underlying: Error? = nil) {

@@ -309,6 +309,27 @@ struct LineArtUpscalerTests {
         #expect(up.upscale(try ChainFrames.gradient(1280, 720, tenBit: false), pts: .invalid) != nil)
     }
 
+    /// Audit GPU-203: the line-art chain's errors are `FrameChain.Failure`, which the upscaler's refusal check
+    /// did not look through, so iOS background refusals counted and switched the stage off after three.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func gpu203BackgroundRefusalsNeverSwitchLineArtOff() throws {
+        let up = try #require(FrameUpscaler(plan: try plan(640, 360, display: CGSize(width: 1280, height: 720)),
+                                            frameInterval: 1.0 / 24))
+        let input = try ChainFrames.gradient(640, 360, tenBit: false)
+        up.forcedCommandBufferError = NSError(domain: MTLCommandBufferErrorDomain,
+                                              code: Int(MTLCommandBufferError.Code.notPermitted.rawValue))
+        for _ in 0..<6 { #expect(up.upscale(input, pts: .invalid) == nil) }
+        #expect(!up.isDisabled && up.stats.failures == 0)
+        up.forcedCommandBufferError = nil
+        #expect(up.upscale(input, pts: .invalid) != nil)
+
+        up.forcedCommandBufferError = NSError(domain: MTLCommandBufferErrorDomain,
+                                              code: Int(MTLCommandBufferError.Code.timeout.rawValue))
+        for _ in 0..<FrameUpscaler.maxConsecutiveFailures { _ = up.upscale(input, pts: .invalid) }
+        #expect(up.isDisabled)
+    }
+
     /// The ladder at 1080p: an overrun first drops the restore pass, a second one switches the stage off
     /// (nothing below line art takes 1080p). Both rungs are remembered.
     @Test
@@ -569,6 +590,29 @@ struct FrameToneMapperTests {
         }
         inFlight.removeAll()
         #expect(stage.disabled == nil && stage.stats.framesProcessed == 3)
+    }
+
+    /// Audit GPU-203: iOS refuses GPU work in the background with `notPermitted`. The chain wraps that in its
+    /// own error, which the check did not look through, so three refused frames switched the stage off and
+    /// the engine latched the title as failed for the process. Any other error still does after three.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func gpu203BackgroundRefusalsNeverSwitchItOff() throws {
+        let stage = FrameToneMapper(plan: try plan(), frameInterval: 1.0 / 24)
+        let input = try frame()
+        stage.forcedCommandBufferError = NSError(domain: MTLCommandBufferErrorDomain,
+                                                 code: Int(MTLCommandBufferError.Code.notPermitted.rawValue))
+        for _ in 0..<6 { #expect(stage.process(input, pts: .invalid, carriesHDR10Plus: false) == nil) }
+        #expect(stage.disabled == nil && stage.stats.failures == 0)
+        stage.forcedCommandBufferError = nil
+        #expect(stage.process(input, pts: .invalid, carriesHDR10Plus: false) != nil)
+
+        stage.forcedCommandBufferError = NSError(domain: MTLCommandBufferErrorDomain,
+                                                 code: Int(MTLCommandBufferError.Code.timeout.rawValue))
+        for _ in 0..<FrameToneMapper.maxConsecutiveFailures {
+            #expect(stage.process(input, pts: .invalid, carriesHDR10Plus: false) == nil)
+        }
+        #expect(stage.disabled?.cause == .failures)
     }
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
