@@ -1092,6 +1092,13 @@ public final class AetherEngine: ObservableObject {
     /// the teardown itself needs ~3.5 s of drain before suspension.
     public var backgroundTeardownGraceSeconds: Double = 15
 
+    /// The longest an audio switch on the native path waits for the outgoing item's frame before it
+    /// swaps with nothing held (AE#711 follow-up). A paused item answers in about 20 ms where its
+    /// output vends paused frames; where it does not, the switch stands still for this long and
+    /// then shows black anyway. A host that sees that can shorten the wait. 0 holds nothing on the
+    /// native path. The Dolby Vision holds and the software path have their own bounds.
+    public var heldPictureFrameWaitSeconds: Double = AetherEngine.defaultHeldPictureFrameWaitSeconds
+
     /// #127: true once the active session's transport is ready to accept seeks and report real time
     /// (native: AVPlayerItem readyToPlay; SW/audio hosts publish readiness at session start). Hosts
     /// gate corrective actions (restore watchdogs, position clamps) on this instead of inferring

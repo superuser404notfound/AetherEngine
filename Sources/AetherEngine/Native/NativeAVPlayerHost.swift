@@ -2068,7 +2068,9 @@ final class NativeAVPlayerHost {
     /// swap opens: `replaceCurrentItem` blanks this layer until the next item's first frame, however
     /// long the old item was kept. An output belongs to one item and is only attached for the read.
     /// nil when no frame arrives inside `timeout`, which the caller treats as "nothing to hold".
-    func captureDisplayedFrame(timeout: Duration = .milliseconds(500)) async -> CVPixelBuffer? {
+    func captureDisplayedFrame(
+        timeout: Duration = AetherEngine.heldPictureFrameWait(seconds: AetherEngine.defaultHeldPictureFrameWaitSeconds)
+    ) async -> CVPixelBuffer? {
         guard let item = playerItem else { return nil }
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()

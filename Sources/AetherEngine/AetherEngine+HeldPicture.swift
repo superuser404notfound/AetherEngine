@@ -18,6 +18,16 @@ extension AetherEngine {
     /// hundred milliseconds under the host's loading scrim, where 960 does not read as soft.
     static let heldPictureReshapedSize = CGSize(width: 960, height: 540)
 
+    /// The default of `heldPictureFrameWaitSeconds`.
+    static let defaultHeldPictureFrameWaitSeconds: Double = 0.5
+
+    /// The wait the native read runs with: the host's value, with a negative or non-finite one read
+    /// as "do not wait" so the switch can never hang on a bad setting.
+    static func heldPictureFrameWait(seconds: Double) -> Duration {
+        guard seconds.isFinite, seconds > 0 else { return .zero }
+        return .milliseconds(Int64((seconds * 1000).rounded()))
+    }
+
     /// AE#711 follow-up: hold the picture on screen across the rebuild of an audio switch.
     ///
     /// Native: #711 keeps the old item mounted while the source reopens, but `replaceCurrentItem`
@@ -68,8 +78,9 @@ extension AetherEngine {
                 held = await reshapedDolbyVisionStill(itemSeconds: host.avPlayer.currentTime().seconds)
                     .map { ($0, false, "Dolby Vision reshaped") }
             } else {
-                held = await host.captureDisplayedFrame()
-                    .map { ($0, Self.heldPictureIsHDR(videoFormat), "native output") }
+                let wait = Self.heldPictureFrameWait(seconds: heldPictureFrameWaitSeconds)
+                held = wait > .zero ? await host.captureDisplayedFrame(timeout: wait)
+                    .map { ($0, Self.heldPictureIsHDR(videoFormat), "native output") } : nil
             }
         } else if let host = softwareSource {
             held = host.displayedFrame().map { ($0, Self.heldPictureIsHDR(videoFormat), "software renderer") }

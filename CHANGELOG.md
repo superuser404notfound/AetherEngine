@@ -67,6 +67,13 @@ the public-API contract.
 - **DASH manifest and head reads are bounded.** A manifest over 8 MB, or one that trickles for more than
   120 s, fails the open instead of filling memory. A manifest with dozens of audio sets carries the first 16.
 
+### Added
+
+- **A host can choose how long a native audio switch waits for the frame it holds.**
+  `heldPictureFrameWaitSeconds` (default 0.5 s, as before) bounds the read of the outgoing picture. Where
+  the output vends no paused frame the switch used to stand still for the full 0.5 s and then show black
+  anyway; such a host can now shorten the wait, or set 0 to hold nothing.
+
 ### Performance
 
 - **Live scrub previews keep six warm decoders, as VOD does, inside the AE#1059 memory budget.** The live
