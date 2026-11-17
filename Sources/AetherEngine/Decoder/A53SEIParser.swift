@@ -151,6 +151,13 @@ enum A53SEIParser {
         return out
     }
 
+    static func unescapeRBSP(_ bytes: [UInt8]) -> [UInt8] {
+        bytes.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return [] }
+            return unescapeRBSP(base, buffer.count)
+        }
+    }
+
     // MARK: - SEI payload walk
 
     /// Every `sei_message` in one SEI RBSP as (payloadType, offset, payloadSize), until `body` returns

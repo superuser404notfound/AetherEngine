@@ -13,6 +13,17 @@ struct FrameDecodeContextHardwareTests {
         #expect(await extractor.residentPreview(rawTarget: 1, refined: true, maxWidth: 320, isCancelled: { true }) == nil)
         await extractor.shutdown()
     }
+    /// Audit cross-slice note (AE#1059): a decode that is decided but not yet queued still counts toward the budget.
+    @Test("a reserved decode counts as possibly open before its job is queued")
+    func reservationCountsBeforeTheJobQueues() async {
+        let extractor = FrameExtractor(reader: DataIOReader(data: Data()), formatHint: "mp4")
+        #expect(await !extractor.decoderMayBeOpen)
+        await extractor.reserveDecode()
+        #expect(await extractor.decoderMayBeOpen)
+        await extractor.endDecodeReservation()
+        #expect(await !extractor.decoderMayBeOpen)
+        await extractor.shutdown()
+    }
     @Test("resident refinement reports actual PTS and cannot invent a target frame past EOF")
     func residentActualPTSAndMissingTarget() throws {
         let data = try #require(Data(base64Encoded: Self.mpeg4FixtureBase64, options: .ignoreUnknownCharacters))

@@ -26,7 +26,7 @@ struct SoftwareResidentRangesTests {
                         chunkBytes: Int = 1024,
                         store: (any SoftwarePacketStore)? = nil) throws -> SoftwarePacketReadAhead {
         let input = Input(packets)
-        let fifo = try store ?? SoftwarePacketDiskFIFO(chunkTargetBytes: chunkBytes, retainConsumed: true)
+        let fifo = try store ?? SoftwarePacketDiskFIFO(chunkTargetBytes: chunkBytes)
         let source = SoftwarePacketReadAhead(video: .init(index: 0, numerator: 1, denominator: 1000),
             audio: audio ? .init(index: 1, numerator: 1, denominator: 1000) : nil,
             byteBudget: budget, forwardSeconds: 3600, initialSourceClock: 0,
@@ -208,7 +208,7 @@ struct SoftwareResidentRangesTests {
     func retainedAfterSourceFailure(reordered: Bool) async throws {
         let packets = (0..<100).map { packet(Int64($0) * 40, key: $0 == 0) }
         let input = FailingInput(packets)
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024, retainConsumed: true)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024)
         let source = SoftwarePacketReadAhead(video: .init(index: 0, numerator: 1, denominator: 1000),
             audio: nil, byteBudget: 1_000_000, forwardSeconds: 3600, initialSourceClock: 0,
             fifo: fifo, videoReorderDepth: reordered ? 4 : nil) { _ in try input.next() }
@@ -252,7 +252,7 @@ struct SoftwareResidentRangesTests {
     func storageFailureRemainsClosed() async throws {
         let packets = (0..<10).map { packet(Int64($0) * 40) }
         let input = Input(packets)
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024, retainConsumed: true)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024)
         let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         let source = SoftwarePacketReadAhead(video: .init(index: 0, numerator: 1, denominator: 1000),
             audio: nil, byteBudget: 1_000_000, forwardSeconds: 3600, initialSourceClock: 0,

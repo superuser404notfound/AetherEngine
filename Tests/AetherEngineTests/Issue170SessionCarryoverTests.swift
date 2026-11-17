@@ -19,6 +19,24 @@ struct Issue170CarryoverCaptureTests {
         ExternalSubtitleTrack(url: URL(fileURLWithPath: "/tmp/\(name).srt"), name: name, language: lang)
     }
 
+    /// Audit SUB-204: a one-shot sidecar on another origin carries its own headers across a rebuild.
+    @Test("capture keeps the explicit headers of a one-shot sidecar, primary and secondary")
+    func captureKeepsSidecarHeaders() throws {
+        let engine = try AetherEngine()
+        engine.loadedSidecarURL = URL(string: "https://subs.example/a.srt")
+        engine.loadedSidecarHeaders = ["Authorization": "Bearer x"]
+        engine.isSubtitleActive = true
+        engine.loadedSecondarySidecarURL = URL(string: "https://subs.example/b.srt")
+        engine.loadedSecondarySidecarHeaders = ["Authorization": "Bearer y"]
+        engine.isSecondarySubtitleActive = true
+        let carryover = engine.captureSubtitleSessionCarryover()
+        #expect(carryover.primarySidecarHeaders == ["Authorization": "Bearer x"])
+        #expect(carryover.secondarySidecarHeaders == ["Authorization": "Bearer y"])
+        let merged = AetherEngine.mergedSubtitleCarryover(live: SubtitleSessionCarryover(), snapshot: carryover)
+        #expect(merged.primarySidecarHeaders == carryover.primarySidecarHeaders)
+        #expect(merged.secondarySidecarHeaders == carryover.secondarySidecarHeaders)
+    }
+
     @Test("capture preserves mid-session external tracks with exact ids, including removal gaps")
     func captureExternalRegistry() throws {
         let engine = try AetherEngine()

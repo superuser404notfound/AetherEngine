@@ -15,6 +15,20 @@ import Foundation
 /// whether the software path can serve this source at all, so a source it cannot serve costs a
 /// refusal here rather than a second dead session.
 extension AetherEngine {
+    /// What the session can offer right now. Every site that asks reads it here, so a term added to
+    /// `Availability` reaches the host's failure probe, the AE#627 offer and the escalation itself
+    /// (audit LOAD-R203).
+    @MainActor
+    var currentEscalationAvailability: SoftwarePathEscalation.Availability {
+        SoftwarePathEscalation.Availability(
+            alreadyEscalated: softwarePathEscalationBudget.isSpent,
+            preferredDecodePath: loadedOptions.preferredDecodePath,
+            nativeRemoteHLS: loadedOptions.nativeRemoteHLS,
+            hostAllowsEscalation: loadedOptions.escalatesToSoftwarePath,
+            finitePlaylist: !loadedOptions.isLive,
+            rebuildPossible: sessionReloadRefusal == nil)
+    }
+
     @MainActor
     func handleVODVideoConfigurationChange(session: HLSVideoEngine, epoch: UInt64,
                                            summary: String, generation: UInt64,
@@ -24,12 +38,8 @@ extension AetherEngine {
         let request = SoftwarePathEscalation.Request(
             domain: SoftwarePathEscalation.videoConfigurationErrorDomain, code: 0,
             message: summary, positionSeconds: positionForSessionRebuild)
-        let allowed = SoftwarePathEscalation.shouldEscalate(errorDomain: request.domain,
-            availability: .init(alreadyEscalated: softwarePathEscalationBudget.isSpent,
-                preferredDecodePath: loadedOptions.preferredDecodePath,
-                nativeRemoteHLS: loadedOptions.nativeRemoteHLS,
-                hostAllowsEscalation: loadedOptions.escalatesToSoftwarePath,
-                finitePlaylist: !loadedOptions.isLive))
+        let allowed = SoftwarePathEscalation.shouldEscalate(
+            errorDomain: request.domain, availability: currentEscalationAvailability)
         guard allowed else {
             if reportRefusal, !softwarePathEscalationBudget.isSpent { publishError(Self.absorbedFailure(request)) }
             return
@@ -50,16 +60,12 @@ extension AetherEngine {
                 category: .engine)
             return
         }
-        guard SoftwarePathEscalation.shouldEscalate(
-            errorDomain: request.domain,
-            availability: SoftwarePathEscalation.Availability(
-                alreadyEscalated: softwarePathEscalationBudget.isSpent,
-                preferredDecodePath: loadedOptions.preferredDecodePath,
-                nativeRemoteHLS: loadedOptions.nativeRemoteHLS,
-                hostAllowsEscalation: loadedOptions.escalatesToSoftwarePath,
-                finitePlaylist: !loadedOptions.isLive
-            )
-        ) else { return }
+        // The callers decided whether the rung is on offer, rebuild refusal included (audit LOAD-204). A
+        // rebuild the session cannot take is refused further down, and that failure is published there.
+        var availability = currentEscalationAvailability
+        availability.rebuildPossible = true
+        guard SoftwarePathEscalation.shouldEscalate(errorDomain: request.domain, availability: availability)
+        else { return }
         // The host's probe read mount-time options and the #93 rung does not consult it at all, so
         // the decision is made again here, against what the session is actually running on.
         guard softwarePathEscalationBudget.take() else { return }

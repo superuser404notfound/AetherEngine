@@ -23,8 +23,8 @@ final class H264FieldPairJoiner {
     /// between two fields; anything far beyond that is not a field pair.
     static let maxHeldPackets = 64
 
-    private let videoStreamIndex: Int32
-    private let context: H264SPS.SliceContext
+    private var videoStreamIndex: Int32
+    private var context: H264SPS.SliceContext
     private let framing: VideoNALFraming
     private var pending: [UnsafeMutablePointer<AVPacket>] = []
     /// Set when the stream changes under the joiner (an SSAI creative with an SPS of its own): its
@@ -62,6 +62,20 @@ final class H264FieldPairJoiner {
     }
 
     func disarm() { disarmed = true }
+
+    /// The stream changed under the joiner (an SSAI creative, or an in-band SPS change on the same
+    /// PID). The new SPS says whether fields still pair: it re-arms the joiner with the new slice
+    /// context, or disarms it for a progressive or unreadable one (audit BIT-203).
+    func rearm(videoStreamIndex newIndex: Int32, extradata: [UInt8]) {
+        if let sps = H264SPS.spsNAL(fromExtradata: extradata),
+           let newContext = H264SPS.sliceContext(fromNAL: sps), !newContext.frameMbsOnly {
+            videoStreamIndex = newIndex
+            context = newContext
+            disarmed = false
+        } else {
+            disarmed = true
+        }
+    }
 
     func next(read: () throws -> UnsafeMutablePointer<AVPacket>?) throws -> UnsafeMutablePointer<AVPacket>? {
         let first: UnsafeMutablePointer<AVPacket>

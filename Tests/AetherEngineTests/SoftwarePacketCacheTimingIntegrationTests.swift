@@ -41,7 +41,7 @@ struct SoftwarePacketCacheTimingIntegrationTests {
         let timing = Timing(); let input = Input()
         let fifo: any SoftwarePacketStore = memory
             ? SoftwarePacketMemoryFIFO(chunkTargetBytes: 1, historyCapBytes: 1_000_000, kernelMayPurge: false)
-            : try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024, retainConsumed: true)
+            : try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024)
         let source = SoftwarePacketReadAhead(video: .init(index: 0, numerator: 1, denominator: 1000),
             audio: nil, byteBudget: 1_000_000, forwardSeconds: 3600, initialSourceClock: 0,
             fifo: fifo, cacheTiming: timing) { _ in input.next() }
@@ -69,7 +69,7 @@ struct SoftwarePacketCacheTimingIntegrationTests {
         let input = Input()
         let fifo: any SoftwarePacketStore = memory
             ? SoftwarePacketMemoryFIFO(chunkTargetBytes: 1, historyCapBytes: 1_000_000, kernelMayPurge: false)
-            : try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024, retainConsumed: true)
+            : try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024)
         let source = SoftwarePacketReadAhead(video: .init(index: 0, numerator: 1, denominator: 1000),
             audio: nil, byteBudget: 1_000_000, forwardSeconds: 3600, initialSourceClock: 0,
             fifo: fifo, cacheTiming: timing) { _ in input.next() }

@@ -192,9 +192,10 @@ final class HeldSourceConnection: @unchecked Sendable {
                 extraHeaders: extraHeaders, originalURL: source, redirectURL: target)
             let head = try open(target, headers: headers)
             if let location = Self.redirectLocation(head), hops < Self.maxRedirects {
-                guard let next = URL(string: location, relativeTo: target)?.absoluteURL else {
+                guard let resolved = URL(string: location, relativeTo: target)?.absoluteURL else {
                     throw ConnectionError.malformedResponse("unresolvable Location: \(location)")
                 }
+                let next = RedirectHeaderPolicy.upgradedDowngrade(resolved, from: target) ?? resolved
                 hops += 1
                 closeSocket()
                 OriginRequestBudget.shared.noteRedirect(from: source, to: next)
@@ -321,7 +322,17 @@ final class HeldSourceConnection: @unchecked Sendable {
     }
 
     private func readHead() throws -> ResponseHead {
-        var head = Data()
+        while true {
+            let head = try readHeadOnce()
+            if !Self.isInterim(head) { return head }
+        }
+    }
+
+    private func readHeadOnce() throws -> ResponseHead {
+        stateLock.lock()
+        var head = pending
+        pending = Data()
+        stateLock.unlock()
         let separator = Data("\r\n\r\n".utf8)
         while head.range(of: separator) == nil {
             let (chunk, eof) = try readFromSocket(maxLength: 64 * 1024)
@@ -338,7 +349,7 @@ final class HeldSourceConnection: @unchecked Sendable {
         }
         let body = Data(head[split.upperBound...])
         stateLock.lock()
-        pending = body + pending
+        pending = body
         stateLock.unlock()
         return try ResponseHead(rawHead: head[..<split.lowerBound])
     }
@@ -419,6 +430,30 @@ extension HeldSourceConnection {
         }
     }
 
+    /// How a response's body ends, decided once for the held and the persistent connection (audit NET-R204).
+    enum BodyFramingKind: Equatable {
+        case empty
+        case chunked
+        case identity(Int64)
+        case untilClose
+    }
+
+    /// 1xx other than 101 is an interim answer; the real head follows it on the same connection (RFC 9110 15.2).
+    static func isInterim(_ head: ResponseHead) -> Bool {
+        (100..<200).contains(head.status) && head.status != 101
+    }
+
+    /// 1xx, 204 and 304 carry no body whatever their headers say. A negative or unparsable
+    /// `Content-Length` is not a length, so the body is read to the close.
+    static func bodyFramingKind(for head: ResponseHead) -> BodyFramingKind {
+        if (100..<200).contains(head.status) || head.status == 204 || head.status == 304 { return .empty }
+        if head.headers["transfer-encoding"]?.lowercased().contains("chunked") == true { return .chunked }
+        if let raw = head.headers["content-length"], let length = Int64(raw), length >= 0 {
+            return .identity(length)
+        }
+        return .untilClose
+    }
+
     static func redirectLocation(_ head: ResponseHead) -> String? {
         guard (301...308).contains(head.status), head.status != 304, head.status != 305 else { return nil }
         return head.headers["location"]
@@ -435,13 +470,12 @@ extension HeldSourceConnection {
     }
 
     fileprivate static func framing(for head: ResponseHead) -> BodyFraming {
-        if head.headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
-            return .chunked(ChunkedBodyDecoder())
+        switch bodyFramingKind(for: head) {
+        case .empty: return .identity(remaining: 0)
+        case .chunked: return .chunked(ChunkedBodyDecoder())
+        case .identity(let length): return .identity(remaining: length)
+        case .untilClose: return .untilClose
         }
-        if let raw = head.headers["content-length"], let length = Int64(raw) {
-            return .identity(remaining: length)
-        }
-        return .untilClose
     }
 
     static func requestBytes(target: URL,

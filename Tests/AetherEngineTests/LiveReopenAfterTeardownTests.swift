@@ -16,7 +16,7 @@ struct LiveReopenAfterTeardownTests {
         codecpar!.pointee.codec_type = AVMEDIA_TYPE_VIDEO
         let engine = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/live.ts"),
                                     dvModeAvailable: false)
-        let failed = try HLSSegmentProducer(
+        let failed = HLSSegmentProducer(
             demuxer: Demuxer(), videoStreamIndex: 0,
             video: .init(codecpar: UnsafePointer(codecpar!),
                          timeBase: AVRational(num: 1, den: 90_000), codecTagOverride: nil),
@@ -77,7 +77,7 @@ struct LiveReopenAfterTeardownTests {
         let video = HLSSegmentProducer.StreamConfig(codecpar: UnsafePointer(stream.pointee.codecpar),
             timeBase: stream.pointee.time_base, codecTagOverride: "avc1")
         let cache = SegmentCache(forwardWindow: 4, backwardWindow: 4)
-        let producer = try HLSSegmentProducer(demuxer: demuxer, videoStreamIndex: index,
+        let producer = HLSSegmentProducer(demuxer: demuxer, videoStreamIndex: index,
             video: video, cache: cache, videoFallbackDurationPts: 45_000,
             desiredFirstVideoTfdtPts: 0, segmentBoundaries: [], isLive: true)
         let engine = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/live.ts"),

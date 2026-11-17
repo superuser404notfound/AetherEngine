@@ -205,9 +205,7 @@ final class ClosedCaptionTap: @unchecked Sendable {
         let id = nextID
         nextID += 1
         let cue = SubtitleCue(id: id, startTime: pts, endTime: pts + Self.provisionalDwell, body: .text(text))
-        var lo = 0, hi = cues.count
-        while lo < hi { let m = (lo + hi) / 2; if cues[m].startTime < cue.startTime { lo = m + 1 } else { hi = m } }
-        cues.insert(cue, at: lo)
+        cues.insert(cue, at: AetherEngine.lowerBoundByStartTime(cue.startTime, in: cues))
         openCueID = id
     }
 

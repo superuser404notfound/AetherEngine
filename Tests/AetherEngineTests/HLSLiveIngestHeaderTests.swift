@@ -30,4 +30,39 @@ final class HLSLiveIngestHeaderTests: XCTestCase {
         let request = reader.makeRequest(URL(string: "https://origin.example/live/media.m3u8")!)
         XCTAssertTrue(request.allHTTPHeaderFields?.isEmpty ?? true)
     }
+
+    /// Audit LOAD-208: the engine's own ingest reads the session store, so a rotated token reaches it.
+    func testEngineIngestFollowsTheSessionHeaderStore() throws {
+        let reader = HLSLiveIngestReader.engineIngest(
+            playlistURL: URL(string: "https://origin.example/live/master.m3u8")!,
+            httpHeaders: ["Authorization": "Bearer old"], diagnosticContext: nil)
+        defer { reader.close() }
+        let store = RequestHeaderStore(["Authorization": "Bearer old"])
+        reader.adoptSessionHeaderStore(store)
+        store.replace(["Authorization": "Bearer new"])
+        let request = reader.makeRequest(URL(string: "https://origin.example/live/seg1.ts")!)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer new")
+        let fresh = try XCTUnwrap(reader.makeFreshMainReader())
+        defer { fresh.close() }
+        XCTAssertEqual(fresh.makeRequest(URL(string: "https://origin.example/live/seg2.ts")!)
+            .value(forHTTPHeaderField: "Authorization"), "Bearer new")
+    }
+
+    func testHostBuiltReaderKeepsItsOwnHeaders() throws {
+        let reader = HLSLiveIngestReader(
+            playlistURL: URL(string: "https://origin.example/live/master.m3u8")!,
+            httpHeaders: ["Authorization": "Bearer mine"])
+        defer { reader.close() }
+        reader.adoptSessionHeaderStore(RequestHeaderStore([:]))
+        let request = reader.makeRequest(URL(string: "https://origin.example/live/seg1.ts")!)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer mine")
+    }
+
+    /// Audit NET-208: a provider that rotates key URIs must not grow the cache for the whole session.
+    func testKeyCacheStaysBounded() {
+        let reader = HLSLiveIngestReader(playlistURL: URL(string: "https://origin.example/live/master.m3u8")!)
+        defer { reader.close() }
+        for index in 0..<1000 { reader.storeKey(Data(count: 16), for: "https://k.example/key?n=\(index)") }
+        XCTAssertEqual(reader.cachedKeyCount, HLSLiveIngestReader.maximumCachedKeys)
+    }
 }

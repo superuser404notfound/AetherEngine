@@ -2186,7 +2186,7 @@ These are counted from the metadata, like the `bed levels` log line, so an activ
 
 `EngineLog.registerSecret(_:)` names a value that must never be logged, such as an IPTV password the host holds. Every line that reaches os_log or the handler has it replaced, raw or percent-encoded, wherever it appears.
 
-- The engine already strips on its own: named parameters, `Bearer` / `Basic` credentials, userinfo, encoded payloads and the Xtream Codes path layout, also inside a URL carried percent-encoded in another URL's query. This call covers what only the host can know, such as a provider URL carrying the password as a bare path segment.
+- The engine already strips on its own: named parameters (also camelCase names such as `apiToken`), `Bearer` / `Basic` credentials, a request `Cookie` header whole, userinfo (up to its last `@`), encoded payloads and the Xtream Codes path layout, also inside a URL carried percent-encoded in another URL's query. This call covers what only the host can know, such as a provider URL carrying the password as a bare path segment.
 - Registrations are counted: a value registered twice stays redacted until it is unregistered twice.
 - Returns false for a value under four bytes.
 - `redacted(_:)` returns a line as the handler would receive it, for a line a host or tool prints itself next to the engine's.

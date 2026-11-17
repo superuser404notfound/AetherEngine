@@ -111,7 +111,7 @@ struct KeyframeSnappedSeekTests {
                                  timeBaseDenominator: 1000, bytes: Data(repeating: 7, count: 100),
                                  sideData: [])
         })
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024, retainConsumed: true)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024)
         let source = SoftwarePacketReadAhead(
             video: .init(index: 0, numerator: 1, denominator: 1000), audio: nil,
             byteBudget: 1_000_000, forwardSeconds: 3600, initialSourceClock: 0, fifo: fifo,

@@ -20,16 +20,7 @@ enum DoviRpuGuard {
     /// Layout after unescaping: header(2) 0x19 payload... crc32(4) 0x80.
     static func verifiedUnescaped(_ nal: UnsafePointer<UInt8>, _ len: Int) -> [UInt8]? {
         guard len >= 8 else { return nil }
-        var u = [UInt8]()
-        u.reserveCapacity(len)
-        var zeros = 0
-        for i in 0..<len {
-            let b = nal[i]
-            if zeros >= 2 && b == 3 { zeros = 0; continue }
-            u.append(b)
-            zeros = b == 0 ? zeros + 1 : 0
-        }
-        return verified(u)
+        return verified(A53SEIParser.unescapeRBSP(nal, len))
     }
 
     /// `u` is an unescaped RPU, header(2) 0x19 payload... crc32(4) 0x80, possibly with trailing zeros.

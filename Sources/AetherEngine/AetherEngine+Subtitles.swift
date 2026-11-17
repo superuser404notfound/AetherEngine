@@ -224,6 +224,7 @@ extension AetherEngine {
         guard loadedURL != nil else { return }
         cancelSidecarTask(channel: .secondary)
         loadedSecondarySidecarURL = nil
+        loadedSecondarySidecarHeaders = nil
 
         // #112 rework: secondary embedded tracks ride the same packet-store drainer on their
         // own channel; the immediate tick backfills it.
@@ -406,9 +407,9 @@ extension AetherEngine {
         activeSubtitlePacketStore?.setProtectedStreams(Set(embeddedSubtitleDrainTargets.values))
     }
 
-    /// The synchronous tick: plan, decode and apply in one go on the MainActor. Kept for the
-    /// teletext page change and for tests; the drain loop goes through `requestSubtitleDrainTick`,
-    /// which decodes off the MainActor (AE#628). Queued rather than run while that one is in flight.
+    /// The synchronous tick: plan, decode and apply in one go on the MainActor. Kept for tests;
+    /// the drain loop and the teletext page change go through `requestSubtitleDrainTick`, which
+    /// decodes off the MainActor (AE#628). Queued rather than run while that one is in flight.
     func subtitleDrainTick() {
         guard subtitleDrainTickInFlight == nil else {
             subtitleDrainTickRequested = true
@@ -1767,6 +1768,7 @@ extension AetherEngine {
             clearSubtitleDrainTarget(channel: .primary, reason: .externalStoreBackfill)   // #112 rework
             activeEmbeddedSubtitleStreamIndex = -1
             loadedSidecarURL = track.url
+            loadedSidecarHeaders = nil
             sidecarASSHeader = nil
             isSubtitleActive = true
             activeSubtitleTrackIndex = id
@@ -1892,6 +1894,7 @@ extension AetherEngine {
         activeSubtitleTrackIndex = externalTrackID
 
         loadedSidecarURL = url
+        loadedSidecarHeaders = httpHeaders
         isSubtitleActive = true
         subtitleCues = []
         pgsStaleArrivalGates[.primary]?.reset()   // #100
@@ -1973,23 +1976,26 @@ extension AetherEngine {
 
     /// Both reload paths snapshot selection intent, including a candidate not yet published.
     /// This also survives a second rebuild before the first restore has finished decoding.
-    var secondarySelectionForRebuild: (externalID: Int?, sidecarURL: URL?, embeddedIndex: Int32) {
+    var secondarySelectionForRebuild: (externalID: Int?, sidecarURL: URL?, embeddedIndex: Int32,
+                                       sidecarHeaders: [String: String]?) {
         let external = pendingSecondaryExternalSubtitleTrackID ?? activeSecondaryExternalSubtitleTrackID
         let embedded: Int32 = external == nil ? activeSecondaryEmbeddedSubtitleStreamIndex : -1
         let url = external.flatMap { externalSubtitleRegistry[$0]?.url }
             ?? (isSecondarySubtitleActive && embedded < 0 ? loadedSecondarySidecarURL : nil)
-        return (external, url, embedded)
+        let oneShot = external == nil && url != nil
+        return (external, url, embedded, oneShot ? loadedSecondarySidecarHeaders : nil)
     }
 
     /// Audio rebuilds keep the registry. Restore through its id so headers and a container's
     /// selected subtitle stream survive; the URL-only route is only for one-shot sidecars.
     func restoreSecondarySubtitleAfterRebuild(externalID: Int?, sidecarURL: URL?,
+                                              sidecarHeaders: [String: String]? = nil,
                                               embeddedIndex: Int32, startAt: Double) {
         if let sidecarURL {
             if let externalID, externalSubtitleRegistry[externalID] != nil {
                 selectSecondarySubtitleTrack(index: externalID, startAt: startAt)
             } else {
-                selectSecondarySidecarSubtitle(url: sidecarURL)
+                selectSecondarySidecarSubtitle(url: sidecarURL, httpHeaders: sidecarHeaders)
             }
         } else if embeddedIndex >= 0 {
             selectSecondarySubtitleTrack(index: Int(embeddedIndex), startAt: startAt)
@@ -2007,6 +2013,7 @@ extension AetherEngine {
         // API has no identity to validate and keeps its historical replace-on-start behavior.
         if externalTrackID == nil {
             loadedSecondarySidecarURL = url
+            loadedSecondarySidecarHeaders = httpHeaders
             isSecondarySubtitleActive = true
             secondarySubtitleCues = []
             pgsStaleArrivalGates[.secondary]?.reset()   // #100
@@ -2076,6 +2083,7 @@ extension AetherEngine {
                 if let externalTrackID {
                     self.clearSubtitleDrainTarget(channel: .secondary, reason: .secondarySidecarSelected)
                     self.loadedSecondarySidecarURL = url
+                    self.loadedSecondarySidecarHeaders = httpHeaders
                     self.isSecondarySubtitleActive = true
                     self.pgsStaleArrivalGates[.secondary]?.reset()
                     self.setSecondarySubtitleIdentity(external: externalTrackID)
@@ -2138,6 +2146,7 @@ extension AetherEngine {
         activeEmbeddedSubtitleStreamIndex = -1
         activeSubtitleTrackIndex = nil
         loadedSidecarURL = nil
+        loadedSidecarHeaders = nil
         isSubtitleActive = false
         subtitleCues = []
         pgsStaleArrivalGates[.primary]?.reset()   // #100
@@ -2183,6 +2192,7 @@ extension AetherEngine {
         cancelSidecarTask(channel: .secondary)
         clearSubtitleDrainTarget(channel: .secondary, reason: .subtitlesCleared)   // #112 rework
         loadedSecondarySidecarURL = nil
+        loadedSecondarySidecarHeaders = nil
         isSecondarySubtitleActive = false
         secondarySubtitleCues = []
         secondarySidecarASSHeader = nil
@@ -3071,10 +3081,12 @@ extension AetherEngine {
         carryover.activeSubtitleTrackIndex = activeSubtitleTrackIndex
         carryover.primarySidecarURL = (isSubtitleActive && activeSubtitleTrackIndex == nil
             && activeEmbeddedSubtitleStreamIndex < 0) ? loadedSidecarURL : nil
+        carryover.primarySidecarHeaders = carryover.primarySidecarURL == nil ? nil : loadedSidecarHeaders
         let secondary = secondarySelectionForRebuild
         carryover.secondaryTrackIndex = secondary.externalID
             ?? (secondary.embeddedIndex >= 0 ? Int(secondary.embeddedIndex) : nil)
         carryover.secondarySidecarURL = carryover.secondaryTrackIndex == nil ? secondary.sidecarURL : nil
+        carryover.secondarySidecarHeaders = carryover.secondarySidecarURL == nil ? nil : secondary.sidecarHeaders
         carryover.nativeReapplyOrdinal = nativeSubtitleReapplyOrdinal
         carryover.reapplyOrdinalMatchesActiveTrack = currentReapplyOrdinalMatchesActiveTrack()
         carryover.nativeMarkerOrdinal = nativeSubtitleMarkerOrdinal
@@ -3118,7 +3130,7 @@ extension AetherEngine {
         case .reselect(let index):
             selectSubtitleTrack(index: index, startAt: startAt)
         case .sidecar(let url):
-            startSidecarDecode(url: url, httpHeaders: nil, externalTrackID: nil)
+            startSidecarDecode(url: url, httpHeaders: carryover.primarySidecarHeaders, externalTrackID: nil)
         case .clear:
             clearSubtitle()
         case .none:
@@ -3127,7 +3139,7 @@ extension AetherEngine {
         if let secondary = carryover.secondaryTrackIndex {
             selectSecondarySubtitleTrack(index: secondary, startAt: startAt)
         } else if let url = carryover.secondarySidecarURL {
-            selectSecondarySidecarSubtitle(url: url)
+            selectSecondarySidecarSubtitle(url: url, httpHeaders: carryover.secondarySidecarHeaders)
         }
         nativeSubtitleMarkerOrdinal = carryover.nativeMarkerOrdinal
         if let pending = pendingNativeRenderingRequest {
@@ -3352,6 +3364,7 @@ extension AetherEngine {
         // AVPlayer owns the drawing here; leaving overlay cues behind would double up.
         subtitleCues = []
         loadedSidecarURL = nil
+        loadedSidecarHeaders = nil
         isSubtitleActive = true
         activeSubtitleTrackIndex = id
         isLoadingSubtitles = false

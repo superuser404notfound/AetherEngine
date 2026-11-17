@@ -165,25 +165,6 @@ struct PacketRingBufferChunkSpoolTests {
         #expect(ring.seqBounds.end == 2000)
     }
 
-    @Test("The resident floor is nil until eviction moves the span, then tracks the oldest keyframe")
-    func residentFloorFollowsEviction() throws {
-        let dirs = ScratchDirs()
-        let ring = try PacketRingBuffer(windowSeconds: .infinity, scratch: makeScratch(dirs), byteBudget: 4 << 20)
-        defer { ring.close() }
-        let size = 128 << 10
-        try ring.append(pts: 100, isKeyframe: true, isVideo: true, bytes: Data(repeating: 0, count: size))
-        #expect(ring.residentFloorSessionSeconds(sessionStartPts: 100) == nil)
-        for i in 1..<100 {
-            try ring.append(pts: 100 + Double(i), isKeyframe: i % 4 == 0, isVideo: true,
-                            bytes: Data(repeating: 0, count: size))
-        }
-        let floor = try #require(ring.residentFloorSessionSeconds(sessionStartPts: 100))
-        let oldest = try #require(ring.oldestKeyframePts)
-        #expect(floor == oldest - 100)
-        #expect(floor > 0)
-        #expect(ring.residentFloorSessionSeconds(sessionStartPts: .nan) == nil)
-    }
-
     // MARK: - Writes that fail
 
     private final class FlakyDisk: @unchecked Sendable {

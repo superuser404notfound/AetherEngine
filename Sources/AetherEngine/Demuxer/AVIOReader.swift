@@ -11,7 +11,7 @@ import AetherLibavutil
 ///   discrete Range chunks for random access. See `readSeekable`.
 /// - **Streaming** (size=-1): single sequential GET, no reconnect. See `readStreaming`.
 ///
-/// AVIO callbacks run on the demux queue; prefetch/delivery on background queues.
+/// AVIO callbacks run on the demux queue; delivery on background queues.
 /// Shared state protected by locks.
 
 /// Dedupes `ReaderNetworkPhase` emissions so a flapping origin does not spam the callback (#85).
@@ -543,8 +543,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// at 5+ ops/sec without meaningful latency benefit. Still-extraction passes a
     /// smaller value for random-access single-keyframe fetches.
     private let chunkSize: Int
-    /// When false, no speculative next-chunk prefetch (random-access: next read
-    /// almost always seeks elsewhere, so prefetch would be wasted bandwidth).
+    /// When false the reader serves discrete Range chunks (random access: the next read almost always
+    /// seeks elsewhere, so nothing is read ahead). When true it keeps the persistent sliding window.
     private let prefetchEnabled: Bool
     /// When set, the open-time data connection requests a finite `bytes=0-N` range instead of the
     /// open-ended `bytes=0-` stream (#93 residual). Scopes to the open connection only; read-loop
@@ -566,10 +566,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private let bufferLock = NSLock()
     private var currentBuffer = Data()
     private var currentOffset: Int64 = 0
-    private var prefetchBuffer: Data?
-    private var prefetchOffset: Int64 = 0
-    private var isPrefetching = false
-    private let prefetchReady = DispatchSemaphore(value: 0)
+    /// Serial queue the forward-only streaming download runs on; `close` drains it.
     private let prefetchQueue = DispatchQueue(label: "com.aetherengine.avio.prefetch", qos: .userInitiated)
     private static let maxRetries = 3
 
@@ -2172,7 +2169,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     func markClosed() {
         isClosed = true
         // Wake any semaphore waits so the read callbacks can exit
-        prefetchReady.signal()
         streamDataReady.signal()
         streamLock.lock()
         let sTask = streamingTask
@@ -2227,7 +2223,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         bufferLock.lock()
         currentBuffer = Data()
-        prefetchBuffer = nil
         bufferLock.unlock()
 
         detourCache.clear()
@@ -2323,41 +2318,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 position += Int64(toCopy)
                 totalRead += toCopy
 
-                let consumed = Double(position - currentOffset) / Double(currentBuffer.count)
-                let nextPrefetchOffset = currentOffset + Int64(currentBuffer.count)
-                let needsPrefetch = prefetchEnabled && consumed > 0.5 && !isPrefetching && prefetchBuffer == nil
                 bufferLock.unlock()
-
-                if needsPrefetch {
-                    triggerPrefetch(from: nextPrefetchOffset)
-                }
             } else {
-                bufferLock.lock()
-                if let prefetch = prefetchBuffer, position >= prefetchOffset &&
-                    position < prefetchOffset + Int64(prefetch.count) {
-                    currentBuffer = prefetch
-                    currentOffset = prefetchOffset
-                    prefetchBuffer = nil
-                    bufferLock.unlock()
-                    continue
-                }
-                let hasPrefetchInFlight = isPrefetching
-                bufferLock.unlock()
-
-                if hasPrefetchInFlight {
-                    _ = prefetchReady.wait(timeout: .now() + .seconds(15))
-                    bufferLock.lock()
-                    if let prefetch = prefetchBuffer, position >= prefetchOffset &&
-                        position < prefetchOffset + Int64(prefetch.count) {
-                        currentBuffer = prefetch
-                        currentOffset = prefetchOffset
-                        prefetchBuffer = nil
-                        bufferLock.unlock()
-                        continue
-                    }
-                    bufferLock.unlock()
-                }
-
                 let rangeSize = probeRangeGrowth?.size(at: position, remainingInput: probeControl?.remainingInputBytes)
                     ?? chunkSize
                 let fetchSize: Int
@@ -2391,7 +2353,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 bufferLock.lock()
                 currentBuffer = data
                 currentOffset = position
-                prefetchBuffer = nil
                 bufferLock.unlock()
             }
         }
@@ -2973,24 +2934,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // A 429/503/509 is rate limiting, not a dead source: drive give-up + backoff off the
             // rate-limit streak, which (unlike unproductiveReconnects) survives the seekReconnect
             // that parse seeks fire, so a throttled origin fails cleanly instead of looping (#71).
-            let isRateLimited = Self.isRateLimitStatus(status)
-            let isCredentialRefusal = Self.isCredentialRefusalStatus(status)
-            let giveUp = isRateLimited ? recordRateLimitAndShouldGiveUp()
-                : isCredentialRefusal ? recordCredentialRefusalAndShouldGiveUp()
-                : recordReconnectAndShouldGiveUp(status: status)
-            if giveUp {
-                let streakDesc = isRateLimited ? "\(rateLimitStreak) consecutive rate-limited"
-                    : isCredentialRefusal ? "\(credentialRefusalStreak) consecutive credential refusals"
-                    : "\(unproductiveReconnects) unproductive"
-                EngineLog.emit("[AVIOReader] \(label) reconnect exhausted at offset \(frontier) status=\(status) (\(streakDesc))\(isLive ? " [live source lost]" : "")", category: .demux)
+            let refusal = chargeRefusal(status: status)
+            let isRateLimited = refusal.isRateLimited
+            let isCredentialRefusal = refusal.isCredentialRefusal
+            if refusal.giveUp {
+                EngineLog.emit("[AVIOReader] \(label) reconnect exhausted at offset \(frontier) status=\(status) (\(refusal.streakDescription))\(isLive ? " [live source lost]" : "")", category: .demux)
                 emitNetworkPhase(.exhausted)   // ladder spent; the reopen owns recovery, the source is still down (#410)
                 if isLive {
                     return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eio
                 }
                 return totalRead > 0 ? Int32(totalRead) : -1
             }
-            let backoffStreak = isRateLimited ? rateLimitStreak
-                : isCredentialRefusal ? credentialRefusalStreak : unproductiveReconnects
+            let backoffStreak = refusal.streak
             EngineLog.emit("[AVIOReader] \(label) conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
             lastUnplannedReconnectAt = Date()
             emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
@@ -3143,6 +3098,34 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return min(max(expo, retryAfter), 15.0) * backoffScale
     }
 
+    /// What the reconnect ladder decided about one ended connection (audit DMX-R203). The empty-window
+    /// path sleeps on it and the faulted-runway path schedules a timestamp; the accounting is the same.
+    struct RefusalCharge {
+        let isRateLimited: Bool
+        let isCredentialRefusal: Bool
+        let giveUp: Bool
+        /// The counter the backoff reads: the rate-limit, credential or unproductive streak.
+        let streak: Int
+        let streakDescription: String
+    }
+
+    /// Classifies the status, charges the matching streak and says whether the ladder is spent.
+    /// Demux-thread-only, like the recorders it calls.
+    private func chargeRefusal(status: Int) -> RefusalCharge {
+        let isRateLimited = Self.isRateLimitStatus(status)
+        let isCredentialRefusal = Self.isCredentialRefusalStatus(status)
+        let giveUp = isRateLimited ? recordRateLimitAndShouldGiveUp()
+            : isCredentialRefusal ? recordCredentialRefusalAndShouldGiveUp()
+            : recordReconnectAndShouldGiveUp(status: status)
+        let streak = isRateLimited ? rateLimitStreak
+            : isCredentialRefusal ? credentialRefusalStreak : unproductiveReconnects
+        let description = isRateLimited ? "\(rateLimitStreak) consecutive rate-limited"
+            : isCredentialRefusal ? "\(credentialRefusalStreak) consecutive credential refusals"
+            : "\(unproductiveReconnects) unproductive"
+        return RefusalCharge(isRateLimited: isRateLimited, isCredentialRefusal: isCredentialRefusal,
+                             giveUp: giveUp, streak: streak, streakDescription: description)
+    }
+
     /// #309: account for replacing a FAULTED connection from the serve path, i.e. while the window
     /// still holds read-ahead. Returns true when the caller should open the replacement.
     ///
@@ -3165,12 +3148,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// when playback genuinely starves. Demux-thread-only.
     private func chargeFaultedRunwayRefill(at frontier: Int64, ahead: Int,
                                            status: Int, retryAfter: TimeInterval) -> Bool {
-        let isRateLimited = Self.isRateLimitStatus(status)
-        let isCredentialRefusal = Self.isCredentialRefusalStatus(status)
-        let giveUp = isRateLimited ? recordRateLimitAndShouldGiveUp()
-            : isCredentialRefusal ? recordCredentialRefusalAndShouldGiveUp()
-            : recordReconnectAndShouldGiveUp(status: status)
-        if giveUp {
+        let refusal = chargeRefusal(status: status)
+        let isRateLimited = refusal.isRateLimited
+        let isCredentialRefusal = refusal.isCredentialRefusal
+        if refusal.giveUp {
             winCond.lock()
             nextFaultedRefillAt = .distantFuture
             winCond.unlock()
@@ -3180,8 +3161,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 category: .demux)
             return false
         }
-        let streak = isRateLimited ? rateLimitStreak
-            : isCredentialRefusal ? credentialRefusalStreak : unproductiveReconnects
+        let streak = refusal.streak
         let repinned = isCredentialRefusal ? false : dropPinIfTheRefusalCallsForIt(isRateLimited: isRateLimited)
         lastUnplannedReconnectAt = Date()
         let delay = backoffDelay(streak: repinned ? 0 : streak, retryAfter: retryAfter,
@@ -3604,18 +3584,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// numeric total. Without that, `bytes <2^63-65536>-<Int64.max>/*` installed a span whose `end`
     /// overflows on the first read that reaches it.
     static func suffixRangeStart(_ http: HTTPURLResponse, expectedLength: Int) -> Int64? {
-        guard let value = http.value(forHTTPHeaderField: "Content-Range") else { return nil }
-        let scanner = value.replacingOccurrences(of: "bytes ", with: "")
-        let parts = scanner.split(separator: "/", maxSplits: 1)
-        guard parts.count == 2,
-              let total = Int64(parts[1].trimmingCharacters(in: .whitespaces)) else { return nil }
-        let bounds = parts[0].split(separator: "-", maxSplits: 1)
-        guard bounds.count == 2,
-              let start = Int64(bounds[0].trimmingCharacters(in: .whitespaces)),
-              let end = Int64(bounds[1].trimmingCharacters(in: .whitespaces)),
-              start >= 0, end >= start, end == total - 1,
-              end - start + 1 == Int64(expectedLength) else { return nil }
-        return start
+        guard let value = http.value(forHTTPHeaderField: "Content-Range"),
+              let range = ContentRange(value), let total = range.total,
+              range.end == total - 1, range.length == Int64(expectedLength) else { return nil }
+        return range.start
     }
 
     /// The demuxer is done parsing; a far seek from here on is playback. Stops COLLECTING into the
@@ -4714,51 +4686,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         streamSession.invalidateAndCancel()
     }
 
-    // MARK: - Prefetch (background, seekable mode only)
-
-    private func triggerPrefetch(from offset: Int64) {
-        guard prefetchEnabled else { return }
-        if fileSize > 0 && offset >= fileSize { return }
-
-        bufferLock.lock()
-        guard !isPrefetching else { bufferLock.unlock(); return }
-        isPrefetching = true
-        bufferLock.unlock()
-
-        prefetchQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            // Bail if close() ran to avoid writing stale data back into prefetchBuffer.
-            if self.isFullyClosed {
-                self.bufferLock.lock()
-                self.isPrefetching = false
-                self.bufferLock.unlock()
-                self.prefetchReady.signal()
-                return
-            }
-
-            let size: Int
-            if self.fileSize > 0 {
-                size = min(self.chunkSize, Int(self.fileSize - offset))
-            } else {
-                size = self.chunkSize
-            }
-
-            let data = size > 0 ? self.fetchChunk(from: offset, size: size) : nil
-
-            self.bufferLock.lock()
-            // Re-check: close() may have fired while fetchChunk was on the network.
-            if !self.isFullyClosed {
-                self.prefetchBuffer = data
-                self.prefetchOffset = offset
-            }
-            self.isPrefetching = false
-            self.bufferLock.unlock()
-
-            self.prefetchReady.signal()
-        }
-    }
-
     // MARK: - Seek
 
     /// Internal rather than fileprivate (#281) so the seek-driven paths, the parse seek and the
@@ -4807,7 +4734,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if !inCurrent {
                 currentBuffer = Data()
                 currentOffset = position
-                prefetchBuffer = nil
             }
             bufferLock.unlock()
         } else {
@@ -4859,14 +4785,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// this cannot read.
     static func contentRangeSpan(_ http: HTTPURLResponse) -> (start: Int64, end: Int64?)? {
         guard http.statusCode == 206,
-              let value = http.value(forHTTPHeaderField: "Content-Range") else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespaces)
-        guard trimmed.lowercased().hasPrefix("bytes ") else { return nil }
-        let span = trimmed.dropFirst("bytes ".count).split(separator: "/", maxSplits: 1).first ?? ""
-        guard let dash = span.firstIndex(of: "-"),
-              let start = Int64(span[..<dash].trimmingCharacters(in: .whitespaces)) else { return nil }
-        let end = Int64(span[span.index(after: dash)...].trimmingCharacters(in: .whitespaces))
-        return (start, end)
+              let value = http.value(forHTTPHeaderField: "Content-Range"),
+              let range = ContentRange(value) else { return nil }
+        return (range.start, range.end)
     }
 
     /// Audit DMX-101, NET-102: what an origin did with `Range: bytes=a-b`, judged from the response

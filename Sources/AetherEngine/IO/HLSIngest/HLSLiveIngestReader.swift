@@ -18,6 +18,10 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
 
     private let playlistURL: URL
     private let httpHeaders: [String: String]
+    /// Audit LOAD-208: an ingest the engine built for its own reroute reads the session's header
+    /// store, so `updateRequestHeaders` reaches it. A host-built reader keeps the headers it was given.
+    let followsSessionHeaders: Bool
+    private var _headerStore: RequestHeaderStore?
     /// The URL the host gave `httpHeaders` for. A companion inherits its parent's, since its own
     /// playlist URL is one the master named (audit NET-7).
     let credentialOrigin: URL
@@ -69,6 +73,9 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// AES-128 key cache keyed by URI. FAST providers reuse one key per clip; lock is never held across the fetch (concurrent miss just refetches 16 bytes).
     private let keyCacheLock = NSLock()
     private var keyCache: [String: Data] = [:]
+    private var keyCacheOrder: [String] = []
+    /// The playlist window names only a handful of key URIs at once (audit NET-208).
+    static let maximumCachedKeys = 16
 
     /// #177: bounded prefetch window. Serial fetch paid a connection + TTFB round-trip per segment
     /// with no bytes flowing, capping ingest near real-time on high-bitrate streams. Four in-flight
@@ -235,17 +242,38 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// audio reader's lifetime is owned by its parent and never reopens independently.
     func makeFreshMainReader() -> HLSLiveIngestReader? {
         guard role == .mainVideo else { return nil }
-        let fresh = HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo,
-                                        diagnosticContext: diagnosticContext)
+        let fresh = HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: currentHeaders, role: .mainVideo,
+                                        diagnosticContext: diagnosticContext,
+                                        followsSessionHeaders: followsSessionHeaders)
+        if let store = startLock.withLock({ _headerStore }) { fresh.adoptSessionHeaderStore(store) }
         fresh.setJoinCushion(joinCushionSeconds)
         return fresh
     }
 
     private let diagnosticContext: SourceNetworkDiagnostics.Context?
 
+    /// The reader the engine builds for its own live reroutes (AE#168 / AE#363 / AE#199).
+    static func engineIngest(playlistURL: URL, httpHeaders: [String: String],
+                             diagnosticContext: SourceNetworkDiagnostics.Context?) -> HLSLiveIngestReader {
+        HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo,
+                            diagnosticContext: diagnosticContext, followsSessionHeaders: true)
+    }
+
+    /// Called by the engine once the session's store exists, which is after the reader was built.
+    func adoptSessionHeaderStore(_ store: RequestHeaderStore) {
+        guard followsSessionHeaders else { return }
+        startLock.withLock { _headerStore = store }
+    }
+
+    private var currentHeaders: [String: String] {
+        startLock.withLock { _headerStore }?.current ?? httpHeaders
+    }
+
     init(playlistURL: URL, httpHeaders: [String: String] = [:], role: Role,
          credentialOrigin: URL? = nil,
-         diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context) {
+         diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context,
+         followsSessionHeaders: Bool = false) {
+        self.followsSessionHeaders = followsSessionHeaders
         self.diagnosticContext = diagnosticContext
         self.playlistURL = playlistURL
         self.httpHeaders = httpHeaders
@@ -586,9 +614,12 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                     + "starting companion reader on \(audioURL.lastPathComponent)",
                     category: .engine
                 )
-                installCompanion(HLSLiveIngestReader(
-                    playlistURL: audioURL, httpHeaders: httpHeaders, role: .companionAudio,
-                    credentialOrigin: credentialOrigin, diagnosticContext: diagnosticContext))
+                let companion = HLSLiveIngestReader(
+                    playlistURL: audioURL, httpHeaders: currentHeaders, role: .companionAudio,
+                    credentialOrigin: credentialOrigin, diagnosticContext: diagnosticContext,
+                    followsSessionHeaders: followsSessionHeaders)
+                if let store = startLock.withLock({ _headerStore }) { companion.adoptSessionHeaderStore(store) }
+                installCompanion(companion)
             }
             // AE#359: the variant's SUBTITLES group, resolved to absolute playlist URLs and published as
             // metadata. Nothing is fetched here; the host decides whether a subtitle track is ever wanted.
@@ -800,7 +831,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     func makeRequest(_ url: URL, byteRange: HLSByteRange? = nil) -> URLRequest {
         var request = URLRequest(engineURL: url)
         for (field, value) in RedirectHeaderPolicy.scoped(
-            httpHeaders, grantedFor: credentialOrigin, sentTo: url) {
+            currentHeaders, grantedFor: credentialOrigin, sentTo: url) {
             request.setValue(value, forHTTPHeaderField: field)
         }
         if let byteRange {
@@ -912,7 +943,16 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         guard data.count == kCCKeySizeAES128 else {
             throw HLSIngestError.segmentDecryptFailed(reason: "key length \(data.count) != 16")
         }
-        keyCacheLock.withLock { keyCache[cacheKey] = data }
+        storeKey(data, for: cacheKey)
         return data
     }
+
+    func storeKey(_ data: Data, for cacheKey: String) {
+        keyCacheLock.withLock {
+            if keyCache.updateValue(data, forKey: cacheKey) == nil { keyCacheOrder.append(cacheKey) }
+            while keyCacheOrder.count > Self.maximumCachedKeys { keyCache[keyCacheOrder.removeFirst()] = nil }
+        }
+    }
+
+    var cachedKeyCount: Int { keyCacheLock.withLock { keyCache.count } }
 }

@@ -59,7 +59,7 @@ struct SupersededPumpExitTests {
     }
 
     private func makeProducer(codecpar: UnsafeMutablePointer<AVCodecParameters>) throws -> HLSSegmentProducer {
-        try HLSSegmentProducer(
+        HLSSegmentProducer(
             demuxer: Demuxer(),
             videoStreamIndex: 0,
             video: .init(codecpar: UnsafePointer(codecpar),

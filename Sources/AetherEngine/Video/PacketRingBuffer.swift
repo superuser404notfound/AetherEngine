@@ -508,20 +508,6 @@ final class PacketRingBuffer: @unchecked Sendable {
         return entries[idx].pts
     }
 
-    /// The oldest position a rewind can land on, on the session axis, once eviction has taken history
-    /// the window alone would have kept. nil until then, so a young session keeps its window arithmetic.
-    /// Audit VPERF-101: the byte budget can shrink the ring below `windowSeconds`, and the transport rail
-    /// must not advertise history that was evicted for space.
-    func residentFloorSessionSeconds(sessionStartPts: Double) -> Double? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard firstSeq > 0, sessionStartPts.isFinite,
-              keyframeHead < keyframeSeqs.count, let idx = indexLocked(keyframeSeqs[keyframeHead]) else {
-            return nil
-        }
-        return max(0, entries[idx].pts - sessionStartPts)
-    }
-
     /// Bytes the retained chunk files occupy, including the evicted prefix of the oldest chunk.
     var diskBytes: Int {
         lock.lock()

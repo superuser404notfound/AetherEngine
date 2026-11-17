@@ -136,7 +136,7 @@ final class SoftwarePlaybackHost {
             bytes = diskClaim.bytes
             guard bytes > 0 else { return nil }
             fifo = try SoftwarePacketDiskFIFO(
-                chunkTargetBytes: min(4 << 20, max(8, bytes)), retainConsumed: true,
+                chunkTargetBytes: min(4 << 20, max(8, bytes)),
                 parentDirectory: directory)
             claim = diskClaim
         }
@@ -614,17 +614,6 @@ final class SoftwarePlaybackHost {
         defer { liveEdgeLock.unlock() }
         guard sessionStartPts.isFinite, newestSourcePts.isFinite else { return 0 }
         return max(0, newestSourcePts - sessionStartPts)
-    }
-
-    /// The DVR ring's rewind floor on the session axis once byte or time eviction has moved it past
-    /// the start; nil before that and when no ring is armed. Published as the resident floor so the
-    /// seekable range follows what the ring still holds (audit VPERF-101).
-    nonisolated var dvrResidentFloorSessionSeconds: Double? {
-        guard let ring = dvrRing, !dvrRingHoldsCushionOnly else { return nil }
-        liveEdgeLock.lock()
-        let start = sessionStartPts
-        liveEdgeLock.unlock()
-        return ring.residentFloorSessionSeconds(sessionStartPts: start)
     }
 
     // MARK: - Live reader/feeder split (DVR sessions)
@@ -3370,7 +3359,7 @@ final class SoftwarePlaybackHost {
             // including a source read that was already in flight when recovery began.
             guard awaitReaderAdmission() else {
                 var stale: UnsafeMutablePointer<AVPacket>? = packet
-                av_packet_free(&stale)
+                trackedPacketFree(&stale)
                 return false
             }
 

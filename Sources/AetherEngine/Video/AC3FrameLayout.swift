@@ -105,3 +105,38 @@ struct AC3FrameLayout: Equatable, Sendable {
         }
     }
 }
+
+/// Latches an audio layout change only after the new layout held for several frames in a row. A lost
+/// TS packet or a bit error in one frame's header reads as a layout change for that frame alone, and
+/// answering it costs a discontinuity and a versioned init for nothing (audit SEG-202).
+struct AudioLayoutChangeGate: Sendable {
+    /// 3 frames of AC-3 are 96 ms: long enough to outlast damage, short enough for a real switch.
+    static let framesToConfirm = 3
+
+    private var candidate: AC3FrameLayout?
+    private var candidateFrames = 0
+
+    /// True when `layout` has differed from `current` for `framesToConfirm` consecutive frames.
+    mutating func confirmsChange(_ layout: AC3FrameLayout, from current: AC3FrameLayout) -> Bool {
+        guard layout != current else {
+            candidate = nil
+            candidateFrames = 0
+            return false
+        }
+        if layout == candidate {
+            candidateFrames += 1
+        } else {
+            candidate = layout
+            candidateFrames = 1
+        }
+        guard candidateFrames >= Self.framesToConfirm else { return false }
+        candidate = nil
+        candidateFrames = 0
+        return true
+    }
+
+    mutating func reset() {
+        candidate = nil
+        candidateFrames = 0
+    }
+}

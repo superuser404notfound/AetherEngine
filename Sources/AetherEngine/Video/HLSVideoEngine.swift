@@ -3933,7 +3933,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
 
         let producerEpoch = nextProducerEpoch()
-        let prod = try HLSSegmentProducer(
+        let prod = HLSSegmentProducer(
             demuxer: dem,
             videoStreamIndex: videoStreamIndex,
             video: cfg,

@@ -67,6 +67,12 @@ public actor FrameExtractor {
         queueJobsInFlight > 0 ? max(openDecoderPixelArea, knownDecoderPixelArea) : openDecoderPixelArea
     }
     var decoderMayBeOpen: Bool { openDecoderPixelArea > 0 || queueJobsInFlight > 0 }
+
+    /// Counts this extractor's decoder as possibly open from the moment a caller decides to decode,
+    /// before the job reaches the queue. Without it two concurrent budget passes each see the other's
+    /// incoming decoder as closed and both open it (AE#1059). Paired with `endDecodeReservation()`.
+    func reserveDecode() { queueJobsInFlight += 1 }
+    func endDecodeReservation() { queueJobsInFlight -= 1 }
     private var idleTask: Task<Void, Never>?
     private var residentApproximation: (width: Int, frame: ScrubFrame)?
     nonisolated let residentIdentity: String?

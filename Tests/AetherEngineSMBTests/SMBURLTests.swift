@@ -26,6 +26,20 @@ final class SMBURLTests: XCTestCase {
         XCTAssertThrowsError(try SMBURL.parse("http://nas.local/x/y"))
     }
 
+    /// Audit NET-209: the scheme is case-insensitive, and an error never repeats a password.
+    func testUppercaseSchemeParses() throws {
+        let u = try SMBURL.parse("SMB://user:secret@nas/share/movie.mkv")
+        XCTAssertEqual(u.share, "share")
+        XCTAssertEqual(u.password, "secret")
+    }
+
+    func testErrorDoesNotRepeatThePassword() {
+        XCTAssertThrowsError(try SMBURL.parse("http://user:hunter2@nas/share/movie.mkv")) { error in
+            XCTAssertFalse(error.localizedDescription.contains("hunter2"))
+            XCTAssertTrue(error.localizedDescription.contains("not an smb:// URL"))
+        }
+    }
+
     func testRejectsMissingFilePath() {
         XCTAssertThrowsError(try SMBURL.parse("smb://nas.local/onlyshare"))
     }

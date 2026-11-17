@@ -62,13 +62,13 @@ struct SoftwarePacketReadAheadTests {
 
     static func make(_ root: URL, audio: SoftwarePacketReadAhead.Stream? = nil,
                      budget: Int = 1_000_000, seconds: Double = 100, clock: Double = 0,
-                     retainConsumed: Bool = false, chunkTargetBytes: Int = 1024,
+                     chunkTargetBytes: Int = 1024,
                      videoReorderDepth: Int? = nil,
                      beforeConsumerOperation: (@Sendable () -> Void)? = nil,
                      read: @escaping @Sendable (@Sendable () -> Bool) throws -> SoftwareStoredPacket?) throws
         -> (SoftwarePacketReadAhead, SoftwarePacketDiskFIFO) {
         let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: chunkTargetBytes,
-                                             retainConsumed: retainConsumed, parentDirectory: root)
+                                             parentDirectory: root)
         let source = SoftwarePacketReadAhead(video: video, audio: audio,
             byteBudget: budget, forwardSeconds: seconds, initialSourceClock: clock, fifo: fifo,
             videoReorderDepth: videoReorderDepth,
@@ -134,6 +134,13 @@ struct SoftwarePacketReadAheadTests {
         close(source, fifo)
     }
 
+    /// A seek the cache cannot answer: `beginSeek(to:)` then the miss in `prepareSeek`, which discards the spool.
+    static func coldSeek(_ source: SoftwarePacketReadAhead, to seconds: Double) throws -> UInt64 {
+        let token = source.beginSeek(to: seconds)
+        _ = try source.prepareSeek(token, to: seconds)
+        return token
+    }
+
     static func queuedSeekReset(_ root: URL) throws {
         let next = Locked(packet(0, marker: 11))
         let (source, fifo) = try make(root, budget: 1) { accepts in
@@ -144,7 +151,7 @@ struct SoftwarePacketReadAheadTests {
         }
         source.start()
         eventually("old packet did not queue") { source.snapshot.packetCount == 1 }
-        let token = source.beginSeek()
+        let token = try coldSeek(source, to: 10)
         precondition(source.snapshot.frontier == nil && source.snapshot.packetCount == 0)
         let expected = packet(10, marker: 22)
         next.withValue { $0 = expected }
@@ -174,8 +181,8 @@ struct SoftwarePacketReadAheadTests {
         }
         source.start()
         requireSignal(entered, "source did not enter old read")
-        let first = source.beginSeek()
-        let second = source.beginSeek()
+        let first = source.beginSeek(to: 10)
+        let second = try coldSeek(source, to: 20)
         source.endSeek(first, sourceClock: 10)
         precondition(source.snapshot.seeking, "older seek cleared newer hold")
         source.endSeek(second, sourceClock: 20)
@@ -202,7 +209,7 @@ struct SoftwarePacketReadAheadTests {
         }
         source.start()
         requireSignal(beforeLock, "source did not pause before serialization lock")
-        let token = source.beginSeek()
+        let token = try coldSeek(source, to: 40)
         sourceReadLock.lock() // mirrors the real Demuxer seek's serialization boundary
         sourceReadLock.unlock()
         source.endSeek(token, sourceClock: 40)
@@ -284,8 +291,7 @@ struct SoftwarePacketReadAheadTests {
         let exactBudget = recordBytes * 4
         let calls = Locked(0)
         let refill = DispatchSemaphore(value: 0)
-        let (source, fifo) = try make(root, budget: exactBudget, retainConsumed: true,
-                                     chunkTargetBytes: recordBytes) { accepts in
+        let (source, fifo) = try make(root, budget: exactBudget, chunkTargetBytes: recordBytes) { accepts in
             try calls.withValue { value in
                 guard accepts() else { throw SourceFailure.rejected }
                 value += 1
@@ -355,7 +361,7 @@ struct SoftwarePacketReadAheadTests {
         eventually("old consumer fixture did not queue") { source.snapshot.packetCount == 1 }
         let oldConsumer = PendingRead(source)
         requireSignal(entered, "old consumer did not pause before operations lock")
-        let token = source.beginSeek()
+        let token = try coldSeek(source, to: 60)
         let expected = packet(60, marker: 61)
         next.withValue { $0 = expected }
         source.endSeek(token, sourceClock: 60)
@@ -399,7 +405,7 @@ struct SoftwarePacketReadAheadTests {
 
     static func retainedForwardAndBackwardSeek(_ root: URL) throws {
         let state = Locked((next: Int64(0), reads: 0))
-        let (source, fifo) = try make(root, retainConsumed: true) { accepts in
+        let (source, fifo) = try make(root) { accepts in
             try state.withValue { state in
                 guard accepts() else { throw SourceFailure.rejected }
                 state.reads += 1
@@ -438,7 +444,7 @@ struct SoftwarePacketReadAheadTests {
 
     static func retainedCacheMissAndRapidSeeks(_ root: URL) throws {
         let state = Locked((next: Int64(0), limit: Int64(30)))
-        let (source, fifo) = try make(root, retainConsumed: true) { accepts in
+        let (source, fifo) = try make(root) { accepts in
             try state.withValue { state in
                 guard accepts() else { throw SourceFailure.rejected }
                 guard state.next <= state.limit else { return nil }
@@ -475,7 +481,7 @@ struct SoftwarePacketReadAheadTests {
         let entered = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
         let state = Locked(Int64(0))
-        let (source, fifo) = try make(root, retainConsumed: true) { accepts in
+        let (source, fifo) = try make(root) { accepts in
             let pts = try state.withValue { value in
                 guard accepts() else { throw SourceFailure.rejected }
                 defer { value += 1 }; return value
@@ -508,8 +514,7 @@ struct SoftwarePacketReadAheadTests {
 
     static func expiredKeyframeCannotRestore(_ root: URL) throws {
         let next = Locked(Int64(0))
-        let (source, fifo) = try make(root, budget: 1400, retainConsumed: true,
-                                     chunkTargetBytes: 512) { accepts in
+        let (source, fifo) = try make(root, budget: 1400, chunkTargetBytes: 512) { accepts in
             try next.withValue { value in
                 guard accepts() else { throw SourceFailure.rejected }
                 guard value <= 40 else { return nil }
@@ -537,7 +542,7 @@ struct SoftwarePacketReadAheadTests {
         let release = DispatchSemaphore(value: 0)
         let hookCalls = Locked(0)
         let next = Locked(Int64(0))
-        let (source, fifo) = try make(root, retainConsumed: true, beforeConsumerOperation: {
+        let (source, fifo) = try make(root, beforeConsumerOperation: {
             let first = hookCalls.withValue { value in defer { value += 1 }; return value == 0 }
             if first { entered.signal(); requireSignal(release, "old cached consumer was not released") }
         }) { accepts in

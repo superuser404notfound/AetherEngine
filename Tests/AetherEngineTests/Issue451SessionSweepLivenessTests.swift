@@ -41,6 +41,34 @@ struct Issue451SessionSweepLivenessTests {
                 "an unheld directory past the cutoff is exactly what the sweep exists for")
     }
 
+    /// Audit NAT-201: the software packet spool shares the sweep. Unrelated entries in a busy temporary
+    /// directory do not use up its budget, and the one-hour age applies instead of one day.
+    @Test("The packet spool sweep reaches an old spool behind 100 unrelated entries and spares a leased one")
+    func packetSpoolRemnantIsSweptBehindUnrelatedEntries() throws {
+        let base = makeBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        for index in 0..<100 {
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent("unrelated-\(index)", isDirectory: true),
+                withIntermediateDirectories: true)
+        }
+        let prefix = SoftwarePacketDiskFIFO.directoryPrefix
+        let dead = base.appendingPathComponent(prefix + UUID().uuidString, isDirectory: true)
+        let live = base.appendingPathComponent(prefix + UUID().uuidString, isDirectory: true)
+        for url in [dead, live] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            #expect(backdate(url))
+        }
+        let lease = try SessionDirectoryLiveness.acquireExclusive(sessionDir: live)
+        defer { Darwin.close(lease) }
+
+        let result = SoftwarePacketDiskFIFO.sweepStaleSessionDirs(parentDirectory: base)
+
+        #expect(!FileManager.default.fileExists(atPath: dead.path))
+        #expect(FileManager.default.fileExists(atPath: live.path))
+        #expect(result.removedCount == 1)
+    }
+
     @Test("A sibling younger than the cutoff is spared")
     func youngSiblingIsSpared() {
         let base = makeBase()

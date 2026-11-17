@@ -63,6 +63,20 @@ struct SourceTimestampBoundsTests {
             existingDuration: 0, dts: big, nextDts: -big, fallback: 1800, capTicks: 90_000) == 1800)
     }
 
+    /// Audit SEG-R202: one rule for the inherit and the override rebase branches.
+    @Test func audioRebaseKeepsACandidateUnlessItOverlapsByMoreThanHalfASecond() {
+        let tb = AVRational(num: 1, den: 48_000)
+        let kept = HLSSegmentProducer.reanchoredAudioShift(
+            lastOutputDts: 100_000, boundarySrcDts: 500_000, packetDts: 500_000, candidateShift: 400_100, timeBase: tb)
+        #expect(!kept.reanchored && kept.shift == 400_100 && kept.maxOverlapTicks == 24_000)
+        let reset = HLSSegmentProducer.reanchoredAudioShift(
+            lastOutputDts: 100_000, boundarySrcDts: 500_000, packetDts: 500_000, candidateShift: 460_000, timeBase: tb)
+        #expect(reset.reanchored && reset.overlapTicks == 60_000 && reset.shift == 399_999)
+        let extreme = HLSSegmentProducer.reanchoredAudioShift(
+            lastOutputDts: Int64.max, boundarySrcDts: Int64.min + 1, packetDts: 0, candidateShift: Int64.max, timeBase: tb)
+        #expect(extreme.reanchored)
+    }
+
     // MARK: - The demuxer funnel (audit NAT-101 / DEC-101 / FEA-101 / SUB-105)
 
     private func sanitized(pts: Int64, dts: Int64, duration: Int64 = 0, _ timeBase: AVRational)

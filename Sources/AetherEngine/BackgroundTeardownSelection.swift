@@ -65,6 +65,7 @@ extension AetherEngine {
         if live.activeSubtitleTrackIndex == nil, live.primarySidecarURL == nil {
             merged.activeSubtitleTrackIndex = snapshot.activeSubtitleTrackIndex
             merged.primarySidecarURL = snapshot.primarySidecarURL
+            merged.primarySidecarHeaders = snapshot.primarySidecarHeaders
             // The ordinal is the active pick's mapping through the rendition table, so it travels
             // with the pick rather than on its own.
             merged.nativeReapplyOrdinal = snapshot.nativeReapplyOrdinal
@@ -73,6 +74,7 @@ extension AetherEngine {
         if live.secondaryTrackIndex == nil, live.secondarySidecarURL == nil {
             merged.secondaryTrackIndex = snapshot.secondaryTrackIndex
             merged.secondarySidecarURL = snapshot.secondarySidecarURL
+            merged.secondarySidecarHeaders = snapshot.secondarySidecarHeaders
         }
         return merged
     }

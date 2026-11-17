@@ -3,28 +3,6 @@ import AetherLibavformat
 import AetherLibavcodec
 import AetherLibavutil
 
-/// Extract VPS/SPS/PPS NALs from hvcC extradata (22-byte header + numOfArrays arrays). Returns raw NAL bytes without length prefix or start code.
-func parseHVCCParameterSets(_ ed: UnsafePointer<UInt8>, _ size: Int) -> [[UInt8]] {
-    guard size > 23 else { return [] }
-    var out: [[UInt8]] = []
-    let numArrays = Int(ed[22])
-    var p = 23
-    for _ in 0..<numArrays {
-        guard p + 3 <= size else { break }
-        let numNalus = (Int(ed[p + 1]) << 8) | Int(ed[p + 2])
-        p += 3
-        for _ in 0..<numNalus {
-            guard p + 2 <= size else { return out }
-            let nalLen = (Int(ed[p]) << 8) | Int(ed[p + 1])
-            p += 2
-            guard nalLen > 0, p + nalLen <= size else { return out }
-            out.append([UInt8](UnsafeBufferPointer(start: ed + p, count: nalLen)))
-            p += nalLen
-        }
-    }
-    return out
-}
-
 /// Result of a `doviConvertProbe` run over a source's HEVC video stream.
 public struct DoviConvertProbeResult: Sendable {
     public let packetsProcessed: Int
