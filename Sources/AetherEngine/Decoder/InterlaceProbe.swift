@@ -77,40 +77,35 @@ enum InterlaceProbe {
               let codecpar = stream.pointee.codecpar else {
             return .inconclusive(reason: "no video stream")
         }
-        guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id),
-              let ctx = avcodec_alloc_context3(codec) else {
+        guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
             return .inconclusive(reason: "no decoder")
+        }
+        let ctx: UnsafeMutablePointer<AVCodecContext>
+        do {
+            // Software decode only: the frame flags are what is being measured, and a hwaccel surface
+            // adds nothing to that. Mirrors SoftwareVideoDecoder.open's get_format rejection.
+            ctx = try FFmpegDecoderContext.open(
+                codec: codec, codecpar: codecpar, maxPixels: FFmpegDecoderContext.maxVideoPixels,
+                options: ["hwaccel": "none"]
+            ) { ctx in
+                ctx.pointee.get_format = FFmpegDecoderContext.softwareOnlyGetFormat
+                // The sample is thrown away, only its per-frame interlace flags are read, and deblocking
+                // touches neither. Skipping it is the one cheap win that cannot change the answer.
+                ctx.pointee.skip_loop_filter = AVDISCARD_ALL
+                ctx.pointee.thread_count = Int32(min(4, ProcessInfo.processInfo.activeProcessorCount))
+                ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
+            }
+        } catch FFmpegDecoderContext.Failure.allocation {
+            return .inconclusive(reason: "no decoder")
+        } catch FFmpegDecoderContext.Failure.parameters {
+            return .inconclusive(reason: "parameters_to_context failed")
+        } catch FFmpegDecoderContext.Failure.open(let code) {
+            return .inconclusive(reason: "decoder open failed (\(code))")
+        } catch {
+            return .inconclusive(reason: "decoder open failed")
         }
         var ownedCtx: UnsafeMutablePointer<AVCodecContext>? = ctx
         defer { avcodec_free_context(&ownedCtx) }
-
-        guard avcodec_parameters_to_context(ctx, codecpar) >= 0 else {
-            return .inconclusive(reason: "parameters_to_context failed")
-        }
-        // Software decode only: the frame flags are what is being measured, and a hwaccel surface
-        // adds nothing to that. Mirrors SoftwareVideoDecoder.open's get_format rejection.
-        ctx.pointee.get_format = { _, fmts in
-            guard let fmts = fmts else { return AV_PIX_FMT_NONE }
-            var i = 0
-            while fmts[i] != AV_PIX_FMT_NONE {
-                if fmts[i] != AV_PIX_FMT_VIDEOTOOLBOX { return fmts[i] }
-                i += 1
-            }
-            return AV_PIX_FMT_YUV420P
-        }
-        // The sample is thrown away, only its per-frame interlace flags are read, and deblocking
-        // touches neither. Skipping it is the one cheap win that cannot change the answer.
-        ctx.pointee.skip_loop_filter = AVDISCARD_ALL
-        ctx.pointee.thread_count = Int32(min(4, ProcessInfo.processInfo.activeProcessorCount))
-        ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
-
-        var opts: OpaquePointer?
-        av_dict_set(&opts, "hwaccel", "none", 0)
-        let openRet = avcodec_open2(ctx, codec, &opts)
-        av_dict_free(&opts)
-        guard openRet >= 0 else {
-            return .inconclusive(reason: "decoder open failed (\(openRet))")
-        }
 
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         guard let f = frame else { return .inconclusive(reason: "frame alloc failed") }

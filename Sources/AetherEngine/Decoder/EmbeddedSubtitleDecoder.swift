@@ -80,33 +80,22 @@ final class EmbeddedSubtitleDecoder {
     init?(codecpar: UnsafePointer<AVCodecParameters>, sourceVideoWidth: Int32, sourceVideoHeight: Int32, sourceIsPQ: Bool = false, preserveASSMarkup: Bool = false, teletextPage: Int? = nil) {
         guard codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE else { return nil }
         let id = codecpar.pointee.codec_id
-        guard let codec = avcodec_find_decoder(id),
-              let ctx = avcodec_alloc_context3(codec)
-        else { return nil }
-
-        if avcodec_parameters_to_context(ctx, codecpar) < 0 {
-            var local: UnsafeMutablePointer<AVCodecContext>? = ctx
-            avcodec_free_context(&local)
-            return nil
-        }
-
-        // Seed bitmap canvas from video dims; PCS overwrites once it arrives (probe can't always determine them upfront).
-        // AE#971: not DVB. dvbsubdec takes its canvas from the DDS, or the EN 300 743 default of 720x576
-        // without one, only while the context has no size, so a seed overrode both.
-        if Self.isBitmapCodec(id), id != AV_CODEC_ID_DVB_SUBTITLE {
-            if ctx.pointee.width == 0 { ctx.pointee.width = sourceVideoWidth }
-            if ctx.pointee.height == 0 { ctx.pointee.height = sourceVideoHeight }
-        }
-
-        var opts: OpaquePointer?
-        for (key, value) in Self.decoderOptions(for: id, teletextPage: teletextPage) {
-            av_dict_set(&opts, key, value, 0)
-        }
-        let openResult = avcodec_open2(ctx, codec, &opts)
-        av_dict_free(&opts)
-        if openResult < 0 {
-            var local: UnsafeMutablePointer<AVCodecContext>? = ctx
-            avcodec_free_context(&local)
+        guard let codec = avcodec_find_decoder(id) else { return nil }
+        let ctx: UnsafeMutablePointer<AVCodecContext>
+        do {
+            ctx = try FFmpegDecoderContext.open(
+                codec: codec, codecpar: codecpar, maxPixels: FFmpegDecoderContext.maxSubtitlePixels,
+                options: Self.decoderOptions(for: id, teletextPage: teletextPage)
+            ) { ctx in
+                // Seed bitmap canvas from video dims; PCS overwrites once it arrives (probe can't always determine them upfront).
+                // AE#971: not DVB. dvbsubdec takes its canvas from the DDS, or the EN 300 743 default of 720x576
+                // without one, only while the context has no size, so a seed overrode both.
+                if Self.isBitmapCodec(id), id != AV_CODEC_ID_DVB_SUBTITLE {
+                    if ctx.pointee.width == 0 { ctx.pointee.width = sourceVideoWidth }
+                    if ctx.pointee.height == 0 { ctx.pointee.height = sourceVideoHeight }
+                }
+            }
+        } catch {
             return nil
         }
 
@@ -695,6 +684,8 @@ final class EmbeddedSubtitleDecoder {
         let stride = Int(r.linesize.0)
         // Malformed rect guard: stride < width would read past the plane allocation.
         guard stride >= width else { return nil }
+        // Decoders that skip the context's max_pixels (xsub) can still hand over a huge plane (audit DEC-201).
+        guard width * height <= Int(FFmpegDecoderContext.maxSubtitlePixels) else { return nil }
 
         // AE#628: resolve the palette once. Every pixel below is then one table read instead of a
         // palette walk plus a premultiply; on a full-canvas plane that is the difference between 5 ms

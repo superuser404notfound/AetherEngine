@@ -188,6 +188,7 @@ Notes:
 | `CCDataParser.swift` | Parses the bare cc_data triplet stream from a demuxable CEA-608 caption track (#77). |
 | `CEA608Decoder.swift` | In-house CEA-608 line-21 decoder (field 1 / CC1), checked against FFmpeg `ccaption_dec.c` (#77). |
 | `DeinterlaceFilter.swift` | Software path: persistent bwdif / yadif libavfilter graph; engages on the first interlaced frame. |
+| `FFmpegDecoderContext.swift` | The one libavcodec decoder-context open (allocate, copy codecpar, configure, `max_pixels`, open, free on failure) behind the video, probe and subtitle decoders (audit DEC-R202). |
 | `EmbeddedSubtitleDecoder.swift` | Inline subtitle decode from demuxed packets. Opens DVB teletext with libzvbi_teletextdec text-format options (#107). |
 | `InterlaceProbe.swift` | Decodes a sample and applies the deinterlacer's own engagement test, so a declared field order that no frame backs up (PsF) stops costing a software decode (#232). |
 | `VideoRoutingPolicy.swift` | Pure dispatch rule by codec and field order. See note. |
