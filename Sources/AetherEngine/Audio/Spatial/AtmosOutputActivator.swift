@@ -35,11 +35,16 @@ import AVFoundation
 /// `AVSampleBufferAudioRenderer`, and an Apple TV 4K (tvOS 26.6) whose receiver showed Atmos for the
 /// AVPlayer route's APAC did not show it for the same title's APAC on that renderer. There the activator
 /// follows the host's transport instead of a player (`attachRenderer`).
+///
+/// #1081: the player that loops the stream exists only while the stream is wanted. A paused, emptied
+/// player that had played it kept an Apple TV 4K's HDMI route (tvOS 27.3) in its 32-channel layout
+/// after `stop()`, and the next title's 5.1 PCM reached the receiver as Dolby Atmos for as long as the
+/// engine lived. A fresh engine for the same title played it as multichannel PCM.
 @MainActor
 final class AtmosOutputActivator {
     static let silentAtmosStream = Bundle.module.url(forResource: "silent-atmos", withExtension: "mp4")!
 
-    private let player = AVQueuePlayer()
+    private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
     private weak var host: AVPlayer?
     private var playsAPAC: @MainActor (AVPlayerItem) -> Bool = { _ in false }
@@ -61,7 +66,6 @@ final class AtmosOutputActivator {
     ) {
         self.outputPortTypes = outputPortTypes
         self.pauseGrace = pauseGrace
-        player.automaticallyWaitsToMinimizeStalling = false
     }
 
     /// True only for a route whose every output is HDMI: the sink the stream exists for. An empty
@@ -183,14 +187,23 @@ final class AtmosOutputActivator {
         }
         pauseAfterGrace?.cancel()
         pauseAfterGrace = nil
-        if looper == nil {
-            looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: Self.silentAtmosStream))
-        }
+        let player = player ?? makePlayer()
         player.play()
     }
 
+    private func makePlayer() -> AVQueuePlayer {
+        let player = AVQueuePlayer()
+        player.automaticallyWaitsToMinimizeStalling = false
+        looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: Self.silentAtmosStream))
+        self.player = player
+        return player
+    }
+
     /// True while the silent stream is playing.
-    var isPlayingStream: Bool { player.rate != 0 }
+    var isPlayingStream: Bool { (player?.rate ?? 0) != 0 }
+
+    /// True while the activator holds a player for the stream, paused or not (#1081).
+    var holdsStreamPlayer: Bool { player != nil }
 
     private func holdThroughPause() {
         guard isPlayingStream, pauseAfterGrace == nil else { return }
@@ -198,18 +211,19 @@ final class AtmosOutputActivator {
             try? await Task.sleep(for: pauseGrace)
             guard !Task.isCancelled, let self else { return }
             self.pauseAfterGrace = nil
-            self.player.pause()
+            self.player?.pause()
         }
     }
 
     private func release() {
         pauseAfterGrace?.cancel()
         pauseAfterGrace = nil
-        guard let looper else { return }
+        guard let player else { return }
         player.pause()
-        looper.disableLooping()
-        self.looper = nil
+        looper?.disableLooping()
+        looper = nil
         player.removeAllItems()
+        self.player = nil
     }
 
     private nonisolated static func onMain(_ body: @escaping @MainActor @Sendable () -> Void) {

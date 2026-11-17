@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **After a rendered Atmos title, the next 5.1 title no longer reaches the receiver as Atmos (AE#1081).**
+  On tvOS the `AtmosOutputActivator` keeps a second player looping a silent Atmos stream while a TrueHD
+  Atmos or DTS:X bed plays. At `stop()` that player was paused and emptied but stayed on the engine, and
+  it kept the HDMI route in its 32-channel layout. On an engine reused across titles, a 5.1 PCM title
+  played afterwards showed as Dolby Atmos on the receiver until the process ended. The player is now built
+  when the stream starts and released with it. Thanks to narenh for the report and the side by side with
+  a fresh engine.
+
 - **Native video on iOS can keep its sound in the background (AE#1080).** The engine kept a playing native
   session alive when the app left the foreground, but the AVPlayer inside still had the `.automatic`
   background policy, and under it iOS pauses any item that carries video. The native player now uses
