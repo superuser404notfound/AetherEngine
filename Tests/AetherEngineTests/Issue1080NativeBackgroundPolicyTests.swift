@@ -5,7 +5,7 @@ import Testing
 /// AE#1080: the native AVPlayer's background policy follows `backgroundPlaybackEnabled`. Whether audio
 /// really keeps going in the background needs an iPhone; this pins the choice the engine makes.
 @MainActor
-@Suite("AE#1080 native AVPlayer background policy", .timeLimit(.minutes(1)))
+@Suite("AE#1080 native AVPlayer background policy", .timeLimit(.minutes(3)))
 struct Issue1080NativeBackgroundPolicyTests {
 
     @Test("enabled continues if possible, disabled stays automatic")

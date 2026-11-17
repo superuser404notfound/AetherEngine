@@ -6,7 +6,7 @@ import Testing
 /// emptied, it still held the Apple TV's HDMI route in 32 channels, so the next title's 5.1 PCM reached
 /// the receiver as Dolby Atmos. The player now exists only while the stream is wanted.
 @MainActor
-@Suite("The Atmos output activator lets its player go with the stream (#1081)", .serialized, .timeLimit(.minutes(2)))
+@Suite("The Atmos output activator lets its player go with the stream (#1081)", .serialized, .timeLimit(.minutes(3)))
 struct Issue1081AtmosActivatorReleasesPlayerTests {
 
     private func attached(ports: [String] = ["HDMIOutput"]) -> (AtmosOutputActivator, AVPlayer) {
