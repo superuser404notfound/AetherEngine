@@ -3242,9 +3242,10 @@ extension AetherEngine {
                 // from the raw spans so it does not carry the retired epoch's offset until the next
                 // segment lands (AE#468 follow-up).
                 self.republishResidentRanges()
-                // AE#422: read off-main before building the line (see `avPlayerBufferAheadSeconds`).
-                let avBufAhead = await self.avPlayerBufferAheadSeconds()
                 // Re-fold immediately so currentTime doesn't lag the next periodic tick (origin-corrected).
+                // Audit LOAD-206: before the read below, which only the log line needs. That read can
+                // wait seconds on a stalled queue (AE#422), and a shift, seek or zap that lands meanwhile
+                // must not get this one's fold written over its clock.
                 self.clock.currentTime = self.isLive && self.videoRoute == .loopback
                     ? self.nativeClockSeconds + self.liveSessionShiftSeconds
                         + self.liveItemAxisOffsetSeconds
@@ -3252,6 +3253,8 @@ extension AetherEngine {
                         sourcePTS: self.nativeClockSeconds + activeShift,
                         origin: self.displayOrigin(forShift: activeShift))
                 // sourceTime re-folds on next $renderedTime tick; keeping it there tracks the rendered picture, not the optimistic clock (#49).
+                // AE#422: read off-main before building the line (see `avPlayerBufferAheadSeconds`).
+                let avBufAhead = await self.avPlayerBufferAheadSeconds()
                 EngineLog.emit(
                     "[AetherEngine] VOD shift published: \(String(format: "%.3f", seconds))s "
                     + "(prev \(String(format: "%.3f", prevShift))s, delta \(String(format: "%.3f", delta))s, "
