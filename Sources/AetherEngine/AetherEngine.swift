@@ -7796,8 +7796,10 @@ public final class AetherEngine: ObservableObject {
         // AE#998: read the observed object, never the decoded change value. Decoding it casts
         // through the Swift runtime, and that cast measured 0.4 to 0.6 s on main inside the
         // `replaceCurrentItem` of a stop after a long watch (a conformance-cache miss).
+        // Audit LIF-207: a nil item is published too. Returning on it kept the detached item published
+        // and retained after every `replaceCurrentItem(with: nil)` until the next item attached.
         currentItemObservation = player.observe(\.currentItem, options: []) { [weak self] player, _ in
-            guard let item = player.currentItem else { return }
+            let item = player.currentItem
             Task { @MainActor in self?.currentAVPlayerItem = item }
         }
     }

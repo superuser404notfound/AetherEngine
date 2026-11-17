@@ -1,9 +1,11 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import AetherEngine
 
 /// What leaves with an item: `stop()`, the next `load()` and a load its caller cancelled
-/// (Sodalite#173) clear the same per-item state through one reset (audit LIF-R202).
+/// (Sodalite#173) clear the same per-item state through one reset (audit LIF-R202), and the
+/// published native item follows the player to nil (audit LIF-207).
 @Suite("Per-item state leaves with its item", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct ItemScopedResetTests {
@@ -47,5 +49,20 @@ struct ItemScopedResetTests {
         let engine = try await Self.loadedEngine()
         engine.stop()
         Self.expectNoItemState(engine, "after stop()")
+    }
+
+    @Test("the published native item goes nil with the player's (audit LIF-207, regression of AE#998)")
+    func currentItemFollowsThePlayerToNil() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let file = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("lif207-\(UUID().uuidString).mp4")
+        let item = AVPlayerItem(url: file)
+        let player = AVPlayer(playerItem: item)
+        engine.currentAVPlayer = player
+        #expect(engine.currentAVPlayerItem === item)
+
+        player.replaceCurrentItem(with: nil)
+        try await waitFor { engine.currentAVPlayerItem == nil }
+        engine.currentAVPlayer = nil
     }
 }
