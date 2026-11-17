@@ -23,6 +23,7 @@ xcrun swiftc -swift-version 6 \
   "$TASK_ROOT/Sources/AetherEngine/Diagnostics/EngineLog.swift" \
   "$TASK_ROOT/Sources/AetherEngine/Diagnostics/LogRedaction.swift" \
   "$TASK_ROOT/Sources/AetherEngine/Decoder/A53SEIParser.swift" \
+  "$TASK_ROOT/Sources/AetherEngine/Video/AnnexB.swift" \
   "$TASK_ROOT/Sources/AetherEngine/Decoder/CCDataParser.swift" \
   "$TASK_ROOT/Sources/AetherEngine/Video/H264CompositionOffsetRepair.swift" \
   "$TASK_ROOT/Sources/AetherEngine/Video/H264PartialCompositionRepair.swift" \
