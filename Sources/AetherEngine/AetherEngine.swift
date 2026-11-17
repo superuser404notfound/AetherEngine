@@ -4840,7 +4840,7 @@ public final class AetherEngine: ObservableObject {
     /// blocking open is aborted and the custom reader closed, while the native host (#15) and an AE#158
     /// handover item are kept for that load and the panel keeps its mode. `state` reads `.idle`; a host
     /// that is leaving playback calls `stop()` to release the rest.
-    private func endCancelledGeneration(_ gen: UInt64) {
+    func endCancelledGeneration(_ gen: UInt64) {
         EngineLog.emit(
             "[AetherEngine] Sodalite#173: load (gen \(gen)) cancelled by its caller; ending it",
             category: .engine)
@@ -4852,11 +4852,10 @@ public final class AetherEngine: ObservableObject {
         pendingInPlaceItemHandover = false
         state = .idle
         startupProgress = nil
-        clock.currentTime = 0
-        clock.bufferedPosition = 0
-        clock.progress = 0
+        resetItemScopedState()   // audit LIF-R202
         loadedURL = nil
         isCustomSource = false
+        customSourceIsSeekable = false
     }
 
     private func loadSession(
@@ -5002,38 +5001,8 @@ public final class AetherEngine: ObservableObject {
         residentPlaylistRanges = []
         residentRanges = []
         readerStall = .flowing
-        clock.currentTime = 0
-        clock.bufferedPosition = 0
         nativeClockSeconds = 0
-        duration = 0
-        clock.progress = 0
-        audioTracks = []
-        subtitleTracks = []
-        teardownLiveSubtitleRenditions()   // AE#359
-        externalSubtitleRegistry = [:]
-        nextExternalSubtitleOrdinal = 0
-        hostExplicitSubtitleAction = false
-        setSecondarySubtitleIdentity()
-        // #357: any load that is not the reload claiming it (which consumed it before calling here)
-        // is a different session; a parked selection must not follow it.
-        backgroundTeardownSelection = nil
-        // #170: a stale latched rendering request from a superseded session-preserving reload
-        // must not leak into this session; requests for the in-flight reload can only land at
-        // suspension points after this prologue, so they survive.
-        pendingNativeRenderingRequest = nil
-        externalNativeStoreFillTask?.cancel()
-        externalNativeStoreFillTask = nil
-        resetSubtitleOCRState()   // Phase D: new session, new axis
-        remoteHLSSubtitleDiscoveryTask?.cancel()
-        remoteHLSSubtitleDiscoveryTask = nil
-        audibleReadbackTask?.cancel()
-        audibleReadbackTask = nil
-        cancelAudioMenuPicks()   // AE#1049: the watch belongs to the item being replaced
-        cancelNativeLegibleDeselectPin()   // Sodalite#65: the pin belongs to the item being replaced
-        remoteHLSSubtitleProxy?.tearDown()   // #316
-        remoteHLSSubtitleProxy = nil
-        injectedSubtitleRenditionNames = [:]
-        detachRemoteHLSCueClock()   // AE#616
+        resetItemScopedState()   // audit LIF-R202
         stallRecoveryWindowUntil = .distantPast
         stallRecoveryReasserts = 0
         stallReengageTask?.cancel()
@@ -5054,48 +5023,11 @@ public final class AetherEngine: ObservableObject {
         nativeSubtitleMarkerOrdinal = nil
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
-        metadata = nil
-        fontAttachments = []
         discTitles = []
         selectedDiscTitle = nil
         discChapters = []
-        containerChapterSource = nil
         softwareClockSessionZero = nil
-        mediaChapters = []
         subtitleCueDiagnosticBudget = .init()
-        // Reset format/dimension state so paths that skip the probe (nativeRemoteHLS) or find no video
-        // don't keep publishing the predecessor's values (e.g. Live TV after an HDR10 film kept reporting .hdr10).
-        videoFormat = .sdr
-        sourceDVBLCompatID = nil
-        sourceDolbyVisionBaseLayerPresentable = false
-        sourceVideoFormat = .sdr
-        sourceDVProfile = nil
-        dolbyVisionConversion = nil
-        sourceCarriesHDR10PlusMetadata = false
-        sourceElType = nil
-        outputRouteFrameRate = nil
-        sourceUpscalePlan = nil
-        sourceUpscaleDisabled = nil
-        sourceSoftwareOnlyForUpscale = false
-        sourceUpscaleFrameRate = nil
-        sourceVideoProcessingPlan = nil
-        sourceVideoProcessingDisabled = nil
-        sourceSoftwareOnlyForVideoProcessing = false
-        sourceVideoProcessingFrameRate = nil
-        sourceDolbyVisionRPUProfile = nil
-        sourceMeasuredFrameRate = nil
-        sessionPanelHDRReadout = nil
-        sessionObservedDisplayCaps = nil
-        sourceVideoFrameRate = nil
-        sourceVideoScan = .unknown
-        sourceVideoBitrate = 0
-        sourceVideoStreamFormat = nil
-        decodedVideoFormat = nil
-        sourceVideoCodecName = nil
-        sourceContainerFormat = nil
-        sourceVideoWidth = 0
-        sourceVideoHeight = 0
-        sourceVideoPixelAspectRatio = 1
 
         // #114: guarantee the AVAudioSession category is declared off-main before any branch
         // below can activate the session: AVKit on the native/remote-HLS paths, activateRendererAudioSession()
@@ -7722,24 +7654,14 @@ public final class AetherEngine: ObservableObject {
         nextLoadRequestsInPlaceItemHandover = true
     }
 
-    public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
-        cancelPendingAudioSelection()
-        releaseHeldPicture(reason: "stop")
-        nextLoadRequestsInPlaceItemHandover = false
-        stopInternal(resetDisplayCriteria: resetDisplayCriteria,
-                     finalTeardown: finalTeardown ?? resetDisplayCriteria,
-                     cacheCleanupReason: .sessionStopped)
-        state = .idle
-        // #361: the sequence ends here without ever reaching its last checkpoint, which is the whole
-        // point: nothing about a stop should read as a finished startup. Cleared in stop() and not in
-        // stopInternal, because every load() runs stopInternal and a reroute's teardown must leave the
-        // startup it is still serving alone.
-        startupProgress = nil
+    /// Audit LIF-R202: what belongs to the item and leaves with it, shared by `stop()`, every
+    /// `load()`'s prologue and a load its caller cancelled (Sodalite#173). Each site adds only its own
+    /// extras, so a new per-item field is added once. Without this the cancelled-load path had drifted:
+    /// an engine idled by a cancelled load kept publishing that item's tracks, duration and format.
+    func resetItemScopedState() {
         clock.currentTime = 0
         clock.bufferedPosition = 0
         clock.progress = 0
-        // Clear session state; without this, metadata/track lists/format/pendingExternalMetadata from the
-        // previous session survive until the next load and bleed into unrelated sessions.
         duration = 0
         metadata = nil
         audioTracks = []
@@ -7749,8 +7671,12 @@ public final class AetherEngine: ObservableObject {
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
         setSecondarySubtitleIdentity()
-        backgroundTeardownSelection = nil     // #357: leaving playback is not a reload
-        pendingNativeRenderingRequest = nil   // #170: the session the latched request targeted is gone
+        // #357: a reload claims the parked selection before its load runs this; anything else is a
+        // different session, or leaving playback.
+        backgroundTeardownSelection = nil
+        // #170: the session a latched rendering request targeted is gone. Requests for a reload in
+        // flight land at suspension points after the load's prologue, so they survive.
+        pendingNativeRenderingRequest = nil
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
         resetSubtitleOCRState()   // Phase D: new session, new axis
@@ -7759,7 +7685,7 @@ public final class AetherEngine: ObservableObject {
         audibleReadbackTask?.cancel()
         audibleReadbackTask = nil
         cancelAudioMenuPicks()   // AE#1049: the watch belongs to the item being replaced
-        cancelNativeLegibleDeselectPin()   // Sodalite#65: the pin belongs to the item being torn down
+        cancelNativeLegibleDeselectPin()   // Sodalite#65: the pin belongs to the item being replaced
         // #316: the proxy serves exactly one session's master; a standing socket outliving it would keep a
         // port and a decode task alive for a source nobody plays any more.
         remoteHLSSubtitleProxy?.tearDown()
@@ -7771,11 +7697,12 @@ public final class AetherEngine: ObservableObject {
         fontAttachments = []
         // Container chapters belong to the source URL, not to the pipeline: the internal reopens of the same
         // source (audio switch, iOS background return, #127 expiry) run through stopInternal without
-        // re-probing, so stopInternal leaves them alone. This is the end of the session, so they go here,
-        // and the next load probes the new source. Disc chapters are cleared by stopInternal: a title
+        // re-probing, so stopInternal leaves them alone. Disc chapters are cleared by stopInternal: a title
         // switch really does change them, and the reload path recaptures them from the reopened demuxer.
         containerChapterSource = nil
         mediaChapters = []
+        // Format and dimension state, so a path that skips the probe (nativeRemoteHLS) or finds no video
+        // does not keep publishing the predecessor's (Live TV after an HDR10 film kept reporting .hdr10).
         videoFormat = .sdr
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
@@ -7807,6 +7734,22 @@ public final class AetherEngine: ObservableObject {
         sourceVideoWidth = 0
         sourceVideoHeight = 0
         sourceVideoPixelAspectRatio = 1
+    }
+
+    public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
+        cancelPendingAudioSelection()
+        releaseHeldPicture(reason: "stop")
+        nextLoadRequestsInPlaceItemHandover = false
+        stopInternal(resetDisplayCriteria: resetDisplayCriteria,
+                     finalTeardown: finalTeardown ?? resetDisplayCriteria,
+                     cacheCleanupReason: .sessionStopped)
+        state = .idle
+        // #361: the sequence ends here without ever reaching its last checkpoint, which is the whole
+        // point: nothing about a stop should read as a finished startup. Cleared in stop() and not in
+        // stopInternal, because every load() runs stopInternal and a reroute's teardown must leave the
+        // startup it is still serving alone.
+        startupProgress = nil
+        resetItemScopedState()
         pendingExternalMetadata = []
         // Same lifetime as pendingExternalMetadata: session identity the host staged, cleared when the
         // host leaves playback so the next session cannot inherit the previous title's system card.
