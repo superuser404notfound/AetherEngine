@@ -160,15 +160,15 @@ final class NormalizationTap: @unchecked Sendable {
             processor.process(interleaved: data.assumingMemoryBound(to: Float.self), frames: min(frames, available))
         } else {
             guard buffers.count == processor.channels else { return }
-            var planes: [UnsafeMutablePointer<Float>] = []
-            planes.reserveCapacity(buffers.count)
-            var available = frames
-            for buffer in buffers {
-                guard let data = buffer.mData else { return }
-                available = min(available, Int(buffer.mDataByteSize) / 4)
-                planes.append(data.assumingMemoryBound(to: Float.self))
+            withUnsafeTemporaryAllocation(of: UnsafeMutablePointer<Float>.self, capacity: buffers.count) { planes in
+                var available = frames
+                for (index, buffer) in buffers.enumerated() {
+                    guard let data = buffer.mData else { return }
+                    available = min(available, Int(buffer.mDataByteSize) / 4)
+                    planes.initializeElement(at: index, to: data.assumingMemoryBound(to: Float.self))
+                }
+                processor.process(planes: UnsafeBufferPointer(planes), frames: available)
             }
-            processor.process(planes: planes, frames: available)
         }
     }
 }
