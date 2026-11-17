@@ -8,7 +8,8 @@ import Foundation
 // sample-buffer renderer that keeps going on whatever route is left, so a viewer who pulled the
 // headphones would hear the film on the speakers. The public contract is
 // `AVAudioSession.routeChangeNotification` with reason `.oldDeviceUnavailable`; the previous route
-// tells what went away. The native AVPlayer path does this on its own and is not touched.
+// tells what went away. The native AVPlayer path pauses on its own; only the interruption resume is
+// disarmed for it (review R-P5-2).
 // iOS and tvOS only: macOS has no audio session, so there is no equivalent notification to observe.
 extension AetherEngine {
 
@@ -34,10 +35,17 @@ extension AetherEngine {
             && previousOutputPortTypes.contains(where: routeRemovalPausingPortTypes.contains)
     }
 
-    /// The reaction. Only a renderer path that is playing: a paused session has nothing to stop, and
-    /// the native path is paused by AVPlayer. Goes through `pause()`, so it is a pause like any other
-    /// (disarms an interruption resume, publishes `.paused`).
+    /// The reaction. First, on every path and in every state, an interruption resume is disarmed
+    /// (review R-P5-2): AirPods taken out during a call left it armed, and the call's ENDED with
+    /// `shouldResume` restarted the film on the phone speaker. AVPlayer's own pause on the removal
+    /// never reaches `pause()`, so nothing else disarmed it on the native path.
+    ///
+    /// Then the pause, only for a renderer path that is playing: a paused session has nothing to stop,
+    /// and the native path is paused by AVPlayer. Goes through `pause()`, so it is a pause like any
+    /// other (publishes `.paused`).
     func noteOutputRouteRemoved() {
+        resumeAfterInterruption = false
+        playDeferredByInterruption = false
         guard softwareHost != nil || audioHost != nil else { return }
         // A seek in flight is playing as far as the viewer is concerned and resumes into the new route.
         guard state == .playing || state == .seeking else { return }

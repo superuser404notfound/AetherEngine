@@ -1835,6 +1835,7 @@ On tvOS only a PiP window (and the retention opt-in) keeps a video session; ever
 - A longer call finds the session released. It stays paused, and `needsForegroundVideoRestore` is true as after any background teardown.
 - With `backgroundPlaybackEnabled` off, the end of an interruption never restarts a video in the background.
 - On tvOS a video session is released at background entry, interruption or not.
+- Removing headphones, AirPods or another private output during the interruption cancels the resume, so the film does not come back on the speaker.
 
 **`retainsVideoPipelineWhenBackgrounded`** (default false; set before backgrounding):
 
