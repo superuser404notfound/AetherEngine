@@ -116,6 +116,11 @@ final class NormalizationGainProcessor: @unchecked Sendable {
     /// Process `frames` frames held in one buffer per channel, in place. `planes.count` must equal
     /// `channels`.
     func process(planes: [UnsafeMutablePointer<Float>], frames: Int) {
+        planes.withUnsafeBufferPointer { process(planes: $0, frames: frames) }
+    }
+
+    /// The same without an array, for the render thread, which must not allocate (AUD-208).
+    func process(planes: UnsafeBufferPointer<UnsafeMutablePointer<Float>>, frames: Int) {
         guard planes.count == channels else { return }
         process(frames: frames) { frame, channel in
             planes[channel] + frame

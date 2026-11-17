@@ -186,23 +186,9 @@ final class AudioTapDecoder: @unchecked Sendable {
         return true
     }
 
-    /// Index of the front-centre channel in `layout`, nil when there is none or the layout is
-    /// the centre alone: a mono track is not a dialogue stem, and calling it `.dialogue` would
-    /// tell the host it got an isolation it did not. A layout that only states a count (AAC with
-    /// a program config element decodes this way) is read in the default order for that count,
-    /// which is what swresample itself assumes for it and what the software path's tag says.
+    /// See `frontCentreIndex(of:)`.
     static func centreIndex(of layout: UnsafePointer<AVChannelLayout>) -> Int? {
-        let count = layout.pointee.nb_channels
-        guard count > 1 else { return nil }
-        if layout.pointee.order == AV_CHANNEL_ORDER_UNSPEC {
-            var assumed = AVChannelLayout()
-            av_channel_layout_default(&assumed, count)
-            defer { av_channel_layout_uninit(&assumed) }
-            let idx = av_channel_layout_index_from_channel(&assumed, AV_CHAN_FRONT_CENTER)
-            return idx >= 0 ? Int(idx) : nil
-        }
-        let idx = av_channel_layout_index_from_channel(layout, AV_CHAN_FRONT_CENTER)
-        return idx >= 0 ? Int(idx) : nil
+        frontCentreIndex(of: layout)
     }
 
     private func ingest(frame f: UnsafeMutablePointer<AVFrame>) {

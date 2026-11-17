@@ -25,7 +25,8 @@ protocol SoftwareAudioProducing: AnyObject, Sendable {
     func flush()
     func close()
     /// The end of the source: whatever the producer still holds, stamped like `decode`'s output.
-    /// Only the APAC encoder holds anything (its last packets); the others have nothing.
+    /// The APAC encoder holds its last packets, `AudioDecoder` the sub-1024-sample remainder and the
+    /// shaping graph's latency (AUD-205); a passthrough has nothing.
     func endOfStream() -> [CMSampleBuffer]
     /// PCM for the audio tap, which feeds on decoded audio whatever the renderer was given.
     /// `produced` is what `decode` returned for `packet`; a PCM producer hands it straight back.
@@ -52,4 +53,6 @@ extension SoftwareAudioProducing {
     var objectAudioActivity: ObjectAudioActivity? { nil }
 }
 
-extension AudioDecoder: SoftwareAudioProducing {}
+extension AudioDecoder: SoftwareAudioProducing {
+    func endOfStream() -> [CMSampleBuffer] { drain() }
+}

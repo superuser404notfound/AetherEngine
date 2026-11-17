@@ -106,6 +106,8 @@ Notes:
 | `AudioTailPadding.swift` | Native path: writes silence in the delivered codec from where a title's audio ends to where its video ends, into the final segment at end of file, because AVPlayer ends an item when its audio runs out (AE#847). |
 | `SoftwareAtmosRoute.swift` | Software path: the pure choice of how a track's audio reaches the renderer (PCM decode, compressed E-AC-3 JOC, or TrueHD Atmos / DTS:X rendered into a bed as APAC or PCM), from codec, stream shape, live and `objectAudioRendering`. |
 | `SoftwareAudioProducing.swift` | Software path: what the host asks of whatever turns an audio packet into renderer input. Implemented by `AudioDecoder`, `SoftwareEAC3Passthrough` and `SoftwareAPACProducer`. |
+| `LazyTapDecoder.swift` | The PCM decoder the audio tap reads on a producer that does not decode itself, opened on the first tap. Shared by the three software producers. |
+| `AudioSampleBuffers.swift` | The CMSampleBuffer builder (compressed packet or PCM) the software producers share. |
 | `SoftwareEAC3Passthrough.swift` | Software path: E-AC-3 JOC packets sent compressed to the audio renderer, with the `dec3` format description built from the stream, so the system's Atmos decoder gets the objects. |
 | `AACAudioSpecificConfig.swift` | Reads the `channelConfiguration` of an AAC AudioSpecificConfig and decides when CoreMedia refuses the record because its layout sits in a PCE (AE#1047). |
 | `AtmosDecoderPrimer.swift` | Registers the system's Atmos decoders in the process once (by creating an AVPlayer). The renderer needs this before it decodes compressed E-AC-3 as Atmos. |
@@ -126,6 +128,7 @@ Notes:
 | --- | --- |
 | `AudioShaping.swift` | `AudioShaping` (channel cap, dialogue lift, compressor, loudness target, LFE level in the fold) and `AudioShapingState`: the host's request and the published answer (AE#923). |
 | `AudioShapingMatrix.swift` | The cap, the centre lift and the LFE level as one libswresample remix matrix. |
+| `AudioShapingStage.swift` | The matrix, graph and loudness normalizer as one object for `AudioBridge` and `AudioDecoder`: rebuilds the graph when the source layout, the rate or the dialogue route changes, and carries the loudness measurement and the held tail across (AUD-203, AUD-207). |
 | `AudioShapingGraph.swift` | The libavfilter graph after the remix: dialoguenhance + pan on stereo, acompressor, alimiter, aformat. Runs on its own sample counter so its latency never reaches the timeline. |
 | `LoudnessNormalizer.swift` | The loudness target (AE#1036): BS.1770 integrated loudness over what has played, and the bounded, latency-free gain toward the target, applied in front of the graph. |
 

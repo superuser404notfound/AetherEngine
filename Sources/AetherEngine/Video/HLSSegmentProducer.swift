@@ -5381,21 +5381,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         let startTicks = Int64((span.start / av_q2d(audioTb)).rounded(.up))
         let endTicks = Int64((span.end / av_q2d(audioTb)).rounded(.down))
-        switch AudioTailPadding.silencePackets(codecpar: audio.codecpar, startTicks: startTicks,
-                                               endTicks: endTicks, timeBase: audioTb) {
+        var written = 0
+        switch AudioTailPadding.streamSilence(codecpar: audio.codecpar, startTicks: startTicks,
+                                              endTicks: endTicks, timeBase: audioTb, write: { packet in
+            packet.pointee.stream_index = muxer.audioOutputStreamIndex
+            if muxer.writePacket(packet).rc >= 0 { written += 1 }
+            var pkt: UnsafeMutablePointer<AVPacket>? = packet
+            trackedPacketFree(&pkt)
+        }) {
         case .unavailable(let reason):
             EngineLog.emit("[HLSSegmentProducer] AE#847 audio tail not padded (\(describe)): \(reason)",
                            category: .session)
-        case .packets(let packets, let encoder):
-            var written = 0
-            for packet in packets {
-                packet.pointee.stream_index = muxer.audioOutputStreamIndex
-                if muxer.writePacket(packet).rc >= 0 { written += 1 }
-                var pkt: UnsafeMutablePointer<AVPacket>? = packet
-                trackedPacketFree(&pkt)
-            }
+        case .streamed(let encoder, _):
             EngineLog.emit("[HLSSegmentProducer] AE#847 audio tail padded with \(written) silent \(encoder) frame(s) "
-                           + "from \(String(format: "%.3f", span.start))s (\(describe))", category: .session)
+                           + "from \(String(format: "%.3f", span.start))s (\(describe))"
+                           + (span.capped ? ", capped at \(Int(AudioTailPadding.maxFillSeconds))s" : ""),
+                           category: .session)
         }
     }
 

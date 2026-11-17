@@ -30,13 +30,16 @@ struct AudioClockAnchor {
     /// `reanchor` distinguishes a fresh anchor (first buffer or post-discontinuity) from a continued
     /// gapless run; pass it back to `commit` once the buffer is actually emitted.
     func resolve(startPTS: CMTime, sampleRate: Int32) -> (pts: CMTime, reanchor: Bool) {
-        guard anchorPTS.isValid, startPTS.isValid else {
-            return (startPTS, true)  // first buffer after open/flush, or no source PTS to anchor to
+        guard anchorPTS.isValid else {
+            return (startPTS, true)  // first buffer after open/flush
         }
         let predicted = CMTimeAdd(
             anchorPTS,
             CMTime(value: emittedSamplesSinceAnchor, timescale: sampleRate)
         )
+        // No source PTS mid-run (a frame without one, the normalization tail at EOF): the running
+        // count says exactly where this buffer goes (AUD-206).
+        guard startPTS.isValid else { return (predicted, false) }
         if abs(CMTimeGetSeconds(CMTimeSubtract(startPTS, predicted))) > Self.discontinuityThresholdSeconds {
             return (startPTS, true)   // real discontinuity (seek/edit): honour the source clock
         }

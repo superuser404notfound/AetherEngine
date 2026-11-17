@@ -28,15 +28,15 @@ final class LoudnessNormalizer {
 
     let targetLUFS: Double
     let maxGainDB: Double
-    private let sampleRate: Double
-    private let channels: Int
+    private var sampleRate: Double
+    private var channels: Int
     /// BS.1770 channel weights: 1 for the fronts, 1.41 for the surrounds, 0 for the LFE.
-    private let weights: [Double]
-    private let filter: KWeighting
+    private var weights: [Double]
+    private var filter: KWeighting
     private var state: [KWeighting.State]
 
     /// Samples per 100 ms step.
-    private let stepLength: Int
+    private var stepLength: Int
     private var stepFill = 0
     private var stepEnergy = 0.0
     /// The last four steps' energies; a 400 ms block is their mean.
@@ -62,6 +62,23 @@ final class LoudnessNormalizer {
         filter = KWeighting(sampleRate: Double(sampleRate))
         state = Array(repeating: KWeighting.State(), count: channels)
         stepLength = max(1, Int(sampleRate) / 10)
+    }
+
+    /// Follows the stream to a new rate or layout (AUD-207) without forgetting what it measured:
+    /// the histogram and the gain stay, the filter history and the open step do not carry over a
+    /// format change. A no-op when nothing about the format changed.
+    func rebind(sampleRate newRate: Int32, layout: UnsafePointer<AVChannelLayout>) {
+        let newChannels = Int(layout.pointee.nb_channels)
+        let newWeights = (0..<Int32(newChannels)).map {
+            Self.weight(av_channel_layout_channel_from_index(layout, UInt32($0)))
+        }
+        guard Double(newRate) != sampleRate || newWeights != weights else { return }
+        sampleRate = Double(newRate)
+        channels = newChannels
+        weights = newWeights
+        filter = KWeighting(sampleRate: Double(newRate))
+        stepLength = max(1, Int(newRate) / 10)
+        resetFilters()
     }
 
     static func weight(_ channel: AVChannel) -> Double {

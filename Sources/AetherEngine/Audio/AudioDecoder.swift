@@ -55,7 +55,7 @@ final class AudioDecoder: @unchecked Sendable {
 
     /// AE#923. Set before `open`; a change mid-session arrives as a new decoder or a re-anchor.
     var shaping = AudioShaping()
-    private var shapingGraph: AudioShapingGraph?
+    private var shapingStage: AudioShapingStage?
 
     /// Sodalite#242: the track's loudness correction in dB, nil for none. Can change mid-session; the
     /// processor ramps to the new value over one buffer. Runs ahead of the shaping graph.
@@ -181,6 +181,7 @@ final class AudioDecoder: @unchecked Sendable {
     /// re-anchors from its own container PTS. On a failed rebuild `swrContext` stays nil and the
     /// caller skips the frame; the next frame retries, mirroring the lazy-init failure mode.
     private func rebuildResampler(for frame: UnsafeMutablePointer<AVFrame>) -> CMSampleBuffer? {
+        drainShapingTailIfRebuilding(for: frame)
         let flushed = emitPending()
         EngineLog.emit(
             "[AudioDecoder] input format changed mid-stream ("
@@ -194,13 +195,39 @@ final class AudioDecoder: @unchecked Sendable {
         return flushed
     }
 
+    /// The output rate and channel count a frame's resampler will be built for.
+    private func resolvedOutput(for frame: UnsafeMutablePointer<AVFrame>) -> (rate: Int32, channels: Int32) {
+        let rate = frame.pointee.sample_rate > 0 ? frame.pointee.sample_rate : sampleRate
+        let frameChannels = frame.pointee.ch_layout.nb_channels
+        var width = frameChannels > 0 && frameChannels <= 8 ? frameChannels : channels
+        if shaping.isActive { width = shaping.outputChannels(forSource: width) }
+        return (rate, width)
+    }
+
+    /// AUD-207: a format change replaces the shaping graph, and its held latency belongs to the
+    /// format it was built for. Pushed out here, before `sampleRate` and `channels` move.
+    private func drainShapingTailIfRebuilding(for frame: UnsafeMutablePointer<AVFrame>) {
+        guard let stage = shapingStage, stage.hasGraph else { return }
+        let (rate, width) = resolvedOutput(for: frame)
+        var outLayout = AVChannelLayout()
+        makeResamplerOutputLayout(width, into: &outLayout)
+        var inLayout = AVChannelLayout()
+        if frame.pointee.ch_layout.nb_channels > 0 {
+            av_channel_layout_copy(&inLayout, &frame.pointee.ch_layout)
+        } else {
+            av_channel_layout_default(&inLayout, width)
+        }
+        defer { av_channel_layout_uninit(&inLayout); av_channel_layout_uninit(&outLayout) }
+        stage.drainIfRebuilding(sampleRate: rate, outputLayout: &outLayout, sourceLayout: &inLayout) { planes, count, pts in
+            self.appendShaped(planes, count: count, pts: pts)
+        }
+    }
+
     private func initResamplerFromFrame(_ frame: UnsafeMutablePointer<AVFrame>) -> Bool {
         // Refresh rate/channels from the frame (codecpar was a hint, the frame is truth). Runs on the
         // first frame and again after a mid-stream format change tore the context down (#452).
-        if frame.pointee.sample_rate > 0 { sampleRate = frame.pointee.sample_rate }
         let frameChannels = frame.pointee.ch_layout.nb_channels
-        if frameChannels > 0 && frameChannels <= 8 { channels = frameChannels }
-        if shaping.isActive { channels = shaping.outputChannels(forSource: channels) }
+        (sampleRate, channels) = resolvedOutput(for: frame)
 
         var outLayout = AVChannelLayout()
         // #401: this is the order the stamped layout has to name, so both come from one place.
@@ -236,17 +263,19 @@ final class AudioDecoder: @unchecked Sendable {
         )
         guard ret >= 0, let swr = swrContext else { return false }
         if shaping.isActive {
-            AudioShapingMatrix.apply(to: swr, input: &inLayout, output: &outLayout,
-                                     dialogueGain: shaping.dialogueGain, lfeMixLevel: shaping.lfeMixLevel)
-            shapingGraph = AudioShapingGraph(shaping: shaping, sampleRate: sampleRate, layout: &outLayout,
-                                             sourceHasCentre: AudioShapingMatrix.hasCentre(&inLayout),
-                                             outputFormat: AV_SAMPLE_FMT_FLT)
-            EngineLog.emit("[AudioDecoder] AE#923 shaping \(shaping.summary): "
-                           + "\(frameChannels)ch -> \(channels)ch"
-                           + (shapingGraph == nil ? ", filter graph unavailable, dynamics off" : ""),
-                           category: .swPlayback)
-        } else {
-            shapingGraph = nil
+            let stage = shapingStage ?? AudioShapingStage(shaping: shaping, outputFormat: AV_SAMPLE_FMT_FLT)
+            shapingStage = stage
+            stage.applyMatrix(to: swr, input: &inLayout, output: &outLayout)
+            let hadGraph = stage.hasGraph
+            let hasGraph = stage.configure(sampleRate: sampleRate, outputLayout: &outLayout, sourceLayout: &inLayout) {
+                planes, count, pts in self.appendShaped(planes, count: count, pts: pts)
+            }
+            if !hadGraph || !hasGraph {
+                EngineLog.emit("[AudioDecoder] AE#923 shaping \(shaping.summary): "
+                               + "\(frameChannels)ch -> \(channels)ch"
+                               + (hasGraph ? "" : ", filter graph unavailable, dynamics off"),
+                               category: .swPlayback)
+            }
         }
         guard swr_init(swr) >= 0 else {
             swr_free(&swrContext)
@@ -279,7 +308,7 @@ final class AudioDecoder: @unchecked Sendable {
         resetPending()
         // Re-anchor the gapless clock to the post-seek PTS on the next emitted buffer.
         clock.reset()
-        shapingGraph?.reset()
+        shapingStage?.reset()
         // The limiter's delay line holds pre-seek audio; the next buffer builds a fresh one.
         normalization.withLock { state in
             if let old = state.processor { state.carried = state.carried.merged(with: old.statistics) }
@@ -324,8 +353,8 @@ final class AudioDecoder: @unchecked Sendable {
             tail.withUnsafeMutableBufferPointer { buffer in
                 guard let base = buffer.baseAddress else { return }
                 processor.process(interleaved: base, frames: frames)
-                if let graph = shapingGraph {
-                    graph.process(base, frames: frames, pts: nil) { planes, count, pts in
+                if let stage = shapingStage, stage.hasGraph {
+                    stage.process(base, frames: frames, pts: nil) { planes, count, pts in
                         appendShaped(planes, count: count, pts: pts)
                     }
                 } else {
@@ -337,7 +366,7 @@ final class AudioDecoder: @unchecked Sendable {
             }
         }
         // The shaping graph holds back its latency; the drain pushes it out, sample-aligned.
-        shapingGraph?.drain { planes, count, pts in appendShaped(planes, count: count, pts: pts) }
+        shapingStage?.drain { planes, count, pts in appendShaped(planes, count: count, pts: pts) }
         // Force-emit whatever is left below the coalescing threshold (emitPending only needs > 0 samples).
         if let sampleBuffer = emitPending() { results.append(sampleBuffer) }
         return results
@@ -452,13 +481,13 @@ final class AudioDecoder: @unchecked Sendable {
                 processor.process(interleaved: $0, frames: Int(convertedSamples))
             }
         }
-        if let graph = shapingGraph {
+        if let stage = shapingStage, stage.hasGraph {
             // The graph runs on its own sample count; the pts rides along in samples and comes back
             // with the output sample it belongs to (see AudioShapingGraph, Timing).
             let pts: Int64? = frame.pointee.pts == Self.noPTS ? nil
                 : av_rescale_q(frame.pointee.pts, timeBase, AVRational(num: 1, den: sampleRate))
             tempBuffer.withMemoryRebound(to: Float.self, capacity: Int(convertedSamples) * Int(channels)) {
-                graph.process($0, frames: Int(convertedSamples), pts: pts) { planes, count, pts in
+                stage.process($0, frames: Int(convertedSamples), pts: pts) { planes, count, pts in
                     appendShaped(planes, count: count, pts: pts)
                 }
             }

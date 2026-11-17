@@ -24,13 +24,8 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
     /// loopback route does. Behind the bridge's activity lock, never its feed lock.
     var objectAudioActivity: ObjectAudioActivity? { bridge.objectAudioActivity }
     private let sampleRate = Double(SpatialAudioBridge.sampleRate)
-    private let stream: UnsafeMutablePointer<AVStream>
     /// PCM for the audio tap, which wants the 7.1 channel presentation the renderer is not given.
-    /// Opened on the first tap, since most sessions never tap, and under the lock because the tap
-    /// runs on the demux thread while `close` can come from the main actor.
-    private var tapDecoder: AudioDecoder?
-    private var tapOpenFailed = false
-    private var closed = false
+    private let tap: LazyTapDecoder
     private let lock = NSLock()
     private var loggedFeedError = false
     /// Serializes a feed with `flush()`, so the epoch check and the bridge feed are one step: a packet
@@ -42,7 +37,7 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
 
     init(bridge: SpatialAudioBridge, stream: UnsafeMutablePointer<AVStream>) {
         self.bridge = bridge
-        self.stream = stream
+        self.tap = LazyTapDecoder(stream: stream)
     }
 
     var feedEpoch: UInt64 { feedLock.withLock { _feedEpoch } }
@@ -121,20 +116,8 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
         guard let pcmFrames else {
             return SoftwareEAC3Passthrough.sampleBuffer(bytes: bytes, seconds: seconds, formatDescription: formatDescription)
         }
-        var block: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: bytes.count,
-            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
-            dataLength: bytes.count, flags: 0, blockBufferOut: &block) == noErr, let block,
-              CMBlockBufferReplaceDataBytes(
-                with: bytes.baseAddress!, blockBuffer: block, offsetIntoDestination: 0,
-                dataLength: bytes.count) == noErr else { return nil }
-        var sample: CMSampleBuffer?
-        guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(
-            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: formatDescription,
-            sampleCount: pcmFrames, presentationTimeStamp: CMTime(seconds: seconds, preferredTimescale: 90_000),
-            packetDescriptions: nil, sampleBufferOut: &sample) == noErr else { return nil }
-        return sample
+        return AudioSampleBuffers.make(bytes: bytes, seconds: seconds, formatDescription: formatDescription,
+                                       sampleCount: pcmFrames, compressedPacket: false)
     }
 
     func flush() {
@@ -142,31 +125,16 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
             _feedEpoch &+= 1
             bridge.startSegment()
         }
-        lock.lock()
-        let tap = tapDecoder
-        lock.unlock()
-        tap?.flush()
+        tap.flush()
     }
 
     func close() {
         bridge.close()
-        lock.lock()
-        closed = true
-        let tap = tapDecoder
-        tapDecoder = nil
-        lock.unlock()
-        tap?.close()
+        tap.close()
     }
 
     func tapBuffers(for packet: UnsafeMutablePointer<AVPacket>, produced: [CMSampleBuffer]) -> [CMSampleBuffer] {
-        lock.lock()
-        if tapDecoder == nil, !tapOpenFailed, !closed {
-            let decoder = AudioDecoder()
-            if (try? decoder.open(stream: stream)) != nil { tapDecoder = decoder } else { tapOpenFailed = true }
-        }
-        let tap = tapDecoder
-        lock.unlock()
-        return tap?.decode(packet: packet) ?? []
+        tap.buffers(for: packet)
     }
 }
 #endif

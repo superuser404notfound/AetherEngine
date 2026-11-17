@@ -969,7 +969,7 @@ public final class AetherEngine: ObservableObject {
          software: softwareHost?.audioDelivery,
          // Neither audio-only host can reach video-only: AVPlayer owns the selection on the native
          // one, and the software one throws out of its load when the decoder does not open.
-         audioOnly: audioAVPlayerHost != nil ? .playerManaged : (audioHost != nil ? .decoded : nil))
+         audioOnly: audioAVPlayerActive ? .playerManaged : (audioHost != nil ? .decoded : nil))
     }
 
     /// Idempotent for the same reason as the route above. Logged on every change, including the drop
@@ -1012,7 +1012,7 @@ public final class AetherEngine: ObservableObject {
         case .software:
             return engineOwned(applied: softwareHost?.audioShapingApplied, delivery: softwareHost?.audioDelivery)
         case .audio:
-            if audioAVPlayerHost != nil { return false }
+            if audioAVPlayerActive { return false }
             return audioHost.flatMap { $0.audioShaping.isActive ? true : nil }
         }
     }
