@@ -935,21 +935,18 @@ private final class GPU {
     let queue: MTLCommandQueue
     let toRGBA: MTLComputePipelineState
     let toNV12: MTLComputePipelineState
-    let textureCache: CVMetalTextureCache
+    let io: MetalFrameIO
     let metalFXAvailable: Bool
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
-              let kernels = UpscaleKernels.shared(for: device)
+              let kernels = UpscaleKernels.shared(for: device), let io = MetalFrameIO(device: device)
         else { return nil }
-        var cache: CVMetalTextureCache?
-        guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache) == kCVReturnSuccess,
-              let cache else { return nil }
         self.device = device
         self.queue = queue
         self.toRGBA = kernels.toRGBA
         self.toNV12 = kernels.toNV12
-        self.textureCache = cache
+        self.io = io
         if #available(tvOS 27.1, *) {
             metalFXAvailable = MTLFXSpatialScalerDescriptor.supportsDevice(device)
         } else {
@@ -957,14 +954,11 @@ private final class GPU {
         }
     }
 
-    func planeTexture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat) throws -> (MTLTexture, CVMetalTexture) {
-        var ref: CVMetalTexture?
-        let w = CVPixelBufferGetWidthOfPlane(buffer, plane), h = CVPixelBufferGetHeightOfPlane(buffer, plane)
-        guard CVMetalTextureCacheCreateTextureFromImage(
-                kCFAllocatorDefault, textureCache, buffer, nil, format, w, h, plane, &ref) == kCVReturnSuccess,
-              let ref, let texture = CVMetalTextureGetTexture(ref)
+    func planeTexture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat,
+                      in lease: MetalTextureLease) throws -> MTLTexture {
+        guard let texture = io.texture(buffer, plane: plane, format: format, in: lease)
         else { throw UpscaleError("no Metal texture for plane \(plane)") }
-        return (texture, ref)
+        return texture
     }
 
     func dispatch(_ encoder: MTLComputeCommandEncoder, _ pipeline: MTLComputePipelineState,
@@ -975,8 +969,7 @@ private final class GPU {
         encoder.setBytes(&params, length: MemoryLayout<UpscaleColorParams>.size, index: 0)
         let w = pipeline.threadExecutionWidth
         let h = max(1, pipeline.maxTotalThreadsPerThreadgroup / w)
-        encoder.dispatchThreads(MTLSize(width: grid.0, height: grid.1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+        io.dispatch(encoder, grid: grid, threadgroup: MTLSize(width: w, height: h, depth: 1))
     }
 }
 
@@ -1164,29 +1157,31 @@ private final class Stage {
         if #available(tvOS 27.1, *), let scaler = scaler as? any MTLFXSpatialScaler, let rgba, let scaled {
             let t0 = DispatchTime.now().uptimeNanoseconds
             // On the encoding thread only; a texture an earlier frame still uses stays alive in its work.
-            CVMetalTextureCacheFlush(gpu.textureCache, 0)
+            gpu.io.flush()
             let output = try makeOutput(format: format, width: plan.targetWidth, height: plan.targetHeight)
             let source = mlOut ?? input
+            let lease = gpu.io.lease()
             // The ML pass carries sample values through unchanged, so its output keeps the input's range.
-            let sy = try gpu.planeTexture(source, plane: 0, format: .r8Unorm)
-            let sc = try gpu.planeTexture(source, plane: 1, format: .rg8Unorm)
-            let oy = try gpu.planeTexture(output, plane: 0, format: .r8Unorm)
-            let oc = try gpu.planeTexture(output, plane: 1, format: .rg8Unorm)
+            let sy = try gpu.planeTexture(source, plane: 0, format: .r8Unorm, in: lease)
+            let sc = try gpu.planeTexture(source, plane: 1, format: .rg8Unorm, in: lease)
+            let oy = try gpu.planeTexture(output, plane: 0, format: .r8Unorm, in: lease)
+            let oc = try gpu.planeTexture(output, plane: 1, format: .rg8Unorm, in: lease)
             guard let cb = gpu.queue.makeCommandBuffer() else { throw UpscaleError("no command buffer") }
             guard let enc = cb.makeComputeCommandEncoder() else { throw UpscaleError("no encoder") }
             // `rgba` and `scaled` are shared by the frames in flight: Metal's hazard tracking orders their
             // use across command buffers on this queue.
-            gpu.dispatch(enc, gpu.toRGBA, textures: [sy.0, sc.0, rgba], color: color,
+            gpu.dispatch(enc, gpu.toRGBA, textures: [sy, sc, rgba], color: color,
                          grid: (rgba.width, rgba.height))
             enc.endEncoding()
             scaler.encode(commandBuffer: cb)
             guard let enc2 = cb.makeComputeCommandEncoder() else { throw UpscaleError("no encoder") }
-            gpu.dispatch(enc2, gpu.toNV12, textures: [scaled, oy.0, oc.0], color: color,
+            gpu.dispatch(enc2, gpu.toNV12, textures: [scaled, oy, oc], color: color,
                          grid: (scaled.width / 2, scaled.height / 2))
             enc2.endEncoding()
             times.metal = elapsedMs(since: t0)
-            // The source buffers (the ML output among them) live as long as the work.
-            let work = EncodedGPUWork(commandBuffer: cb, keepAlive: (sy.1, sc.1, oy.1, oc.1, source)) { status, error in
+            // The source buffer (the ML output among them) lives as long as the work.
+            lease.hold(source)
+            let work = EncodedGPUWork(commandBuffer: cb, textures: lease) { status, error in
                 UpscaleError("command buffer \(status.rawValue): \(error.map { "\($0)" } ?? "no error")",
                              underlying: error)
             }

@@ -27,15 +27,11 @@ final class DoviFelComposer: @unchecked Sendable {
     /// Whether the device reads and writes the in-place planes through one `read_write` binding. Read once at
     /// creation, from `readWriteTextureSupport` (see ``supportsInPlaceReadWrite(_:)``).
     private let inPlaceReadWrite: Bool
-    private var textureCache: CVMetalTextureCache?
+    /// The texture cache and the dispatch (the non-uniform threadgroup fallback lives there).
+    private let io: MetalFrameIO
 
     /// Lazily compiled and process-shared compute pipelines (dolby-vision-fel.md §5.6).
     private var pipelines: SharedPipelines?
-    /// Whether `dispatchThreads` is available. It needs non-uniform threadgroup
-    /// support (`MTLGPUFamily.apple4`, i.e. A11 and later; the first-generation
-    /// Apple TV 4K is A10X and is not); everything older has to dispatch whole
-    /// threadgroups and rely on the kernels' bounds guard.
-    private let supportsNonUniformThreadgroups: Bool
 
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth: Int = 0
@@ -336,14 +332,8 @@ final class DoviFelComposer: @unchecked Sendable {
         self.device = dev
         self.commandQueue = queue
         self.inPlaceReadWrite = Self.supportsInPlaceReadWrite(dev.readWriteTextureSupport)
-        self.supportsNonUniformThreadgroups = dev.supportsFamily(.apple4) || dev.supportsFamily(.mac2)
-
-        var cache: CVMetalTextureCache?
-        guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &cache) == kCVReturnSuccess,
-              let createdCache = cache else {
-            return nil
-        }
-        self.textureCache = createdCache
+        guard let io = MetalFrameIO(device: dev) else { return nil }
+        self.io = io
 
         var pBuffers: [MTLBuffer] = []
         var lutBuffers: [MTLBuffer] = []
@@ -371,12 +361,6 @@ final class DoviFelComposer: @unchecked Sendable {
         // than expected would lose in-place with only the verbose summary to show it, which reads the same as the
         // switch being off. One line at the default level says which it is.
         Self.logOnce(Self.inPlaceStatusLine(tier: dev.readWriteTextureSupport, switchedOn: inPlaceEnabled))
-    }
-
-    deinit {
-        if let cache = textureCache {
-            CVMetalTextureCacheFlush(cache, 0)
-        }
     }
 
     // MARK: - Pixel Buffer Pool Management
@@ -467,26 +451,9 @@ final class DoviFelComposer: @unchecked Sendable {
         format: MTLPixelFormat,
         width: Int,
         height: Int,
-        keepAlive: inout [CVMetalTexture]
+        keepAlive lease: MetalTextureLease
     ) -> MTLTexture? {
-        guard let cache = textureCache else { return nil }
-        var cvTex: CVMetalTexture?
-        let status = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            cache,
-            pixelBuffer,
-            nil,
-            format,
-            width,
-            height,
-            plane,
-            &cvTex
-        )
-        guard status == kCVReturnSuccess, let validCvTex = cvTex else {
-            return nil
-        }
-        keepAlive.append(validCvTex)
-        return CVMetalTextureGetTexture(validCvTex)
+        io.texture(pixelBuffer, plane: plane, format: format, width: width, height: height, in: lease)
     }
 
     // MARK: - Frame Composition
@@ -527,7 +494,7 @@ final class DoviFelComposer: @unchecked Sendable {
             Self.logOnce("[DoviFelComposer] Command buffer error: \(failure)")
             return nil
         }
-        _ = work.keepAlive
+        withExtendedLifetime(work.textures) {}
         // Colour attachments are copied in `encodeCompose`, at encode time on
         // this calling thread — nothing left to do here.
         return work.destination
@@ -682,7 +649,7 @@ final class DoviFelComposer: @unchecked Sendable {
             completion(nil, false)
             return
         }
-        // `textures` holds the CVMetalTextures; the source buffers are held
+        // `textures` holds the CVMetalTextures and their cache; the source buffers are held
         // alongside them because a CVMetalTexture is not documented to keep the
         // pixel buffer it was made from alive, and the GPU reads both until the
         // command buffer retires. Boxed because CoreVideo's types are not
@@ -691,8 +658,7 @@ final class DoviFelComposer: @unchecked Sendable {
         let frame = ComposedFrame(destination: work.destination,
                                   source: baseBuffer,
                                   enhancement: enhancementBuffer,
-                                  textures: work.keepAlive,
-                                  cache: textureCache)
+                                  textures: work.textures)
         // Captured as a value, not through `self?.`, before the handler below is
         // even built: the whole point of `deliveryQueue` is that calling
         // `completion` never depends on the composer still being alive, so there
@@ -864,20 +830,15 @@ final class DoviFelComposer: @unchecked Sendable {
         let destination: CVPixelBuffer
         private var source_: CVPixelBuffer?
         private var enhancement_: CVPixelBuffer?
-        private var textures_: [CVMetalTexture]?
-        /// A `CVMetalTexture` calls back into its cache when it finalizes and does not
-        /// retain it, so the cache has to outlive the textures. Without this a composer
-        /// released while a command buffer was in flight crashed in
-        /// `CVMetalTextureCache::bufferBackingNotInUse`.
-        private var cache_: CVMetalTextureCache?
+        /// The textures with their cache (`MetalTextureLease`): a composer released while a command buffer
+        /// was in flight crashed in `CVMetalTextureCache::bufferBackingNotInUse` before the cache was held.
+        private var textures_: MetalTextureLease?
 
         var source: CVPixelBuffer { source_! }
 
         init(destination: CVPixelBuffer, source: CVPixelBuffer,
-             enhancement: CVPixelBuffer, textures: [CVMetalTexture],
-             cache: CVMetalTextureCache?) {
+             enhancement: CVPixelBuffer, textures: MetalTextureLease) {
             self.destination = destination
-            self.cache_ = cache
             self.source_ = source
             self.enhancement_ = enhancement
             self.textures_ = textures
@@ -890,14 +851,13 @@ final class DoviFelComposer: @unchecked Sendable {
             source_ = nil
             enhancement_ = nil
             textures_ = nil
-            cache_ = nil
         }
     }
 
     private struct EncodedFrame {
         let commandBuffer: MTLCommandBuffer
         let destination: CVPixelBuffer
-        let keepAlive: [CVMetalTexture]
+        let textures: MetalTextureLease
         let paramSlot: Int
     }
 
@@ -961,23 +921,23 @@ final class DoviFelComposer: @unchecked Sendable {
             propagateColorAttachments(from: baseBuffer, to: dst)
         }
 
-        var keepAliveTextures: [CVMetalTexture] = []
+        let keepAliveTextures = io.lease()
 
         // Plane 0 is luma, plane 1 is interleaved chroma. Every plane is bound as Uint so the kernels see
         // raw code values; the enhancement layer is upsampled from explicit texel reads (`dovi_upsample_el`),
         // not by the hardware sampler.
-        guard let blYTex = makeTexture(from: baseBuffer, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
-              let blUvTex = makeTexture(from: baseBuffer, plane: 1, format: .rg16Uint, width: blCW, height: blCH, keepAlive: &keepAliveTextures),
-              let elYTex = makeTexture(from: enhancementBuffer, plane: 0, format: .r16Uint, width: elW, height: elH, keepAlive: &keepAliveTextures),
-              let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Uint, width: elCW, height: elCH, keepAlive: &keepAliveTextures) else {
+        guard let blYTex = makeTexture(from: baseBuffer, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: keepAliveTextures),
+              let blUvTex = makeTexture(from: baseBuffer, plane: 1, format: .rg16Uint, width: blCW, height: blCH, keepAlive: keepAliveTextures),
+              let elYTex = makeTexture(from: enhancementBuffer, plane: 0, format: .r16Uint, width: elW, height: elH, keepAlive: keepAliveTextures),
+              let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Uint, width: elCW, height: elCH, keepAlive: keepAliveTextures) else {
             return nil
         }
         // The pool path writes its own output planes. In place it has none: the in-place kernels bind each
         // base-layer plane once, as read_write, so the output is the input texture and nothing is bound twice.
         var outPlanes: (y: MTLTexture, uv: MTLTexture)?
         if !inPlace {
-            guard let y = makeTexture(from: dst, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
-                  let uv = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: outCW, height: outCH, keepAlive: &keepAliveTextures) else {
+            guard let y = makeTexture(from: dst, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: keepAliveTextures),
+                  let uv = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: outCW, height: outCH, keepAlive: keepAliveTextures) else {
                 return nil
             }
             outPlanes = (y, uv)
@@ -987,7 +947,7 @@ final class DoviFelComposer: @unchecked Sendable {
         // tier 1 allows as read_write. The 16-bit view stays for the pool path and for the luma pass, which must bind it.
         var chromaBlUvTex = blUvTex
         if inPlace {
-            guard let packed = makeTexture(from: baseBuffer, plane: 1, format: .r32Uint, width: blCW, height: blCH, keepAlive: &keepAliveTextures) else {
+            guard let packed = makeTexture(from: baseBuffer, plane: 1, format: .r32Uint, width: blCW, height: blCH, keepAlive: keepAliveTextures) else {
                 return nil
             }
             chromaBlUvTex = packed
@@ -1103,7 +1063,7 @@ final class DoviFelComposer: @unchecked Sendable {
 
         if inPlace { Self.removeNonPropagatingAttachments(from: dst) }
 
-        return EncodedFrame(commandBuffer: commandBuffer, destination: dst, keepAlive: keepAliveTextures, paramSlot: paramSlot)
+        return EncodedFrame(commandBuffer: commandBuffer, destination: dst, textures: keepAliveTextures, paramSlot: paramSlot)
     }
 
     /// Takes a buffer from the output pool, drawing on the reserve and retrying briefly when the pool is full.
@@ -1526,9 +1486,7 @@ final class DoviFelComposer: @unchecked Sendable {
     func flushTextureCache() {
         lock.lock()
         defer { lock.unlock() }
-        if let cache = textureCache {
-            CVMetalTextureCacheFlush(cache, 0)
-        }
+        io.flush()
     }
 
     /// Seek/flush: keeps the output pool. Dropping it here made the next frames allocate a second pool while
@@ -1540,9 +1498,7 @@ final class DoviFelComposer: @unchecked Sendable {
     func flush() {
         lock.lock()
         defer { lock.unlock() }
-        if let cache = textureCache {
-            CVMetalTextureCacheFlush(cache, 0)
-        }
+        io.flush()
         if let pool = pixelBufferPool {
             CVPixelBufferPoolFlush(pool, .excessBuffers)
         }
@@ -1603,36 +1559,15 @@ final class DoviFelComposer: @unchecked Sendable {
         return Array(UnsafeBufferPointer(start: ptr, count: slots))
     }
 
-    /// Covers exactly `width` x `height` threads.
-    ///
-    /// `dispatchThreads` takes the thread count and splits the edge threadgroups
-    /// itself, so the grid is the plane. Rounding the grid up to a multiple of the
-    /// threadgroup is the `dispatchThreadgroups` convention, and that is the path
-    /// taken where non-uniform threadgroups are unavailable: there the extra
-    /// threads are real and the kernels' `gid >= bl_width` guard is what discards
-    /// them.
+    /// Covers exactly `width` x `height` threads (`MetalFrameIO.dispatch`). Without non-uniform
+    /// threadgroups (A10X) the extra threads are real and the kernels' `gid >= bl_width` guard discards them.
     private func dispatch(
         _ encoder: MTLComputeCommandEncoder,
         width: Int,
         height: Int,
         threadgroup: MTLSize
     ) {
-        guard width > 0, height > 0 else { return }
-        if supportsNonUniformThreadgroups {
-            encoder.dispatchThreads(
-                MTLSize(width: width, height: height, depth: 1),
-                threadsPerThreadgroup: threadgroup
-            )
-        } else {
-            encoder.dispatchThreadgroups(
-                MTLSize(
-                    width: (width + threadgroup.width - 1) / threadgroup.width,
-                    height: (height + threadgroup.height - 1) / threadgroup.height,
-                    depth: 1
-                ),
-                threadsPerThreadgroup: threadgroup
-            )
-        }
+        io.dispatch(encoder, grid: (width, height), threadgroup: threadgroup)
     }
 
     // MARK: - RPU Parsing via libdovi

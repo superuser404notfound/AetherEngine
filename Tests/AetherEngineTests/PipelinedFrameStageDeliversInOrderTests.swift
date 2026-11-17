@@ -35,7 +35,7 @@ struct PipelinedFrameStageDeliversInOrderTests {
 
         /// GPU work that completes as soon as it is committed.
         func gpu(output: CVPixelBuffer, fails: Bool = false) -> PipelinedFrameStage.Begun {
-            let work = EncodedGPUWork(commandBuffer: queue.makeCommandBuffer()!, keepAlive: ()) { _, _ in
+            let work = EncodedGPUWork(commandBuffer: queue.makeCommandBuffer()!, textures: nil) { _, _ in
                 NSError(domain: "test", code: 1)
             }
             let out = UncheckedSendable(output)

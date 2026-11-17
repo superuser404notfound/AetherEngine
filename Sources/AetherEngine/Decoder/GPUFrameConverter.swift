@@ -25,8 +25,7 @@ final class GPUFrameConverter: @unchecked Sendable {
     private let queue: MTLCommandQueue
     private let luma: MTLComputePipelineState
     private let chroma: MTLComputePipelineState
-    private var textureCache: CVMetalTextureCache?
-    private let supportsNonUniformThreadgroups: Bool
+    private let io: MetalFrameIO
 
     private let uniformBuffer: MTLBuffer
     private let lumaGrainBuffer: MTLBuffer
@@ -75,10 +74,8 @@ final class GPUFrameConverter: @unchecked Sendable {
         queue = shared.queue
         luma = shared.luma
         chroma = shared.chroma
-        supportsNonUniformThreadgroups = dev.supportsFamily(.apple4) || dev.supportsFamily(.mac2)
-        var cache: CVMetalTextureCache?
-        guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, dev, nil, &cache) == kCVReturnSuccess else { return nil }
-        textureCache = cache
+        guard let io = MetalFrameIO(device: dev) else { return nil }
+        self.io = io
         let lumaBytes = AV1FilmGrainTables.lumaWidth * AV1FilmGrainTables.lumaHeight * 2
         let chromaBytes = 2 * AV1FilmGrainTables.chromaWidth * AV1FilmGrainTables.chromaHeight * 2
         guard let u = dev.makeBuffer(length: MemoryLayout<AV1FilmGrainTables.Uniforms>.stride, options: .storageModeShared),
@@ -90,10 +87,6 @@ final class GPUFrameConverter: @unchecked Sendable {
         lumaGrainBuffer = lg
         chromaGrainBuffer = cg
         scalingBuffer = sc
-    }
-
-    deinit {
-        if let textureCache { CVMetalTextureCacheFlush(textureCache, 0) }
     }
 
     /// Whether this frame is one `convert` takes: planar 10-bit 4:2:0, positive strides.
@@ -145,9 +138,9 @@ final class GPUFrameConverter: @unchecked Sendable {
               let enc = cb.makeComputeCommandEncoder()
         else { return fail("no command buffer or source") }
 
-        var keepAlive: [CVMetalTexture] = []
-        guard let outY = texture(pixelBuffer, plane: 0, format: .r16Uint, width: width, height: height, keepAlive: &keepAlive),
-              let outUV = texture(pixelBuffer, plane: 1, format: .rg16Uint, width: chromaW, height: chromaH, keepAlive: &keepAlive)
+        let textures = io.lease()
+        guard let outY = io.texture(pixelBuffer, plane: 0, format: .r16Uint, width: width, height: height, in: textures),
+              let outUV = io.texture(pixelBuffer, plane: 1, format: .rg16Uint, width: chromaW, height: chromaH, in: textures)
         else {
             enc.endEncoding()
             return fail("no destination textures")
@@ -190,7 +183,7 @@ final class GPUFrameConverter: @unchecked Sendable {
 
         cb.commit()
         cb.waitUntilCompleted()
-        _ = keepAlive
+        withExtendedLifetime(textures) {}
         if let error = cb.error { return fail("command buffer: \(error.localizedDescription)") }
 
         framesConverted += 1
@@ -259,27 +252,10 @@ final class GPUFrameConverter: @unchecked Sendable {
         return Source(buffer: staging, y: offsets[0], cb: offsets[1], cr: offsets[2], copied: true)
     }
 
-    private func texture(_ pixelBuffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat,
-                         width: Int, height: Int, keepAlive: inout [CVMetalTexture]) -> MTLTexture? {
-        guard let textureCache else { return nil }
-        var cvTex: CVMetalTexture?
-        guard CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-                                                        format, width, height, plane, &cvTex) == kCVReturnSuccess,
-              let cvTex else { return nil }
-        keepAlive.append(cvTex)
-        return CVMetalTextureGetTexture(cvTex)
-    }
-
     private func dispatch(_ enc: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState, width: Int, height: Int) {
         let w = pipeline.threadExecutionWidth
         let group = MTLSize(width: w, height: max(1, pipeline.maxTotalThreadsPerThreadgroup / w / 2), depth: 1)
-        if supportsNonUniformThreadgroups {
-            enc.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: group)
-        } else {
-            enc.dispatchThreadgroups(MTLSize(width: (width + group.width - 1) / group.width,
-                                             height: (height + group.height - 1) / group.height, depth: 1),
-                                     threadsPerThreadgroup: group)
-        }
+        io.dispatch(enc, grid: (width, height), threadgroup: group)
     }
 
     private func fail(_ why: String) -> Bool {

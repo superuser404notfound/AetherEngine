@@ -23,12 +23,13 @@ struct FrameChainTests {
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     private func chain(_ w: Int, _ h: Int, target: (Int, Int)? = nil, stages: [any FrameChainStage],
-                       fusesRoundTrip: Bool = true) throws -> FrameChain {
+                       fusesRoundTrip: Bool = true, io: MetalFrameIO? = nil) throws -> FrameChain {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let queue = try #require(device.makeCommandQueue())
         let t = target ?? (w, h)
         return try FrameChain(device: device, queue: queue, sourceWidth: w, sourceHeight: h,
-                              targetWidth: t.0, targetHeight: t.1, stages: stages, fusesRoundTrip: fusesRoundTrip)
+                              targetWidth: t.0, targetHeight: t.1, stages: stages, fusesRoundTrip: fusesRoundTrip,
+                              io: io)
     }
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
@@ -208,6 +209,59 @@ struct FrameChainTests {
         #expect(fused.outputColorVolume == .hdr10(curve.outputMetadata(from: master)))
     }
 
+    /// Audit GPU-204: an A10X (Apple TV 4K 1st gen) has no non-uniform threadgroups, so every kernel runs in
+    /// whole groups there and its bounds guard drops the threads past the edge. A width and height off the
+    /// threadgroup grid must give the picture the non-uniform dispatch gives, on each kind of chain.
+    @Test(arguments: ["round trip", "two passes", "line art"])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func gpu204WholeThreadgroupsGiveTheSamePicture(kind: String) throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let uniform = try #require(MetalFrameIO(device: device, nonUniformThreadgroups: false))
+        let curve = try #require(BT2390ToneCurve(sourcePeakNits: 1000, targetPeakNits: 600))
+        let master = HDR10StaticMetadata(maxCLL: 1000, maxFALL: 400, masteringPeakNits: 1000, masteringMinNits: 0.005)
+        let (w, h) = (322, 182)
+        func build(_ io: MetalFrameIO?) throws -> FrameChain {
+            switch kind {
+            case "round trip":
+                return try chain(w, h, stages: [ToneMapStage(curve: curve, source: master)], io: io)
+            case "two passes":
+                return try chain(w, h, stages: [ToneMapStage(curve: curve, source: master)], fusesRoundTrip: false, io: io)
+            default:
+                return try chain(w, h, target: (w * 2, h * 2), stages: [LineArtStage()], io: io)
+            }
+        }
+        let input = try ChainFrames.gradient(w, h, tenBit: true)
+        let (expected, _) = try build(nil).process(input, picture: whole(w, h))
+        let (got, _) = try build(uniform).process(input, picture: whole(w, h))
+        let diff = ChainFrames.maxDifference(expected, got)
+        #expect(diff.y == 0 && diff.c == 0, "\(kind): Y \(diff.y), C \(diff.c)")
+    }
+
+    /// Audit GPU-201: the work of a frame holds the texture cache its textures came from. The tone mapper
+    /// drops or rebuilds its chain (and the chain's cache) with two frames on the GPU, and a CVMetalTexture
+    /// that finalizes after its cache calls into freed memory (the FEL composer crashed that way).
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func gpu201AFramesWorkHoldsItsTextureCache() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let made = try #require(MetalFrameIO(device: device))
+        let cache = made.textureCache
+        var io: MetalFrameIO? = made
+        var built: FrameChain? = try chain(320, 180, stages: [PassThroughStage()], io: io)
+        let input = try ChainFrames.gradient(320, 180, tenBit: false)
+        let encoded = try #require(try built?.encode(input, picture: whole(320, 180)))
+        let textures = try #require(encoded.work.textures)
+        #expect(textures.cache === cache)
+        #expect(textures.count == 4, "both planes of the input and of the output")
+        built = nil
+        io = nil
+        encoded.work.commandBuffer.commit()
+        encoded.work.commandBuffer.waitUntilCompleted()
+        _ = try encoded.work.finish()
+        let diff = ChainFrames.maxDifference(input, encoded.output)
+        #expect(diff.y <= 1 && diff.c <= 1)
+    }
+
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func unsupportedFormatIsRefused() throws {
@@ -366,7 +420,7 @@ private final class LockedFlag: @unchecked Sendable {
 private final class DeclaringStage: FrameChainStage {
     let outputColorVolume: FrameChainColorVolume
     init(_ volume: FrameChainColorVolume) { outputColorVolume = volume }
-    func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
+    func prepare(io: MetalFrameIO, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
         input
     }
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture { input }
@@ -489,6 +543,32 @@ struct FrameToneMapperTests {
         #expect(stage.process(input, pts: .invalid, carriesHDR10Plus: false) == nil)
         #expect(events.count(where: { if case .disabled = $0 { true } else { false } }) == 1)
         #expect(events.count(where: { if case .processed = $0 { true } else { false } }) == 1)
+    }
+
+    /// Audit GPU-201: a frame with its own metadata rebuilds the chain while the two frames before it are
+    /// still on the GPU, which releases the old chain and its texture cache under them. Their work holds
+    /// that cache now, so they complete and deliver their picture.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func gpu201ARebuildWithFramesInFlightDeliversThem() throws {
+        let stage = FrameToneMapper(plan: try plan(), frameInterval: 1.0 / 24)
+        var inFlight: [(EncodedGPUWork, @Sendable (Double) -> CVPixelBuffer?)] = []
+        for metadata in [Self.master, Self.master,
+                         HDR10StaticMetadata(maxCLL: 1500, maxFALL: 400, masteringPeakNits: 4000, masteringMinNits: 0.005)] {
+            guard case let .gpu(work, complete) = stage.begin(try frame(metadata: metadata), pts: .zero,
+                                                               carriesHDR10Plus: false) else {
+                Issue.record("a PQ frame above the target goes to the GPU")
+                return
+            }
+            inFlight.append((work, complete))
+        }
+        for (work, complete) in inFlight {
+            work.commandBuffer.commit()
+            work.commandBuffer.waitUntilCompleted()
+            #expect(complete(0) != nil)
+        }
+        inFlight.removeAll()
+        #expect(stage.disabled == nil && stage.stats.framesProcessed == 3)
     }
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)

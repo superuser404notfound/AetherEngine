@@ -8,12 +8,13 @@ import Metal
 /// completed: the GPU time in milliseconds, or the command buffer's error.
 struct EncodedGPUWork: @unchecked Sendable {
     let commandBuffer: MTLCommandBuffer
-    /// The plane textures (and their Core Video wrappers) the work reads and writes, held until it is done.
-    let keepAlive: Any
+    /// The plane textures the work reads and writes and the texture cache they came from, held until it
+    /// is done: the stage may drop its own cache while the work is still on the GPU (audit GPU-201).
+    let textures: MetalTextureLease?
     let failure: (MTLCommandBufferStatus, Error?) -> Error
 
     func finish() throws -> Double {
-        withExtendedLifetime(keepAlive) {}
+        withExtendedLifetime(textures) {}
         guard commandBuffer.status == .completed else { throw failure(commandBuffer.status, commandBuffer.error) }
         return max(0, (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000)
     }
