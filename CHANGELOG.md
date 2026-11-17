@@ -24,6 +24,24 @@ the public-API contract.
 
 ### Fixed
 
+- **Backing out of a remote HLS stream while it was still starting no longer leaves its sound playing.** A
+  stop or a channel change during the engine's trust probe or subtitle-playlist fetch used to mount and play
+  the old URL on the torn-down player, or over the new channel's item.
+- **A scrub preview no longer shows the previous item's picture after a zap.** Live and VOD stills that
+  finished decoding after the session ended were returned anyway.
+- **The scrubber no longer jumps to a stale position after a seek or zap during a stall.** The
+  playlist-shift relay wrote its clock fold after a read that can wait seconds.
+- **Picking an Apple TV for an interlaced title moves the picture again after an interrupted reload.** A
+  failed AE#1070 reload restored its old receiver answer onto the session that replaced it.
+- **A cancelled reload no longer reports success over a dead session.** `reloadAtCurrentPosition()` on a
+  custom source, and an audio switch whose caller cancelled, used to leave the player paused in `.loading`
+  with no error. A failure is now thrown and published as `.error`.
+- **A skipped track's loudness cut no longer carries over to the next track.** The normalization tap and
+  volume fallback were written after a newer load had started.
+- **Closed captions no longer show the previous session's lines after an audio switch or AirPlay reload.**
+- **The last title picked during a disc load is the one that plays.** Earlier picks used to win.
+- **A live stream rebuilt after a muxer failure no longer has its source closed by the old pump's
+  watchdog.**
 - **Infinite or NaN float samples no longer crash or freeze the loudness target.** They are left out of
   the measurement.
 - **A live packet without a PTS no longer produces a segment that claims to last 1e14 seconds.** It cuts
@@ -33,6 +51,11 @@ the public-API contract.
   `base_data_offset` values now fail the open or leave the box unpatched.
 - **DASH manifest and head reads are bounded.** A manifest over 8 MB, or one that trickles for more than
   120 s, fails the open instead of filling memory. A manifest with dozens of audio sets carries the first 16.
+
+### Performance
+
+- **Live scrub previews keep six warm decoders, as VOD does, inside the AE#1059 memory budget.** The live
+  path used to trim the shared list to two and ignore the budget.
 
 ## [7.69.1] - 2026-11-17
 
