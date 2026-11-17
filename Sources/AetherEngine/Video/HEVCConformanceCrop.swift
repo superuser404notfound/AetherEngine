@@ -152,6 +152,8 @@ enum HEVCConformanceCrop {
                     nal = sps
                     changed = true
                 }
+                // The rewrite re-escapes and can grow the NAL past the 16-bit record field (audit BIT-202).
+                guard nal.count <= 0xFFFF else { return nil }
                 out.append(UInt8(nal.count >> 8))
                 out.append(UInt8(nal.count & 0xFF))
                 out.append(contentsOf: nal)

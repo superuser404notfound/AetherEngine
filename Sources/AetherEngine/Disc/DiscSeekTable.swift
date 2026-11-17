@@ -72,8 +72,10 @@ enum CLPIParser {
             let fineFrom = Int(hi >> 14)
             let ptsCoarse = UInt64(hi & 0x3FFF)
             let fineTo = i + 1 < table.coarse ? Int(be32(coarsePos + (i + 1) * 8) >> 14) : table.fine
-            guard fineFrom <= fineTo else { continue }
-            for j in fineFrom..<min(fineTo, table.fine) {
+            // Both come from the file; libbluray clamps the same field (audit NET-205).
+            let fineUpper = min(fineTo, table.fine)
+            guard fineFrom < fineUpper else { continue }
+            for j in fineFrom..<fineUpper {
                 let pts = ((ptsCoarse & ~1) << 18) + (fineEntries[j].pts << 8)
                 let spn = (spnCoarse & ~0x1FFFF) + fineEntries[j].spn
                 out.append(CLPIEntryPoint(pts45k: pts, spn: spn))
@@ -108,13 +110,15 @@ struct DiscSeekTable: Sendable {
     /// that clip's clock. `base0Sec` is NaN until the first clip's base has been read; the play item's
     /// `in_time` stands in for it then.
     func keyframe(forSourceSeconds seconds: Double, base0Sec: Double) -> (offset: Int64, clip: Int, keyframeSec: Double)? {
-        guard let first = clips.first else { return nil }
+        guard let first = clips.first, seconds.isFinite else { return nil }
         let base = base0Sec.isFinite ? base0Sec : first.inTimeSec
         let titleTime = max(0, seconds - base)
         guard let k = clips.lastIndex(where: { $0.cumulativeBeforeSec <= titleTime + 0.001 }) else { return nil }
         let clip = clips[k]
         guard !clip.entries.isEmpty else { return nil }
-        let raw45k = UInt64(max(0, (clip.inTimeSec + (titleTime - clip.cumulativeBeforeSec)) * discTickRate))
+        // A huge seek target would overflow UInt64 (audit, cross-slice note NET).
+        let ticks = (clip.inTimeSec + (titleTime - clip.cumulativeBeforeSec)) * discTickRate
+        let raw45k = ticks.isFinite ? UInt64(min(max(0, ticks), 1e18)) : UInt64(1e18)
         var lo = 0
         var hi = clip.entries.count - 1
         var best = 0
@@ -128,7 +132,9 @@ struct DiscSeekTable: Sendable {
             }
         }
         let entry = clip.entries[best]
-        return (clip.concatByteStart + Int64(entry.spn) * 192, k, Double(entry.pts45k) / discTickRate)
+        let (offset, overflow) = clip.concatByteStart.addingReportingOverflow(Int64(entry.spn) * 192)
+        guard !overflow else { return nil }
+        return (offset, k, Double(entry.pts45k) / discTickRate)
     }
 }
 

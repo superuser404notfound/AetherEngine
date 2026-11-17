@@ -106,6 +106,8 @@ extension AetherEngine {
             return
         }
         guard index < Self.externalSubtitleTrackIDBase else { return }  // unknown external id: no-op
+        // A stream index is a non-negative Int32; anything else would trap the conversion below (audit SUB-207).
+        guard let streamIndex = Int32(exactly: index), streamIndex >= 0 else { return }
         guard loadedURL != nil else { return }
 
         // #77: in-band CEA-608/708 is fed by the always-on producer CC tap (set up at load), not a side
@@ -117,7 +119,7 @@ extension AetherEngine {
             cancelSidecarTask()
             clearSubtitleDrainTarget(channel: .primary, reason: .closedCaptionsSelected)   // #112 rework: CC is tap-fed, not drained
             isSubtitleActive = true
-            activeEmbeddedSubtitleStreamIndex = Int32(index)
+            activeEmbeddedSubtitleStreamIndex = streamIndex
             activeSubtitleTrackIndex = index
             isLoadingSubtitles = false
             subtitleCues = ccCueSnapshot
@@ -132,9 +134,9 @@ extension AetherEngine {
         isSubtitleActive = true
         subtitleCues = []
         pgsStaleArrivalGates[.primary]?.reset()   // #100
-        activeEmbeddedSubtitleStreamIndex = Int32(index)
+        activeEmbeddedSubtitleStreamIndex = streamIndex
         activeSubtitleTrackIndex = index
-        subtitleDrainTargets[.primary] = Int32(index)
+        subtitleDrainTargets[.primary] = streamIndex
         subtitleDrainDecoders[.primary] = nil
         subtitleDrainCursors[.primary] = nil
         // Phase D: a bitmap track additionally arms the OCR worker feeding its native rendition, but
@@ -144,7 +146,7 @@ extension AetherEngine {
         if nativeSubtitleRenderingRequested, !keepsOCRWorker,
            let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: index, in: nativeSubtitleTrackTable),
            nativeSubtitleTrackTable[ordinal].needsOCR {
-            startSubtitleOCRWorker(ordinal: ordinal, streamIndex: Int32(index))
+            startSubtitleOCRWorker(ordinal: ordinal, streamIndex: streamIndex)
         }
         startSubtitleDrainer()
         startSubtitleForwardPrefetcher(startAt: startAt)   // #151
@@ -218,6 +220,7 @@ extension AetherEngine {
             return
         }
         guard index < Self.externalSubtitleTrackIDBase else { return }
+        guard let streamIndex = Int32(exactly: index), streamIndex >= 0 else { return }  // audit SUB-207
         guard loadedURL != nil else { return }
         cancelSidecarTask(channel: .secondary)
         loadedSecondarySidecarURL = nil
@@ -228,13 +231,13 @@ extension AetherEngine {
         secondarySubtitleCues = []
         secondarySidecarASSHeader = nil
         pgsStaleArrivalGates[.secondary]?.reset()   // #100
-        subtitleDrainTargets[.secondary] = Int32(index)
+        subtitleDrainTargets[.secondary] = streamIndex
         subtitleDrainDecoders[.secondary] = nil
         subtitleDrainCursors[.secondary] = nil
         startSubtitleDrainer()
         startSubtitleForwardPrefetcher(startAt: startAt)   // #151
         isLoadingSecondarySubtitles = false
-        setSecondarySubtitleIdentity(embedded: Int32(index))
+        setSecondarySubtitleIdentity(embedded: streamIndex)
     }
 
 

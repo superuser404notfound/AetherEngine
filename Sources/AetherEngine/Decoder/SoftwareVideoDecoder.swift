@@ -244,59 +244,47 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             throw VideoDecoderError.unsupportedCodec(id: codecpar.pointee.codec_id.rawValue)
         }
 
-        guard let ctx = avcodec_alloc_context3(codec) else {
-            throw VideoDecoderError.sessionCreationFailed(status: -1)
-        }
-        codecContext = ctx
-
-        guard avcodec_parameters_to_context(ctx, codecpar) >= 0 else {
-            throw VideoDecoderError.noCodecParameters
-        }
-
-        // Reject VideoToolbox pixel format to force pure software decode (some decoders ignore this).
-        ctx.pointee.get_format = { _, fmts in
-            guard let fmts = fmts else { return AV_PIX_FMT_NONE }
-            var i = 0
-            while fmts[i] != AV_PIX_FMT_NONE {
-                if fmts[i] != AV_PIX_FMT_VIDEOTOOLBOX {
-                    return fmts[i]
-                }
-                i += 1
-            }
-            return AV_PIX_FMT_YUV420P
-        }
-
-        if decodesSingleThreaded {
-            // #544: a still run is one short GOP decoded once. Frame-level threading buys throughput
-            // nobody is waiting for and costs output delay plus a second worker pool.
-            ctx.pointee.thread_count = 1
-            ctx.pointee.thread_type = 0
-        } else {
-            ctx.pointee.thread_count = Int32(Self.playbackThreadCount(
-                activeProcessorCount: ProcessInfo.processInfo.activeProcessorCount))
-            ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
-        }
-
         // 10-bit AV1 converts on the GPU, and its grain is applied there: dav1d only exports the
         // parameters. Decided before the open, since that is when dav1d reads whether to apply it.
         gpuConverter = nil
-        if GPUFrameConverter.enabled, codecpar.pointee.codec_id == AV_CODEC_ID_AV1,
-           codecpar.pointee.format == AV_PIX_FMT_YUV420P10LE.rawValue,
-           let converter = GPUFrameConverter() {
-            gpuConverter = converter
-            ctx.pointee.export_side_data |= Int32(AV_CODEC_EXPORT_DATA_FILM_GRAIN)
-        }
+        let ctx: UnsafeMutablePointer<AVCodecContext>
+        do {
+            ctx = try FFmpegDecoderContext.open(
+                codec: codec, codecpar: codecpar, maxPixels: FFmpegDecoderContext.maxVideoPixels,
+                // Belt-and-suspenders with the get_format rejection: some decoders ignore get_format.
+                options: ["hwaccel": "none"]
+            ) { ctx in
+                // Reject VideoToolbox pixel format to force pure software decode (some decoders ignore this).
+                ctx.pointee.get_format = FFmpegDecoderContext.softwareOnlyGetFormat
 
-        // Belt-and-suspenders hwaccel=none: some decoders ignore get_format.
-        var opts: OpaquePointer?
-        av_dict_set(&opts, "hwaccel", "none", 0)
+                if decodesSingleThreaded {
+                    // #544: a still run is one short GOP decoded once. Frame-level threading buys throughput
+                    // nobody is waiting for and costs output delay plus a second worker pool.
+                    ctx.pointee.thread_count = 1
+                    ctx.pointee.thread_type = 0
+                } else {
+                    ctx.pointee.thread_count = Int32(Self.playbackThreadCount(
+                        activeProcessorCount: ProcessInfo.processInfo.activeProcessorCount))
+                    ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
+                }
 
-        if onCacheTiming != nil { ctx.pointee.flags |= AV_CODEC_FLAG_COPY_OPAQUE }
-        guard avcodec_open2(ctx, codec, &opts) >= 0 else {
-            av_dict_free(&opts)
+                if GPUFrameConverter.enabled, codecpar.pointee.codec_id == AV_CODEC_ID_AV1,
+                   codecpar.pointee.format == AV_PIX_FMT_YUV420P10LE.rawValue,
+                   let converter = GPUFrameConverter() {
+                    gpuConverter = converter
+                    ctx.pointee.export_side_data |= Int32(AV_CODEC_EXPORT_DATA_FILM_GRAIN)
+                }
+
+                if onCacheTiming != nil { ctx.pointee.flags |= AV_CODEC_FLAG_COPY_OPAQUE }
+            }
+        } catch FFmpegDecoderContext.Failure.allocation {
+            throw VideoDecoderError.sessionCreationFailed(status: -1)
+        } catch FFmpegDecoderContext.Failure.parameters {
+            throw VideoDecoderError.noCodecParameters
+        } catch {
             throw VideoDecoderError.sessionCreationFailed(status: -2)
         }
-        av_dict_free(&opts)
+        codecContext = ctx
 
         containerColor = ColorDescription(codecpar: codecpar)
         containerHDR10 = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084

@@ -148,7 +148,7 @@ struct DolbyVisionLayerPairing<Unit> {
     private func same(_ a: Int64, _ b: Int64) -> Bool {
         guard a != Int64.min, b != Int64.min else { return false }
         let (d, overflow) = a.subtractingReportingOverflow(b)
-        return !overflow && abs(d) <= tolerance
+        return !overflow && d.magnitude <= tolerance.magnitude
     }
 
     /// A base-layer picture. `attach` appends an RPU to it and returns whether that worked.

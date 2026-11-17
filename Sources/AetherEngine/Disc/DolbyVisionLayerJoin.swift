@@ -157,7 +157,7 @@ struct DolbyVisionLayerJoin<Unit> {
     private static func sameTime(_ a: Int64, _ b: Int64) -> Bool {
         guard a != Int64.min, b != Int64.min else { return false }
         let (d, overflow) = a.subtractingReportingOverflow(b)
-        return !overflow && abs(d) <= timeToleranceMicros
+        return !overflow && d.magnitude <= UInt64(timeToleranceMicros)
     }
 
     /// Indices of the first base IRAP that has an enhancement IRAP with its time.
@@ -239,7 +239,7 @@ struct DolbyVisionLayerJoin<Unit> {
             }
         }
         if let delta = Self.difference(e.pts, b.pts), agreeingRun >= Self.agreeingRunForRepair || ordinalSkewed,
-           abs(delta) > Self.timeToleranceMicros {
+           delta.magnitude > UInt64(Self.timeToleranceMicros) {
             // Both layers are in decode order, so the head times of the two queues say nothing about which side
             // lost a unit; where the head's partner sits does. The base head's time further along the enhancement
             // queue means the enhancement units in front are extra; the enhancement head's time further along the
@@ -267,7 +267,7 @@ struct DolbyVisionLayerJoin<Unit> {
             return .pair(base: base.removeFirst().unit, enhancement: nil)
         }
         if b.isIRAP { irapShared = e.isIRAP && Self.sameTime(e.pts, b.pts) }
-        if let delta = Self.difference(e.pts, b.pts), abs(delta) <= Self.timeToleranceMicros {
+        if let delta = Self.difference(e.pts, b.pts), delta.magnitude <= UInt64(Self.timeToleranceMicros) {
             agreeingRun += 1
             if ordinalSkewed, agreeingRun >= 4 { ordinalSkewed = false }
         } else {

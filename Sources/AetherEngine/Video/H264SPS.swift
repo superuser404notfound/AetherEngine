@@ -3,6 +3,8 @@ import Foundation
 /// Minimal H.264 SPS reader for SSAI direct play: ad creatives arrive mid-stream on a new PID with unparsed codecpar (width/height==0); calling avformat_find_stream_info would block the live pump. Field order per ITU-T H.264 §7.3.2.1.1.
 enum H264SPS {
 
+    static let maxDimension = 16384
+
     /// Parse cropped dimensions from a raw SPS NAL (with 1-byte NAL header, e.g. 0x67). Returns nil on malformed input.
     static func dimensions(fromNAL nal: [UInt8]) -> (width: Int, height: Int)? {
         parse(fromNAL: nal).map { ($0.width, $0.height) }
@@ -97,6 +99,8 @@ enum H264SPS {
               let heightMapUnitsMinus1 = r.ue() else { return nil }
         guard let frameMbsOnly = r.flag() else { return nil }
 
+        // 16384 matches H264ConfigurationTracker; level 6.2 tops out at 8192x4320 (audit BIT-201).
+        guard widthMbsMinus1 < Self.maxDimension / 16, heightMapUnitsMinus1 < Self.maxDimension / 16 else { return nil }
         let mbWidth = widthMbsMinus1 + 1
         let mbHeight = (heightMapUnitsMinus1 + 1) * (frameMbsOnly ? 1 : 2)
         var width = mbWidth * 16
@@ -122,7 +126,7 @@ enum H264SPS {
             height -= (ct + cb) * stepY
         }
 
-        guard width > 0, height > 0 else { return nil }
+        guard width > 0, height > 0, width <= Self.maxDimension, height <= Self.maxDimension else { return nil }
         var core = BitReader(rbsp), signature = [UInt8(profileIdc)], packed = 0, count = 0
         _ = core.u(coreStart)
         for _ in coreStart..<r.position {

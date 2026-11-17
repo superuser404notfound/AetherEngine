@@ -890,6 +890,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return Swift.max(delta / Int64(Swift.max(packetsSincePrevious, 1)), 1)
     }
 
+    /// The time a live packet cuts on: its PTS, else its DTS (the VOD cutter's rule), else nil.
+    static func liveCutTimestamp(pts: Int64, dts: Int64) -> Int64? {
+        if pts != Int64.min { return pts }
+        return dts != Int64.min ? dts : nil
+    }
+
     /// The live cut rule, pure: a keyframe opens a new segment once its presentation time has moved
     /// `targetSeconds` past the open segment's start, or immediately when a program boundary forced
     /// a cut. Extracted so AE#432's wedge is testable against the rule the pump actually runs.
@@ -1807,8 +1813,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// That is the number the item's stated axis carries, and it is a property of the source: 0.033s
     /// on a 60 fps `-bf 3` seed here, 0.050s on the reporter's broadcast TS, 0.000s on the bundled
     /// seed, which is why a harness that only ran the bundled seed made zero look like a rule.
-    private func liveVideoSegmentIndex(pts: Int64, isKeyframe: Bool) -> Int {
-        let ptsSeconds = Double(pts) * sourceVideoTbSeconds
+    private func liveVideoSegmentIndex(pts: Int64, dts: Int64, isKeyframe: Bool) -> Int {
+        // A packet with a DTS but no PTS (one reorder frame, PES PTS omitted) would read as -1e14 s (audit SEG-201).
+        let stamp = Self.liveCutTimestamp(pts: pts, dts: dts)
+        if stamp == nil, liveFirstSegmentOpened { return liveCurrentSegmentIndex }
+        let ptsSeconds = Double(stamp ?? 0) * sourceVideoTbSeconds
         if !liveFirstSegmentOpened {
             liveFirstSegmentOpened = true
             liveCurrentSegmentIndex = baseIndex
@@ -2099,7 +2108,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let buf = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
         guard let (sps, pps) = H264SPS.extractSPSandPPS(fromAnnexB: buf),
               let dim = H264SPS.dimensions(fromNAL: sps) else { return nil }
-        return (Int32(dim.width), Int32(dim.height),
+        guard let width = Int32(exactly: dim.width), let height = Int32(exactly: dim.height) else { return nil }
+        return (width, height,
                 H264SPS.annexBExtradata(sps: sps, pps: pps))
     }
 
@@ -2130,7 +2140,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         guard let (sps, pps) = H264SPS.extractSPSandPPS(fromAnnexB: buf),
               H264SPS.isRandomAccessEntry(fromAnnexB: buf),
               let dim = H264SPS.dimensions(fromNAL: sps) else { return nil }
-        return (Int32(dim.width), Int32(dim.height),
+        guard let width = Int32(exactly: dim.width), let height = Int32(exactly: dim.height) else { return nil }
+        return (width, height,
                 H264SPS.annexBExtradata(sps: sps, pps: pps))
     }
 
@@ -5001,7 +5012,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     // is unchanged, so #92 holds: the IRAP is the segment's first sample and its
                     // open-GOP RASL pictures still follow it in decode order.
                     let thisVideoSeg = isLive
-                        ? liveVideoSegmentIndex(pts: packet.pointee.pts, isKeyframe: isVideoKeyframe)
+                        ? liveVideoSegmentIndex(pts: packet.pointee.pts, dts: packet.pointee.dts, isKeyframe: isVideoKeyframe)
                         : vodCutter.index(pts: planBoundaryAxis.timestamp(dts: packet.pointee.dts,
                                                                           pts: packet.pointee.pts),
                                           isKeyframe: isVideoKeyframe)

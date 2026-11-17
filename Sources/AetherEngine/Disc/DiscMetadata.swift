@@ -164,8 +164,10 @@ struct DVDTimeMap: Sendable, Equatable {
 
     /// The byte of the VOBU at or before `t` seconds of title time.
     func byteOffset(forTitleSeconds t: Double) -> Int64 {
-        let i = Int((max(0, t) / unitSec).rounded(.down)) - 1
-        guard i >= 0, !byteOffsets.isEmpty else { return titleStartByte }
+        // An infinite or absurd seek target would trap the Int conversion.
+        guard !t.isNaN, unitSec > 0, !byteOffsets.isEmpty else { return titleStartByte }
+        let i = Int(min(max(0, t) / unitSec, 1e15).rounded(.down)) - 1
+        guard i >= 0 else { return titleStartByte }
         return byteOffsets[min(i, byteOffsets.count - 1)]
     }
 }

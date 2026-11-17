@@ -110,7 +110,6 @@ struct H264ConfigurationTracker {
         return p
     }
     private static func dimensions(_ nal: [UInt8]) -> (width: Int, height: Int)? {
-        guard let d = H264SPS.dimensions(fromNAL: nal), d.width <= 16384, d.height <= 16384 else { return nil }
-        return d
+        return H264SPS.dimensions(fromNAL: nal)
     }
 }

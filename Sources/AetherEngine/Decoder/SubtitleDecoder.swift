@@ -220,20 +220,16 @@ enum SubtitleDecoder {
             guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
                 throw SubtitleDecoderError.noDecoder
             }
-            guard let ctx = avcodec_alloc_context3(codec) else {
+            let ctx: UnsafeMutablePointer<AVCodecContext>
+            do {
+                ctx = try FFmpegDecoderContext.open(
+                    codec: codec, codecpar: codecpar, maxPixels: FFmpegDecoderContext.maxSubtitlePixels)
+            } catch FFmpegDecoderContext.Failure.allocation {
                 throw SubtitleDecoderError.codecOpenFailed(code: -1)
-            }
-            // Throwing before `codecCtx` is assigned skips deinit, so unwind the context by hand.
-            var local: UnsafeMutablePointer<AVCodecContext>? = ctx
-            let paramsRet = avcodec_parameters_to_context(ctx, codecpar)
-            guard paramsRet >= 0 else {
-                avcodec_free_context(&local)
-                throw SubtitleDecoderError.codecOpenFailed(code: paramsRet)
-            }
-            let openRet = avcodec_open2(ctx, codec, nil)
-            guard openRet >= 0 else {
-                avcodec_free_context(&local)
-                throw SubtitleDecoderError.codecOpenFailed(code: openRet)
+            } catch FFmpegDecoderContext.Failure.parameters(let code) {
+                throw SubtitleDecoderError.codecOpenFailed(code: code)
+            } catch FFmpegDecoderContext.Failure.open(let code) {
+                throw SubtitleDecoderError.codecOpenFailed(code: code)
             }
 
             self.streamIndex = streamIndex

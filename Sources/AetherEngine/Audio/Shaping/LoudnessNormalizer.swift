@@ -120,7 +120,9 @@ final class LoudnessNormalizer {
         for f in 0..<frames {
             var sum = 0.0
             for c in 0..<channels where weights[c] > 0 {
-                let y = filter.run(Double(samples[f * channels + c]), &state[c])
+                // PCM float can carry inf or NaN; one of them would trap the bin index or poison the filter for good (audit AUD-202).
+                let raw = Double(samples[f * channels + c])
+                let y = filter.run(raw.isFinite ? raw : 0, &state[c])
                 sum += weights[c] * y * y
             }
             stepEnergy += sum
@@ -136,7 +138,7 @@ final class LoudnessNormalizer {
         if recentSteps.count > 4 { recentSteps.removeFirst() }
         guard recentSteps.count == 4 else { return }
         let block = recentSteps.reduce(0, +) / 4
-        guard block > 0 else { return }
+        guard block > 0, block.isFinite else { return }
         let loudness = Self.lufs(block)
         guard loudness >= Self.floorLUFS else { return }
         let bin = min(Self.bins - 1, Int((loudness - Self.floorLUFS) / Self.binWidth))

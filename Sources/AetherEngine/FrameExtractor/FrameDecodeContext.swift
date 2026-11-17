@@ -332,56 +332,40 @@ final class FrameDecodeContext: @unchecked Sendable {
         codec: UnsafePointer<AVCodec>,
         useHardware: Bool
     ) throws -> UnsafeMutablePointer<AVCodecContext> {
-        guard let ctx = avcodec_alloc_context3(codec) else {
+        let hardwareDevice = useHardware ? hardwareDeviceContext : nil
+        do {
+            return try FFmpegDecoderContext.open(
+                codec: codec, codecpar: codecpar, maxPixels: FFmpegDecoderContext.maxVideoPixels,
+                // Belt-and-suspenders with the software get_format callback.
+                options: useHardware ? [:] : ["hwaccel": "none"]
+            ) { ctx in
+                if let hardwareDevice {
+                    ctx.pointee.hw_device_ctx = av_buffer_ref(hardwareDevice)
+                    ctx.pointee.get_format = { _, fmts in
+                        guard let fmts else { return AV_PIX_FMT_NONE }
+                        var fallback = AV_PIX_FMT_NONE
+                        var i = 0
+                        while fmts[i] != AV_PIX_FMT_NONE {
+                            if fmts[i] == AV_PIX_FMT_VIDEOTOOLBOX { return fmts[i] }
+                            if fallback == AV_PIX_FMT_NONE { fallback = fmts[i] }
+                            i += 1
+                        }
+                        return fallback
+                    }
+                } else {
+                    ctx.pointee.get_format = FFmpegDecoderContext.softwareOnlyGetFormat
+                }
+                ctx.pointee.thread_count = Int32(Self.stillExtractionThreadCount(
+                    activeProcessorCount: ProcessInfo.processInfo.activeProcessorCount))
+                ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
+            }
+        } catch FFmpegDecoderContext.Failure.allocation {
             throw FrameDecodeError.allocationFailed
-        }
-        guard avcodec_parameters_to_context(ctx, codecpar) >= 0 else {
-            var doomed: UnsafeMutablePointer<AVCodecContext>? = ctx
-            avcodec_free_context(&doomed)
+        } catch FFmpegDecoderContext.Failure.parameters {
             throw FrameDecodeError.noCodecParameters
-        }
-
-        if useHardware, let hardwareDeviceContext {
-            ctx.pointee.hw_device_ctx = av_buffer_ref(hardwareDeviceContext)
-            ctx.pointee.get_format = { _, fmts in
-                guard let fmts else { return AV_PIX_FMT_NONE }
-                var fallback = AV_PIX_FMT_NONE
-                var i = 0
-                while fmts[i] != AV_PIX_FMT_NONE {
-                    if fmts[i] == AV_PIX_FMT_VIDEOTOOLBOX { return fmts[i] }
-                    if fallback == AV_PIX_FMT_NONE { fallback = fmts[i] }
-                    i += 1
-                }
-                return fallback
-            }
-        } else {
-            ctx.pointee.get_format = { _, fmts in
-                guard let fmts = fmts else { return AV_PIX_FMT_NONE }
-                var i = 0
-                while fmts[i] != AV_PIX_FMT_NONE {
-                    if fmts[i] != AV_PIX_FMT_VIDEOTOOLBOX { return fmts[i] }
-                    i += 1
-                }
-                return AV_PIX_FMT_YUV420P
-            }
-        }
-        ctx.pointee.thread_count = Int32(Self.stillExtractionThreadCount(
-            activeProcessorCount: ProcessInfo.processInfo.activeProcessorCount))
-        ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
-
-        var opts: OpaquePointer?
-        if !useHardware {
-            // Belt-and-suspenders with the software get_format callback above.
-            av_dict_set(&opts, "hwaccel", "none", 0)
-        }
-        let openResult = avcodec_open2(ctx, codec, &opts)
-        av_dict_free(&opts)
-        guard openResult >= 0 else {
-            var doomed: UnsafeMutablePointer<AVCodecContext>? = ctx
-            avcodec_free_context(&doomed)
+        } catch {
             throw FrameDecodeError.decoderOpenFailed
         }
-        return ctx
     }
 
     private func disableHardwareDecode(_ reason: String) {
