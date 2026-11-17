@@ -544,6 +544,8 @@ Notes:
 | `VideoSegmentProvider.swift` | Native path: segment provider facing the playlist (live sliding window, restart heuristics, sparse-hole waits gated on producer coverage, #129). |
 | `MarchRateTracker.swift` | Native path: the producer's march rate from segment completions, cut at restarts and backpressure parks. Feeds the provider's wait-or-restart decision for a short forward jump (#932). |
 | `HLSSegmentProducer.swift` | Native path: pump loop that reads from the Demuxer, feeds `MP4SegmentMuxer`, and cuts fragments keyframe-gated in decode order so the IRAP opens its segment (#92). Also SSAI program-switch detection and the no-cut watchdog. |
+| `HLSSegmentProducer+LiveReplay.swift` | The producer's live replay buffer: commit, rollback, forward and free of buffered packets, and the replay sample. |
+| `HLSSegmentProducer+MoovPrime.swift` | AE#222 audio moov prime: the bounded forward scan and seek hunt for one audio frame on the `.muxerFailed` exit. |
 | `VODSegmentCutter.swift` | Native path: decode-order, keyframe-gated VOD segment cutter (the IRAP opens its segment, #92). |
 | `PlanBoundaryAxis.swift` | Which axis a container stamps its index entries on, and so which packet timestamp the cutter gate may compare with a plan boundary: decode for a mov/mp4 sample table, presentation for a Matroska Cue (#358, AE#561). |
 | `VideoConfigRecord.swift` | The `hvcC` / `avcC` config record and the framing question that hangs off it (#365). See note. |
