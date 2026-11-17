@@ -88,9 +88,15 @@ the public-API contract.
 - **A background video paused by the system is released like one paused by the app (iOS).** Taking out
   AirPods, or pausing from AVKit's own controls, left the whole pipeline running into the suspension. It is
   now released after the grace window, like a `pause()`.
-- **Background video sound resumes after a phone call (iOS).** Since 7.69.1 a native video keeps playing in
-  the background, but the end of a call never resumed it. It now resumes when the system grants
-  `.shouldResume`, and the session is held for that during the call.
+- **Background video sound resumes after a short phone call (iOS).** Since 7.69.1 a native video keeps
+  playing in the background, but the end of a call never resumed it. A call that ends inside the 15 s
+  grace window with `.shouldResume` now resumes it. A longer call finds the pipeline released, as before.
+- **Pulling out AirPods or headphones during a call no longer resumes the film on the speaker when the
+  call ends.**
+- **With background playback off, the end of a call no longer restarts a software-decoded video's sound in
+  the background.**
+- **Tone mapping and upscaling come back after a transient Metal compiler failure.** A failed kernel build
+  is retried after 60 s instead of staying off until the app relaunches.
 - **A quick return during a background teardown no longer ends the next grace window early (iOS).** A
   foreground and background round trip inside the 3.5 s teardown drain could end the new window's
   background-task assertion.
@@ -148,8 +154,8 @@ the public-API contract.
 - **The normalization tap no longer allocates on the audio render thread.**
 - **The end-of-file silence fill (AE#847) is capped at 10 minutes and written as it is encoded.** A corrupt
   last timestamp used to build hours of silent packets in memory first.
-- **A GPU pipeline that fails to build is compiled once per process.** The frame chain and the upscaler
-  used to recompile both shader libraries on every stage build after a failure.
+- **A GPU pipeline that fails to build is not recompiled on every stage build.** The frame chain and the
+  upscaler used to recompile both shader libraries each time after a failure; a failure is now kept for 60 s.
 
 ## [7.69.1] - 2026-11-17
 
