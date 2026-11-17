@@ -87,8 +87,8 @@ struct DASHVirtualLayout: Sendable {
                                       payload: MP4Box.be32(newID) + MP4Box.be32(1) + [UInt8](repeating: 0, count: 12))
             }
         }
-        let fragmentDuration = UInt64(max(0, (durationSeconds ?? indexes.map(\.endSeconds).max() ?? 0)
-                                          * Double(movieTimescale)).rounded())
+        let fragmentDuration = UInt64(exactly: max(0, (durationSeconds ?? indexes.map(\.endSeconds).max() ?? 0)
+                                                   * Double(movieTimescale)).rounded()) ?? 0
         let mehd = MP4Box.fullBox("mehd", version: 1, flags: 0, payload: MP4Box.be64(fragmentDuration))
         let mvhd = MP4Box.rewritingUInt32(inits[0].mvhd, at: inits[0].mvhd.count - 4, to: nextID)
         let moov = MP4Box.box("moov", mvhd + MP4Box.box("mvex", mehd + trexes) + traks)
@@ -223,7 +223,7 @@ enum MP4Box {
             } else if size == 0 {
                 size = range.upperBound - p
             }
-            guard size >= headerSize, p + size <= range.upperBound else {
+            guard size >= headerSize, size <= range.upperBound - p else {
                 throw DASHSourceError.malformedInitialization("box at \(p) runs past its parent")
             }
             out.append(Header(type: fourCC(bytes, p + 4), start: p, headerSize: headerSize, end: p + size))
@@ -278,14 +278,15 @@ struct MP4Init {
                        language: String?) -> [UInt8] {
             var b = bytes
             guard let children = try? MP4Box.children(b, in: 8..<b.count) else { return b }
-            if let tkhd = children.first(where: { $0.type == "tkhd" }) {
+            if let tkhd = children.first(where: { $0.type == "tkhd" }), tkhd.bodyStart < tkhd.end {
                 let version = b[tkhd.bodyStart]
                 let idAt = tkhd.bodyStart + 4 + (version == 1 ? 16 : 8)
                 if idAt + 4 <= tkhd.end { b.replaceSubrange(idAt..<(idAt + 4), with: MP4Box.be32(newID)) }
             }
             if from != to, from > 0,
                let edts = children.first(where: { $0.type == "edts" }),
-               let elst = try? MP4Box.first("elst", in: b, range: edts.bodyStart..<edts.end) {
+               let elst = try? MP4Box.first("elst", in: b, range: edts.bodyStart..<edts.end),
+               elst.bodyStart + 8 <= elst.end {
                 let version = b[elst.bodyStart]
                 let count = Int(MP4Box.u32(b, elst.bodyStart + 4))
                 let stride = version == 1 ? 20 : 12
@@ -303,7 +304,8 @@ struct MP4Init {
             }
             if let packed = language.flatMap(MP4Init.packedLanguage),
                let mdia = children.first(where: { $0.type == "mdia" }),
-               let mdhd = try? MP4Box.first("mdhd", in: b, range: mdia.bodyStart..<mdia.end) {
+               let mdhd = try? MP4Box.first("mdhd", in: b, range: mdia.bodyStart..<mdia.end),
+               mdhd.bodyStart < mdhd.end {
                 let version = b[mdhd.bodyStart]
                 let at = mdhd.bodyStart + 4 + (version == 1 ? 28 : 16)
                 if at + 2 <= mdhd.end, MP4Box.u16(b, at) & 0x7FFF == MP4Init.undetermined {
@@ -338,6 +340,7 @@ struct MP4Init {
             throw DASHSourceError.malformedInitialization("no mvhd")
         }
         mvhd = Array(b[mvhdBox.start..<mvhdBox.end])
+        guard mvhdBox.bodyStart < mvhdBox.end else { throw DASHSourceError.malformedInitialization("short mvhd") }
         let mvhdVersion = b[mvhdBox.bodyStart]
         let timescaleAt = mvhdBox.bodyStart + 4 + (mvhdVersion == 1 ? 16 : 8)
         guard timescaleAt + 4 <= mvhdBox.end, mvhd.count >= 32 else {
@@ -351,6 +354,7 @@ struct MP4Init {
             guard let tkhd = inTrak.first(where: { $0.type == "tkhd" }) else {
                 throw DASHSourceError.malformedInitialization("trak without tkhd")
             }
+            guard tkhd.bodyStart < tkhd.end else { throw DASHSourceError.malformedInitialization("short tkhd") }
             let idAt = tkhd.bodyStart + 4 + (b[tkhd.bodyStart] == 1 ? 16 : 8)
             guard idAt + 4 <= tkhd.end else { throw DASHSourceError.malformedInitialization("short tkhd") }
             if let entry = try Self.firstSampleEntry(b, trak: inTrak), Self.encryptedSampleEntries.contains(entry) {
@@ -422,7 +426,7 @@ struct SegmentIndex {
         while sidxBox == nil, q + 8 <= b.count {
             let size = Int(MP4Box.u32(b, q))
             guard size >= 8 else { break }
-            if MP4Box.fourCC(b, q + 4) == "sidx", q + size <= b.count {
+            if MP4Box.fourCC(b, q + 4) == "sidx", size <= b.count - q {
                 sidxBox = MP4Box.Header(type: "sidx", start: q, headerSize: 8, end: q + size)
             }
             q += size
@@ -459,7 +463,9 @@ struct SegmentIndex {
         try need(12 * count)
         guard firstOffset < UInt64(Int64.max / 2) else { throw DASHSourceError.malformedIndex("sidx first_offset out of range") }
         // The anchor is the first byte after the sidx box, in the representation's own file.
-        var offset = fileOffset + Int64(sidx.end) + Int64(firstOffset)
+        let (anchor, anchorOverflow) = fileOffset.addingReportingOverflow(Int64(sidx.end) + Int64(firstOffset))
+        guard !anchorOverflow else { throw DASHSourceError.malformedIndex("sidx offsets out of range") }
+        var offset = anchor
         var time = earliestPresentationTime
         var refs: [Reference] = []
         refs.reserveCapacity(count)
@@ -473,12 +479,17 @@ struct SegmentIndex {
             let startsWithSAP = sapWord & 0x8000_0000 != 0
             let sapType = (sapWord >> 28) & 0x7
             let sapDelta = UInt64(sapWord & 0x0FFF_FFFF)
+            let (sapTime, sapOverflow) = time.addingReportingOverflow(sapDelta)
+            let (nextTime, timeOverflow) = time.addingReportingOverflow(UInt64(duration))
+            guard !sapOverflow, !timeOverflow else { throw DASHSourceError.malformedIndex("sidx times out of range") }
             refs.append(Reference(offset: offset, size: Int64(sizeWord), duration: duration,
                                   startSeconds: Double(time) / Double(timescale),
                                   sapSeconds: startsWithSAP && (sapType == 1 || sapType == 2)
-                                    ? Double(time + sapDelta) / Double(timescale) : nil))
-            offset += Int64(sizeWord)
-            time += UInt64(duration)
+                                    ? Double(sapTime) / Double(timescale) : nil))
+            let (nextOffset, offsetOverflow) = offset.addingReportingOverflow(Int64(sizeWord))
+            guard !offsetOverflow else { throw DASHSourceError.malformedIndex("sidx offsets out of range") }
+            offset = nextOffset
+            time = nextTime
             p += 12
         }
         references = refs
@@ -513,8 +524,10 @@ enum DASHFragmentPatcher {
             }
             if flags & 0x01 != 0, idAt + 12 <= tfhd.end {
                 let base = Int64(bitPattern: MP4Box.u64(moof, idAt + 4))
-                patches.append(Patch(offset: Int64(idAt + 4),
-                                     bytes: MP4Box.be64(UInt64(bitPattern: base + sourceToVirtualDelta))))
+                let (moved, overflow) = base.addingReportingOverflow(sourceToVirtualDelta)
+                if !overflow {
+                    patches.append(Patch(offset: Int64(idAt + 4), bytes: MP4Box.be64(UInt64(bitPattern: moved))))
+                }
             }
         }
         return patches
