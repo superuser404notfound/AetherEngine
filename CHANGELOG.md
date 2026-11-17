@@ -71,6 +71,17 @@ the public-API contract.
   session (`kVTInvalidSessionErr`, `kVTVideoDecoderMalfunctionErr`) starts the normal session recovery.
 - **After a video session rebuild on the software host, the audio no longer repeats up to a quarter
   second.** The reposition uses the clock instead of the published time.
+- **A long film no longer fails on its third healed network outage.** The read-error and credential
+  revive limits now count only failures in a row without progress, so a session that heals every outage
+  keeps going. Three deaths in a row without a stored segment in between still give up.
+- **Calling `retryLiveSourceRecovery()` on a live session that is not parked does nothing.** A second call
+  after a successful reopen used to stop the healthy producer and end a running recording.
+- **Live blocking playlist reloads hold again after a host retry.** After `retryLiveSourceRecovery()` every
+  hold used to answer at once.
+- **A live segment that was evicted while still listed answers 404 at once.** It used to wait 30 s and then
+  answer a retriable 503, and segments below the window answered 503 too. AVPlayer resyncs on the 404.
+- **Stopping the load of a remote `.iso`, `.img` or `.udf` cancels its size probe.** Up to four range
+  requests used to keep running for about two minutes, outside the origin request budget.
 - **Infinite or NaN float samples no longer crash or freeze the loudness target.** They are left out of
   the measurement.
 - **A live packet without a PTS no longer produces a segment that claims to last 1e14 seconds.** It cuts
@@ -85,6 +96,8 @@ the public-API contract.
 
 - **Live scrub previews keep six warm decoders, as VOD does, inside the AE#1059 memory budget.** The live
   path used to trim the shared list to two and ignore the budget.
+- **The disk-reserve check no longer reads the volume's free space on every 64 KiB write.** The reading
+  is reused for 0.5 s.
 - **A GPU pipeline that fails to build is compiled once per process.** The frame chain and the upscaler
   used to recompile both shader libraries on every stage build after a failure.
 
