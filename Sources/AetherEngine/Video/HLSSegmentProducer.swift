@@ -3809,6 +3809,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func stopNoCutWatchdog() {
         noCutWatchdogTimer?.cancel()
         noCutWatchdogTimer = nil
+        // Cancelling the timer does not stop a tick already running; this waits it out.
+        noCutWatchdog?.retire()
     }
 
     /// One tick, off the read thread. The hold logs and re-arms; the exit logs, latches, and aborts
@@ -3839,29 +3841,31 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session
             )
         case .exitForRetune(let w):
-            EngineLog.emit(
-                (w.everProduced
-                 ? "[HLSSegmentProducer] no-cut stall: no segment finalized for "
-                 : "[HLSSegmentProducer] #446 the join never cut anything: nothing produced in ")
-                + "\(Int(w.stalledFor))s (packetsRead=\(w.packetsRead), "
-                + "sinceFinalize=\(w.progress), "
-                + "rate=\(String(format: "%.1f", w.readRate))pkt/s, "
-                + "\(w.everProduced ? (w.isWedge ? "cutter wedge" : "source starvation") : "the video gate never opened, so nothing was ever cut to serve")); "
-                + "window video=\(w.videoPackets) key=\(w.videoKeyframes) "
-                + "audio=\(w.audioPackets) foreign=\(w.foreignPackets)"
-                + (w.synthesizedVideoPackets > 0
-                    ? " synthesizedTs=\(w.synthesizedVideoPackets)" : "")
-                + (w.lastForeignStreamIndex >= 0
-                    ? " lastForeignIdx=\(w.lastForeignStreamIndex)" : "")
-                + (w.videoPtsAdvanceSeconds >= 0
-                    ? " videoPtsAdvance=\(String(format: "%.1f", w.videoPtsAdvanceSeconds))s" : "")
-                + (w.consecutiveHolds > 0
-                    ? " holdsExhausted=\(w.consecutiveHolds)" : "")
-                + "; aborting the source read and exiting for host retune",
-                category: .session
-            )
-            demuxer.markClosed()
-            sideAudioDemuxer?.markClosed()
+            watchdog.performExit {
+                EngineLog.emit(
+                    (w.everProduced
+                     ? "[HLSSegmentProducer] no-cut stall: no segment finalized for "
+                     : "[HLSSegmentProducer] #446 the join never cut anything: nothing produced in ")
+                    + "\(Int(w.stalledFor))s (packetsRead=\(w.packetsRead), "
+                    + "sinceFinalize=\(w.progress), "
+                    + "rate=\(String(format: "%.1f", w.readRate))pkt/s, "
+                    + "\(w.everProduced ? (w.isWedge ? "cutter wedge" : "source starvation") : "the video gate never opened, so nothing was ever cut to serve")); "
+                    + "window video=\(w.videoPackets) key=\(w.videoKeyframes) "
+                    + "audio=\(w.audioPackets) foreign=\(w.foreignPackets)"
+                    + (w.synthesizedVideoPackets > 0
+                        ? " synthesizedTs=\(w.synthesizedVideoPackets)" : "")
+                    + (w.lastForeignStreamIndex >= 0
+                        ? " lastForeignIdx=\(w.lastForeignStreamIndex)" : "")
+                    + (w.videoPtsAdvanceSeconds >= 0
+                        ? " videoPtsAdvance=\(String(format: "%.1f", w.videoPtsAdvanceSeconds))s" : "")
+                    + (w.consecutiveHolds > 0
+                        ? " holdsExhausted=\(w.consecutiveHolds)" : "")
+                    + "; aborting the source read and exiting for host retune",
+                    category: .session
+                )
+                demuxer.markClosed()
+                sideAudioDemuxer?.markClosed()
+            }
         }
     }
 
@@ -5308,6 +5312,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         finishCondition.broadcast()
         finishCondition.unlock()
 
+        // Before the report: a live in-place rebuild starts from it on this producer's demuxer, and
+        // the defer that also stops the watchdog runs only after this returns.
+        stopNoCutWatchdog()
         onPumpFinished?(exitReason)
     }
 
