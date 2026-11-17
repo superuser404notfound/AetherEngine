@@ -308,34 +308,29 @@ enum SubtitleForwardPrefetcher {
             // bytes too. The lead is measured from the last read position, which is what the reader
             // has actually banked; a session that has read nothing yet counts as lead 0 and is let
             // through by the floor rule, so positioning is never blocked behind a busy pump forever.
-            if let link, valveGrantedUntil.map({ DispatchTime.now() > $0 }) ?? true {
-                var yielded: Double = 0
-                while !Task.isCancelled,
-                      link.shouldYield(
-                        // #496: a pending move counts as freshly anchored. The grace exists so a
-                        // reader positioned somewhere new fills against a busy video path, and a
-                        // reader the viewer has just moved is in exactly that state; without this
-                        // the request waits behind up to a full yield cap while the region in front
-                        // of the playhead is harvested by nobody. A seek in flight still wins, that
-                        // rule sits above the grace.
-                        inAnchorGrace: DispatchTime.now() < anchorGraceUntil
-                            || reanchor?.hasPending == true,
-                        yieldedSeconds: yielded) {
-                    if yielded == 0 { SubtitlePrefetchTelemetry.recordLinkYield(true) }
-                    // The playhead moves while we wait, so the lead shrinks: a reader parked behind
-                    // a busy pump returns to fetching on its own once it falls under the floor.
-                    guard let fresh = await playhead() else { break readLoop }
-                    playheadSnapshot = fresh
-                    do { try await Task.sleep(nanoseconds: link.pollNanoseconds) } catch { break readLoop }
-                    yielded += link.pollSeconds
-                }
-                if yielded > 0 { SubtitlePrefetchTelemetry.recordLinkYield(false, seconds: yielded) }
-                if yielded >= link.maxYieldSeconds {
-                    valveGrantedUntil = DispatchTime.now() + link.valveGrantSeconds
+            if let link {
+                // #496: a pending move counts as freshly anchored. The grace exists so a reader
+                // positioned somewhere new fills against a busy video path, and a reader the viewer
+                // has just moved is in exactly that state; without this the request waits behind up
+                // to a full yield cap while the region in front of the playhead is harvested by
+                // nobody. A seek in flight still wins, that rule sits above the grace.
+                guard let waited = await SideReaderLoop.yieldLink(
+                    link, valveGrantedUntil: &valveGrantedUntil,
+                    inAnchorGrace: {
+                        DispatchTime.now() < anchorGraceUntil || reanchor?.hasPending == true
+                    },
+                    playhead: playhead,
+                    onWaitStart: { SubtitlePrefetchTelemetry.recordLinkYield(true) })
+                else { break readLoop }
+                // The playhead moves while we wait, so the lead shrinks: a reader parked behind a
+                // busy pump returns to fetching on its own once it falls under the floor.
+                if let fresh = waited.playhead { playheadSnapshot = fresh }
+                if waited.seconds > 0 { SubtitlePrefetchTelemetry.recordLinkYield(false, seconds: waited.seconds) }
+                if waited.tookValve {
                     SubtitlePrefetchTelemetry.recordLinkValveGrant()
                     EngineLog.emit(
                         "[AetherEngine] #151 forward prefetch yielded the link for "
-                        + "\(Int(yielded))s; taking \(Int(link.valveGrantSeconds))s of it back "
+                        + "\(Int(waited.seconds))s; taking \(Int(link.valveGrantSeconds))s of it back "
                         + "(the video path is not releasing it)",
                         category: .engine)
                 }
@@ -371,10 +366,9 @@ enum SubtitleForwardPrefetcher {
                 if let fresh = await playhead() { playheadSnapshot = fresh }
             }
 
-            let next: UnsafeMutablePointer<AVPacket>?
-            do {
-                next = try demuxer.readPacket()
-            } catch {
+            let pkt: UnsafeMutablePointer<AVPacket>
+            switch SideReaderLoop.readNext(demuxer) {
+            case .failed(let error):
                 // #231: a transport failure on the side reader, a stall that exhausts the read
                 // deadline, a reconnect that gives up. Distinct from EOF, and restartable.
                 EngineLog.emit(
@@ -382,16 +376,17 @@ enum SubtitleForwardPrefetcher {
                     + "\(error)",
                     category: .engine)
                 exit = .readFailed
-                break
-            }
-            guard let pkt = next else {
+                break readLoop
+            case .endOfFile:
                 // AE#955: the run read everything there is. Without this the ledger ends at the
                 // last progress step, short of the duration, so a span that runs to the end of the
                 // program never read as read and the OCR pre-fill in the last
                 // `subtitleOCRLeadSeconds` of a film waited forever.
                 store.noteHarvestReach(.prefetch, through: .greatestFiniteMagnitude)
                 exit = .endOfFile
-                break
+                break readLoop
+            case .packet(let next):
+                pkt = next
             }
             let streamIdx = pkt.pointee.stream_index
             let isTarget = streamIndices.contains(streamIdx)
