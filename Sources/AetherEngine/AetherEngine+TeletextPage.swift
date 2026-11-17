@@ -66,7 +66,8 @@ extension AetherEngine {
             }
             affected.append(channel)
         }
-        if !affected.isEmpty { subtitleDrainTick() }
+        // The tick decodes off the main actor like the loop's own (audit SUB-R203); the cursors are nil, so it resets.
+        if !affected.isEmpty { requestSubtitleDrainTick() }
         return affected
     }
 }
