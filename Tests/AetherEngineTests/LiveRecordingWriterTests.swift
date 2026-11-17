@@ -117,6 +117,44 @@ struct LiveRecordingWriterTests {
         writer.finish(reason: .stoppedByHost)
     }
 
+    /// SUB-202: the mpegts muxer is not TS_NONSTRICT, so a packet whose dts does not rise returns
+    /// EINVAL. One such packet used to end a multi-hour recording as `.writeFailed`.
+    @Test("a repeated dts does not end the recording, and the packets after it still land")
+    func nonMonotonicDtsDoesNotEndRecording() throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let params = makeVideoParameters()
+        defer { free(params) }
+
+        let failures = RecordingFailureBox()
+        let writer = try LiveRecordingWriter(
+            url: url,
+            streams: [RecordingStreamDescriptor(sourceStreamIndex: 0,
+                                                timeBaseNum: 1, timeBaseDen: 90000,
+                                                codecParameters: params, isVideo: true)],
+            ceilingBytes: 1 << 20,
+            onFailure: { failures.record($0) }
+        )
+
+        func feed(_ i: Int, dts: Int64) {
+            annexBPayload(1024, nalType: i == 0 ? 0x65 : 0x41).withUnsafeBytes { buf in
+                writer.accept(packetBytes: buf, sourceStreamIndex: 0,
+                              pts: dts, dts: dts, duration: 3000, isKeyframe: i == 0)
+            }
+        }
+        for i in 0..<10 { feed(i, dts: Int64(i) * 3000) }
+        feed(10, dts: 9 * 3000)            // repeated dts
+        feed(11, dts: 5 * 3000)            // jumps back
+        for i in 12..<30 { feed(i, dts: Int64(i) * 3000) }
+        let failure = writer.finish(reason: .stoppedByHost)
+
+        #expect(failure == nil)
+        #expect(failures.all.isEmpty, "a non-increasing dts must never end the recording")
+        let data = try Data(contentsOf: url)
+        #expect(data.count % 188 == 0)
+        #expect(data.count > 30 * 1024, "the packets after the bad one must reach the file")
+    }
+
     @Test("an audio keyframe does not arm the recording, only a video one does")
     func audioKeyframeDoesNotArm() throws {
         let url = tempURL()
@@ -373,4 +411,11 @@ struct LiveRecordingWriterTests {
         #expect(first[1] == 0, "the earliest packet in the file is the one that becomes zero")
         #expect(first[0] == lead, "the picture still sits the source's 100 ms behind its audio")
     }
+}
+
+private final class RecordingFailureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failures: [RecordingFailure] = []
+    func record(_ f: RecordingFailure) { lock.lock(); failures.append(f); lock.unlock() }
+    var all: [RecordingFailure] { lock.lock(); defer { lock.unlock() }; return failures }
 }
