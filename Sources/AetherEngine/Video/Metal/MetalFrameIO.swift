@@ -102,23 +102,47 @@ final class MetalTextureLease: @unchecked Sendable {
     }
 }
 
-/// Compiled pipelines per Metal device, kept for the process (audit GPU-R202). A failed build is kept
-/// too: a shader that did not compile will not compile on the next try either, so later callers fail at
-/// once instead of compiling the libraries again on every stage build. Callers that arrive while the
-/// first build runs wait for it instead of compiling twice.
+/// Compiled pipelines per Metal device, kept for the process (audit GPU-R202). Callers that arrive while
+/// the first build runs wait for it instead of compiling twice.
+///
+/// A failed build is kept too, so later callers fail at once instead of compiling the libraries again on
+/// every stage build, but only for `failureRetryInterval` (review R-P4-1). Metal reports a compiler-service
+/// interruption under memory pressure (`XPC_ERROR_CONNECTION_INTERRUPTED`) with the same
+/// `MTLLibraryError.compileFailure` a broken shader gets, so the two cannot be told apart, and a failure
+/// kept for good switched tone mapping and upscaling off until the app relaunched. 60 s by default: a
+/// failure that is real then costs one compile a minute however often stages are rebuilt, and one that
+/// was not is gone by the next title or rebuild. nil keeps a failure for the process, for a caller that
+/// asks on every frame (the FEL composer), where a retry would put a compile on the decode thread.
 final class MetalPipelineCache<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var entries: [UInt64: Result<Value, Error>] = [:]
+    private struct Entry {
+        let result: Result<Value, Error>
+        let builtAt: ContinuousClock.Instant
+    }
 
-    init() {}
+    private let lock = NSLock()
+    private var entries: [UInt64: Entry] = [:]
+    private let failureRetryInterval: Duration?
+    private let now: @Sendable () -> ContinuousClock.Instant
+
+    init(failureRetryInterval: Duration? = .seconds(60),
+         now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
+        self.failureRetryInterval = failureRetryInterval
+        self.now = now
+    }
 
     func resolve(device: MTLDevice, compile: () throws -> Value) throws -> Value {
         lock.lock()
         defer { lock.unlock() }
-        if let entry = entries[device.registryID] { return try entry.get() }
+        let key = device.registryID
+        if let entry = entries[key], !isExpired(entry) { return try entry.result.get() }
         let result = Result { try compile() }
-        entries[device.registryID] = result
+        entries[key] = Entry(result: result, builtAt: now())
         return try result.get()
+    }
+
+    private func isExpired(_ entry: Entry) -> Bool {
+        guard case .failure = entry.result, let failureRetryInterval else { return false }
+        return entry.builtAt.duration(to: now()) >= failureRetryInterval
     }
 
     func removeAll() {

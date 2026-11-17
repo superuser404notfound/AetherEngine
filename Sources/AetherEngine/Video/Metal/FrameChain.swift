@@ -485,7 +485,7 @@ final class FrameChainKernels: @unchecked Sendable {
         self.lineArtDepthToSpace = lineArtDepthToSpace
     }
 
-    /// The device's kernels, compiled on first use; a failed build is kept and rethrown.
+    /// The device's kernels, compiled on first use; a failed build is kept for a minute and rethrown.
     static func shared(for device: MTLDevice) throws -> FrameChainKernels {
         try cache.resolve(device: device) { try compile(device) }
     }

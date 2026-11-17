@@ -914,7 +914,7 @@ final class UpscaleKernels: @unchecked Sendable {
         self.toNV12 = toNV12
     }
 
-    /// nil when they did not build; that is kept, so a later stage does not compile them again.
+    /// nil when they did not build; that is kept for a minute, so a later stage does not compile them again.
     static func shared(for device: MTLDevice) -> UpscaleKernels? {
         try? cache.resolve(device: device) {
             let library = try device.makeLibrary(source: UpscaleShaderSource.source, options: nil)

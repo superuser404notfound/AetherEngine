@@ -175,11 +175,11 @@ final class DoviFelComposer: @unchecked Sendable {
             }
         }
 
-        /// Per-device results, failures included: a shader that does not compile will not compile on the next
-        /// frame either, so the failure is kept and every later call fails fast instead of recompiling.
+        /// Per-device results, failures included and kept for the process: this is asked on every frame
+        /// while it has no pipelines, so a retry would compile on the decode thread mid-playback.
         typealias Cache = MetalPipelineCache<SharedPipelines>
 
-        private static let shared = Cache()
+        private static let shared = Cache(failureRetryInterval: nil)
 
         static func getOrCreate(device: MTLDevice) throws -> SharedPipelines {
             try shared.resolve(device: device) {
