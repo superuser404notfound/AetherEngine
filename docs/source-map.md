@@ -232,6 +232,7 @@ Notes:
 | --- | --- |
 | `AVIOProvider.swift` | Internal seam over a custom-AVIO byte source. `AVIOReader` and `CustomIOReaderBridge` both plug into the Demuxer through it, including the bounded-seek read deadline and the resolved byte size behind the byte-estimate seek fallback (#112). |
 | `AVIOReader.swift` | URLSession-backed `avio_alloc_context` with three modes. See note. |
+| `AVIOReader+ForwardOnly.swift` | The forward-only half of `AVIOReader`: the sequential read, the background streaming download and its URLSession delegate. |
 | `ResidentSpan.swift` | Bytes already in memory that a read can be served from without a round trip: the open window kept across a parse seek, and the speculative tail fetch. Not a cache (no fetch on miss, no eviction, no block alignment); it either covers an offset or it does not (#281). |
 | `RangeHonestyProbe.swift` | Checks a ranged reconnect against bytes already held. The request starts a few KB early, and delivery waits until those KB match. A mismatch latches the reader into failing reads and records the origin, so the session fails as `sourceFabricatesRanges` instead of playing another chunk's bytes (AE#958). |
 | `ContentRange.swift` | One parser for a `Content-Range: bytes first-last/total` value, used by every ranged reader so they agree on case, order and the total (audit DMX-R202). |
