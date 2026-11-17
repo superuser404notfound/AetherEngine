@@ -115,7 +115,9 @@ final class MultiFileConcatIOReader: IOReader, SourceTransferCounting, @unchecke
         var starts: [Int64] = []
         for segment in segments {
             starts.append(cursor)
-            cursor += max(0, segment.size)
+            // Sizes come from a host listing; saturate instead of trapping (audit DMX unnumbered).
+            let (sum, overflow) = cursor.addingReportingOverflow(max(0, segment.size))
+            cursor = overflow ? Int64.max : sum
         }
         self.starts = starts
         self.totalLength = cursor

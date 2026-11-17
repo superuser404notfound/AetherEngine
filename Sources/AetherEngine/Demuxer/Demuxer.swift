@@ -1863,7 +1863,14 @@ public final class Demuxer: @unchecked Sendable {
         }
         let size = avio_size(pb)
         guard size > 0 else { return declared }
-        return Int64((Double(size) * 8 / titleSeconds).rounded())
+        return Self.discBitRate(sizeBytes: size, titleSeconds: titleSeconds, fallback: declared)
+    }
+
+    /// A host-declared size over a short title can pass Int64.max, which traps the conversion (audit DMX-202).
+    static func discBitRate(sizeBytes: Int64, titleSeconds: Double, fallback: Int64) -> Int64 {
+        let rate = (Double(sizeBytes) * 8 / titleSeconds).rounded()
+        guard rate.isFinite, rate >= 0, rate < 9.2e18 else { return fallback }
+        return Int64(rate)
     }
 
     /// AVFormatContext.start_time in AV_TIME_BASE units. Non-zero on re-muxed
