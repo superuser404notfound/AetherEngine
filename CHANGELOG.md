@@ -15,9 +15,19 @@ the public-API contract.
 - **A DASH manifest can no longer collect your server credentials.** The token, cookie and Authorization
   headers now go only to the host the manifest came from. A `BaseURL` on another host, port or plain http
   gets the other headers without them.
+- **Hostile streams no longer crash the app on trap-prone values.** An absurd H.264 SPS size, an hvcC
+  rewrite that outgrows its 16-bit length, extreme Dolby Vision layer times, a crafted Profile 7 RPU, a
+  Blu-ray CLPI EP map, a huge disc size or seek target, and an out-of-range subtitle index now end
+  gracefully instead of trapping.
+- **A hostile PGS or other bitmap subtitle can no longer allocate about 1 GB.** Subtitle decoders cap the
+  canvas at 4096x4096 pixels, video decoders at 8192x8192 (8K still plays).
 
 ### Fixed
 
+- **Infinite or NaN float samples no longer crash or freeze the loudness target.** They are left out of
+  the measurement.
+- **A live packet without a PTS no longer produces a segment that claims to last 1e14 seconds.** It cuts
+  on its DTS instead.
 - **A crafted DASH manifest or MP4 box no longer crashes the app.** Huge durations or byte ranges,
   overflowing sidx times, cut mvhd/tkhd/elst/mdhd boxes, oversized box lengths and large
   `base_data_offset` values now fail the open or leave the box unpatched.
