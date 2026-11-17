@@ -25,8 +25,8 @@ the public-API contract.
 ### Added
 
 - **A host can choose how long a native audio switch waits for the frame it holds** (PR #1082,
-  thanks to playovahq). `heldPictureFrameWaitSeconds` (default 0.5 s, as before, at most 3 s) bounds the read of
-  the outgoing picture. 0 holds nothing.
+  thanks to playovahq). `heldPictureFrameWaitSeconds` (default 0.5 s, as before, at most 3 s) bounds
+  the read of the outgoing picture. 0 holds nothing.
 - **An audio switch stands still for the full wait only once where the output vends no paused frame.**
   It used to wait 0.5 s on every switch and then show black anyway. After one empty read, later switches
   probe for 0.15 s until a read succeeds again.
