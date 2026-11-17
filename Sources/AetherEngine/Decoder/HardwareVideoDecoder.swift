@@ -212,6 +212,12 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// session; `awaitingKeyframe` drops packets after a rebuild until one the new session can start
     /// from.
     private var sessionLost = false
+    /// DEC-204, guarded by `skipLock` (the output callback must not take `lock`). Failures the output
+    /// callback reported for the current session, and which session that is, so a verdict reached late
+    /// on another queue cannot condemn the session that replaced it.
+    private var callbackFailures = 0
+    private var callbackFailureSession: UInt64 = 0
+    var callbackFailureCount: Int { skipLock.lock(); defer { skipLock.unlock() }; return callbackFailures }
     private var awaitingKeyframe = false
     private var droppedAwaitingKeyframe = 0
     private var decoderSpecification: NSDictionary?
@@ -419,6 +425,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             throw VideoDecoderError.sessionCreationFailed(status: created.status)
         }
         session = createdSession
+        beginSessionLocked()
 
         attachesAV1DolbyVisionRPU = Self.decodesAV1DolbyVision(stream: stream)
         EngineLog.emit(
@@ -485,10 +492,58 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             return false
         }
         session = fresh
+        beginSessionLocked()
         sessionLost = false
         awaitingKeyframe = true
         droppedAwaitingKeyframe = 0
         EngineLog.emit("[HardwareVideoDecoder] AE#739 session rebuilt", category: .swPlayback)
+        return true
+    }
+
+    /// Per-session state that must not outlive its session. Called, under `lock`, wherever `session` is
+    /// replaced (rebuild, VP9 resize, HDR10 re-description), so a counter added here lands everywhere.
+    private func beginSessionLocked() {
+        skipLock.lock()
+        callbackFailureSession &+= 1
+        callbackFailures = 0
+        skipLock.unlock()
+    }
+
+    /// DEC-R201: the format-description-and-session swap `adoptVP9FrameSize` and `describeStaticHDR10`
+    /// both do. The old session delivers what it still holds before it is invalidated, and a refusal at
+    /// either step leaves it in place. The caller holds `lock`, checked the epoch and loss state, and
+    /// logs through the two closures. Returns false when nothing was replaced.
+    private func replaceSessionLocked(
+        old: VTDecompressionSession, refCon: Unmanaged<RefConBox>,
+        width newWidth: Int32, height newHeight: Int32, extensions: NSDictionary?,
+        descriptionFailed: (OSStatus) -> Void, sessionRefused: (OSStatus) -> Void
+    ) -> Bool {
+        var fd: CMVideoFormatDescription?
+        let fdStatus = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: formatCodecType,
+            width: newWidth,
+            height: newHeight,
+            extensions: extensions,
+            formatDescriptionOut: &fd
+        )
+        guard fdStatus == noErr, let formatDesc = fd else {
+            descriptionFailed(fdStatus)
+            return false
+        }
+        VTDecompressionSessionWaitForAsynchronousFrames(old)
+        let created = makeSession(formatDescription: formatDesc, refCon: refCon)
+        guard let fresh = created.session else {
+            sessionRefused(created.status)
+            return false
+        }
+        VTDecompressionSessionInvalidate(old)
+        session = fresh
+        formatDescription = formatDesc
+        width = newWidth
+        height = newHeight
+        formatExtensions = extensions
+        beginSessionLocked()
         return true
     }
 
@@ -505,38 +560,29 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if let epoch, epoch != currentEpoch { return }
         guard size.width != width || size.height != height,
               let old = session, !sessionLost, let refConBox else { return }
-        var fd: CMVideoFormatDescription?
-        let fdStatus = CMVideoFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            codecType: formatCodecType,
-            width: size.width,
-            height: size.height,
-            extensions: formatExtensions,
-            formatDescriptionOut: &fd
-        )
-        guard fdStatus == noErr, let formatDesc = fd else {
-            EngineLog.emit("[HardwareVideoDecoder] VP9 resize to \(size.width)x\(size.height): "
-                           + "format description failed (\(fdStatus))", category: .swPlayback)
-            return
+        let oldWidth = width, oldHeight = height
+        let replaced = replaceSessionLocked(
+            old: old, refCon: refConBox, width: size.width, height: size.height, extensions: formatExtensions,
+            descriptionFailed: { status in
+                EngineLog.emit("[HardwareVideoDecoder] VP9 resize to \(size.width)x\(size.height): "
+                               + "format description failed (\(status))", category: .swPlayback)
+            },
+            sessionRefused: { status in
+                EngineLog.emit("[HardwareVideoDecoder] VP9 resize to \(size.width)x\(size.height): "
+                               + "session refused (\(status)), keeping \(oldWidth)x\(oldHeight)",
+                               category: .swPlayback)
+            })
+        if replaced {
+            EngineLog.emit("[HardwareVideoDecoder] VP9 key frame resizes \(oldWidth)x\(oldHeight) -> "
+                           + "\(size.width)x\(size.height), session rebuilt", category: .swPlayback)
         }
-        VTDecompressionSessionWaitForAsynchronousFrames(old)
-        let created = makeSession(formatDescription: formatDesc, refCon: refConBox)
-        guard let fresh = created.session else {
-            EngineLog.emit("[HardwareVideoDecoder] VP9 resize to \(size.width)x\(size.height): "
-                           + "session refused (\(created.status)), keeping \(width)x\(height)",
-                           category: .swPlayback)
-            return
-        }
-        VTDecompressionSessionInvalidate(old)
-        EngineLog.emit("[HardwareVideoDecoder] VP9 key frame resizes \(width)x\(height) -> "
-                       + "\(size.width)x\(size.height), session rebuilt", category: .swPlayback)
-        session = fresh
-        formatDescription = formatDesc
-        width = size.width
-        height = size.height
     }
 
     #if DEBUG
+    /// A decoder with no VideoToolbox session counts as having one for the callback-failure verdict.
+    var pretendsToHaveSessionForTesting = false
+    /// Current session id, for a test that replays a failure against a stale one.
+    var callbackFailureSessionForTesting: UInt64 { skipLock.lock(); defer { skipLock.unlock() }; return callbackFailureSession }
     /// Marks the session lost without touching VideoToolbox, so a test can feed keyframes to a decoder that
     /// has no session and see them reported.
     func markSessionLostForTesting() {
@@ -638,6 +684,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         formatDescription = formatDesc
         session = createdSession
+        beginSessionLocked()
         refConBox = unmanaged
         lock.unlock()
 
@@ -987,31 +1034,17 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         guard Self.needsNewDescription(found: values, described: describedHDR10),
               let old = session, !sessionLost, let refConBox else { return }
         let extensions = Self.extensions(formatExtensions, carrying: values)
-        var fd: CMVideoFormatDescription?
-        let fdStatus = CMVideoFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            codecType: formatCodecType,
-            width: width,
-            height: height,
-            extensions: extensions,
-            formatDescriptionOut: &fd
-        )
-        guard fdStatus == noErr, let formatDesc = fd else {
-            EngineLog.emit("[HardwareVideoDecoder] HDR10 values found in a key frame: format description "
-                           + "failed (\(fdStatus)), frames keep the copy", category: .swPlayback)
-            return
-        }
-        VTDecompressionSessionWaitForAsynchronousFrames(old)
-        let created = makeSession(formatDescription: formatDesc, refCon: refConBox)
-        guard let fresh = created.session else {
-            EngineLog.emit("[HardwareVideoDecoder] HDR10 values found in a key frame: session refused "
-                           + "(\(created.status)), frames keep the copy", category: .swPlayback)
-            return
-        }
-        VTDecompressionSessionInvalidate(old)
-        session = fresh
-        formatDescription = formatDesc
-        formatExtensions = extensions
+        let replaced = replaceSessionLocked(
+            old: old, refCon: refConBox, width: width, height: height, extensions: extensions,
+            descriptionFailed: { status in
+                EngineLog.emit("[HardwareVideoDecoder] HDR10 values found in a key frame: format description "
+                               + "failed (\(status)), frames keep the copy", category: .swPlayback)
+            },
+            sessionRefused: { status in
+                EngineLog.emit("[HardwareVideoDecoder] HDR10 values found in a key frame: session refused "
+                               + "(\(status)), frames keep the copy", category: .swPlayback)
+            })
+        guard replaced else { return }
         describedHDR10 = values
         EngineLog.emit("[HardwareVideoDecoder] HDR10 values found in a key frame go into the format "
                        + "description, session rebuilt", category: .swPlayback)
@@ -1094,6 +1127,64 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         onFrame?(outputBuffer, pts, hdr10PlusData)
     }
 
+    /// DEC-204: a frame VideoToolbox failed to deliver. With asynchronous decompression a bad-data or
+    /// malfunction error arrives here and not from `VTDecompressionSessionDecodeFrame`, so it used to
+    /// vanish without a count or a log. Runs on VT's queue and so must not take `lock`.
+    func handleCallbackFailure(status: OSStatus, pts: CMTime, infoFlags: VTDecodeInfoFlags) {
+        skipLock.lock()
+        callbackFailures += 1
+        let count = callbackFailures
+        let session = callbackFailureSession
+        skipLock.unlock()
+        if count == 1 || count % Self.callbackFailureLogInterval == 0 {
+            EngineLog.emit(
+                "[HardwareVideoDecoder] decode callback error \(status) at pts=\(pts.isValid ? String(format: "%.3f", pts.seconds) : "invalid") "
+                + "(dropped=\(infoFlags.contains(.frameDropped)), \(count) this session)",
+                category: .swPlayback
+            )
+        }
+        // The frame will never come out, so its side metadata must not wait for the table caps.
+        if pts.isValid {
+            hdr10PlusLock.lock(); hdr10PlusByPTS.removeValue(forKey: HDR10PlusKey(pts)); hdr10PlusLock.unlock()
+            if attachesAV1DolbyVisionRPU { rpuTable.discard(for: pts) }
+        }
+        guard Self.isSessionFatal(status) else { return }
+        // `lock` is held across VT waits that run this callback, so the verdict goes to another queue.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.markSessionLostFromCallback(session: session, status: status)
+        }
+    }
+
+    static let callbackFailureLogInterval = 100
+
+    /// Statuses after which the session decodes nothing more, so the AE#739 recovery has to run.
+    static func isSessionFatal(_ status: OSStatus) -> Bool {
+        status == kVTInvalidSessionErr || status == kVTVideoDecoderMalfunctionErr
+    }
+
+    /// Takes the loss the synchronous path takes in `decode`, unless the session that failed has been
+    /// replaced since.
+    func markSessionLostFromCallback(session failedSession: UInt64, status: OSStatus) {
+        lock.lock()
+        skipLock.lock()
+        let current = callbackFailureSession == failedSession
+        skipLock.unlock()
+        var hasSession = session != nil
+        #if DEBUG
+        if pretendsToHaveSessionForTesting { hasSession = true }
+        #endif
+        let lostNow = current && hasSession && !sessionLost
+        if lostNow { sessionLost = true }
+        lock.unlock()
+        guard lostNow else { return }
+        EngineLog.emit(
+            "[HardwareVideoDecoder] AE#739 session failed in the decode callback (\(status)); "
+            + "dropping video until it is rebuilt",
+            category: .swPlayback
+        )
+        onSessionLost?()
+    }
+
     /// VideoToolbox decodes straight into the display buffer, so the buffer IS the decoded picture; its
     /// colour is what this decoder attached, which is the stream's declaration.
     private func reportDecodedFormat(_ buffer: CVImageBuffer) {
@@ -1123,10 +1214,13 @@ private func hwDecoderOutputCallback(
     presentationTimeStamp: CMTime,
     presentationDuration: CMTime
 ) {
-    guard status == noErr, let imageBuffer = imageBuffer else { return }
     guard let refCon = decompressionOutputRefCon else { return }
     let box = Unmanaged<HardwareVideoDecoder.RefConBox>
         .fromOpaque(refCon).takeUnretainedValue()
+    guard status == noErr, let imageBuffer = imageBuffer else {
+        box.decoder?.handleCallbackFailure(status: status, pts: presentationTimeStamp, infoFlags: infoFlags)
+        return
+    }
     box.decoder?.handleDecodedFrame(
         imageBuffer: imageBuffer,
         pts: presentationTimeStamp,
