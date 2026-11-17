@@ -237,4 +237,25 @@ struct BluRayEPMapSeekTests {
         #expect(abs(landed - keyframe) < 0.01)
         #expect(!capture.matching(String(format: "EP map seek: source=%.3fs", target)).isEmpty)
     }
+
+    // DMX-R206: the stream-timestamp entry point used to skip the EP map.
+    @Test("the stream-timestamp seek goes by the EP map too", .timeLimit(.minutes(3)))
+    func streamTimestampSeekUsesTheEPMap() throws {
+        let capture = EngineLogCapture()
+        defer { capture.end() }
+        let demuxer = Demuxer()
+        try demuxer.open(reader: DataIOReader(data: Self.image()))
+        defer { demuxer.close() }
+        let video = demuxer.videoStreamIndex
+        #expect(demuxer.seek(to: Int64(5.0 * 90000), streamIndex: video))
+        var first: Double?
+        while first == nil, let packet = try demuxer.readPacket() {
+            var owned: UnsafeMutablePointer<AVPacket>? = packet
+            defer { trackedPacketFree(&owned) }
+            guard packet.pointee.stream_index == video, packet.pointee.pts != Int64.min else { continue }
+            first = Double(packet.pointee.pts) / 90000
+        }
+        #expect(abs(try #require(first) - 4.4) < 0.01)
+        #expect(!capture.matching("EP map seek: source=5.000s").isEmpty)
+    }
 }
