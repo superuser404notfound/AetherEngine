@@ -19,7 +19,7 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         let payloadPrefix: Int
     }
 
-    typealias StaleSweepResult = SegmentCache.StaleSweepResult
+    typealias StaleSweepResult = SessionDirectoryLiveness.SweepResult
 
     struct Snapshot: Sendable {
         let count: Int

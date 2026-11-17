@@ -20,11 +20,7 @@ final class SegmentCache: @unchecked Sendable {
 
     static let defaultBackwardWindow = 20
 
-    struct StaleSweepResult: Sendable, Equatable {
-        let inspectedCount: Int
-        let removedCount: Int
-        let failureCount: Int
-    }
+    typealias StaleSweepResult = SessionDirectoryLiveness.SweepResult
 
     /// AE#412: where a stored segment's first random-access point sits, as an offset from the
     /// segment's ADVERTISED start (its plan boundary). An offset, not an absolute time, so it is

@@ -41,15 +41,14 @@ struct SoftwarePacketDiskFIFOTests {
         precondition(store.snapshot.chunkCount == 3)
         precondition(store.snapshot.diskByteCount == 143)
         try check(try store.pop() == records[0])
-        precondition(store.snapshot.chunkCount == 3, "partially consumed chunk was prematurely deleted")
         try check(try store.pop() == records[1])
-        precondition(store.snapshot.chunkCount == 2, "consumed chunk was not reclaimed")
-        precondition(store.snapshot.diskByteCount == 116)
+        precondition(store.snapshot.chunkCount == 3, "consumed history is kept until a trim")
+        precondition(store.snapshot.diskByteCount == 143)
         for record in records.dropFirst(2) { try check(try store.pop() == record) }
         try check(try store.pop() == nil)
         precondition(store.snapshot.count == 0 && store.snapshot.byteCount == 0)
-        precondition(store.snapshot.chunkCount == 0 && store.snapshot.diskByteCount == 0)
-        try check(try FileManager.default.contentsOfDirectory(atPath: store.storageDirectory.path) == ["session.lock"])
+        try store.trimConsumed(toByteBudget: 0)
+        precondition(store.snapshot.chunkCount == 1, "the trim keeps the chunk the reader and writer sit on")
 
         // Repeated appends to a chunk whose reader is already open must observe the new tail.
         try store.append(Data([6]))
@@ -105,9 +104,9 @@ struct SoftwarePacketDiskFIFOTests {
         try check(try FileManager.default.contentsOfDirectory(atPath: store.storageDirectory.path).count == 3)
         for index in 0..<20_000 {
             try check(try store.pop() == Data([UInt8(index % 251)]))
-            if index == 9_999 { precondition(store.snapshot.chunkCount == 1) }
         }
-        precondition(store.snapshot.chunkCount == 0 && store.snapshot.diskByteCount == 0)
+        try store.trimConsumed(toByteBudget: 0)
+        precondition(store.snapshot.chunkCount == 1, "history trims to the chunk the cursors sit on")
     }
 
     static func diskFailures(_ root: URL) throws {
@@ -146,6 +145,7 @@ struct SoftwarePacketDiskFIFOTests {
         try store.reset()
         try store.append(Data([4]))
         try check(try store.pop() == Data([4]))
+        try store.reset()
 
         // Unexpected files are not overwritten. Reset removes only the owned session directory.
         try Data([88]).write(to: chunk, options: .withoutOverwriting)
@@ -168,7 +168,7 @@ struct SoftwarePacketDiskFIFOTests {
         precondition(store.snapshot.count == 800)
         var seen = Set<Data>()
         while let data = try store.pop() { precondition(seen.insert(data).inserted) }
-        precondition(seen.count == 800 && store.snapshot.chunkCount == 0)
+        precondition(seen.count == 800 && store.snapshot.count == 0)
 
         let group = DispatchGroup()
         group.enter()
@@ -195,7 +195,7 @@ struct SoftwarePacketDiskFIFOTests {
             }
         }
         precondition(group.wait(timeout: .now() + 10) == .success, "concurrent workers did not finish")
-        precondition(store.snapshot.count == 0 && store.snapshot.diskByteCount == 0)
+        precondition(store.snapshot.count == 0)
     }
 
     static func staleCleanup(_ root: URL) throws {
@@ -203,11 +203,11 @@ struct SoftwarePacketDiskFIFOTests {
         try FileManager.default.createDirectory(at: testRoot, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: testRoot) }
         let now = Date()
-        let old = now.addingTimeInterval(-90_000)
+        let old = now.addingTimeInterval(-7_200)
         let stale = try makeOrphan(testRoot, modified: old)
         let noMarker = try makeOrphan(testRoot, modified: old, marker: false)
         let fresh = try makeOrphan(testRoot, modified: now)
-        let almostOld = try makeOrphan(testRoot, modified: now.addingTimeInterval(-86_399.5))
+        let almostOld = try makeOrphan(testRoot, modified: now.addingTimeInterval(-3_599.5))
         let current = try makeOrphan(testRoot, modified: old)
         let active = try SoftwarePacketDiskFIFO(parentDirectory: testRoot, now: now)
         defer { try? active.close() }
@@ -216,22 +216,22 @@ struct SoftwarePacketDiskFIFOTests {
         precondition(!FileManager.default.fileExists(atPath: noMarker.path))
         // current was not designated until the explicit sweep below, so recreate it.
         try FileManager.default.createDirectory(at: current, withIntermediateDirectories: false)
-        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: current.path)
-        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: active.storageDirectory.path)
+        try FileManager.default.setAttributes([.modificationDate: old, .creationDate: old], ofItemAtPath: current.path)
+        try FileManager.default.setAttributes([.modificationDate: old, .creationDate: old], ofItemAtPath: active.storageDirectory.path)
         let foreign = testRoot.appendingPathComponent("foreign", isDirectory: true)
         try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: false)
         let sentinel = foreign.appendingPathComponent("keep")
         try Data([99]).write(to: sentinel)
-        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: foreign.path)
+        try FileManager.default.setAttributes([.modificationDate: old, .creationDate: old], ofItemAtPath: foreign.path)
         let symlink = testRoot.appendingPathComponent("\(SoftwarePacketDiskFIFO.directoryPrefix)\(UUID().uuidString)")
         try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: foreign)
         let matchingFile = testRoot.appendingPathComponent("\(SoftwarePacketDiskFIFO.directoryPrefix)\(UUID().uuidString)")
         try Data([33]).write(to: matchingFile)
-        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: matchingFile.path)
+        try FileManager.default.setAttributes([.modificationDate: old, .creationDate: old], ofItemAtPath: matchingFile.path)
         let markerSymlink = try makeOrphan(testRoot, modified: old, marker: false)
         try FileManager.default.createSymbolicLink(at: markerSymlink.appendingPathComponent("session.lock"),
                                                  withDestinationURL: sentinel)
-        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: markerSymlink.path)
+        try FileManager.default.setAttributes([.modificationDate: old, .creationDate: old], ofItemAtPath: markerSymlink.path)
         let removable = try makeOrphan(testRoot, modified: old)
 
         let result = SoftwarePacketDiskFIFO.sweepStaleSessionDirs(parentDirectory: testRoot,
@@ -245,7 +245,7 @@ struct SoftwarePacketDiskFIFOTests {
         try check(try Data(contentsOf: sentinel) == Data([99]))
         try active.append(Data([4]))
         try active.reset()
-        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: active.storageDirectory.path)
+        try FileManager.default.setAttributes([.modificationDate: old, .creationDate: old], ofItemAtPath: active.storageDirectory.path)
         _ = SoftwarePacketDiskFIFO.sweepStaleSessionDirs(parentDirectory: testRoot, now: now)
         precondition(FileManager.default.fileExists(atPath: active.storageDirectory.path),
                      "old live session lost protection after reset")
@@ -260,8 +260,7 @@ struct SoftwarePacketDiskFIFOTests {
     }
 
     static func retainedSeeks(_ root: URL) throws {
-        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 30, retainConsumed: true,
-                                              parentDirectory: root)
+        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 30, parentDirectory: root)
         defer { try? store.close() }
         let records = (0..<13).map { Data(repeating: UInt8($0), count: 2) }
         var cursors: [SoftwarePacketDiskFIFO.Cursor] = []
@@ -307,8 +306,7 @@ struct SoftwarePacketDiskFIFOTests {
     }
 
     static func retainedEvictionAndReset(_ root: URL) throws {
-        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 20, retainConsumed: true,
-                                              parentDirectory: root)
+        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 20, parentDirectory: root)
         defer { try? store.close() }
         let records = (0..<8).map { Data(repeating: UInt8($0), count: 2) }
         let cursors = try records.map { try store.append($0) }
@@ -341,15 +339,10 @@ struct SoftwarePacketDiskFIFOTests {
         precondition(!store.snapshot.hasFailure, "old reset generation poisoned the replacement cache")
         try store.restore(to: replacement)
         try check(try store.pop() == Data([22]))
-        let other = try SoftwarePacketDiskFIFO(retainConsumed: true, parentDirectory: root)
+        let other = try SoftwarePacketDiskFIFO(parentDirectory: root)
         defer { try? other.close() }
         let foreign = try other.append(Data([33]))
         try expectFailure { try store.restore(to: foreign) }
-        let normal = try SoftwarePacketDiskFIFO(parentDirectory: root)
-        defer { try? normal.close() }
-        let normalCursor = try normal.append(Data([44]))
-        try expectFailure { try normal.restore(to: normalCursor) }
-        try check(try normal.pop() == Data([44]))
 
         // Reset must delete consumed history too, not only the consumer-to-writer suffix.
         for record in records { try store.append(record) }
@@ -360,8 +353,7 @@ struct SoftwarePacketDiskFIFOTests {
     }
 
     static func concurrentRetainedReplay(_ root: URL) throws {
-        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 128, retainConsumed: true,
-                                              parentDirectory: root)
+        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 128, parentDirectory: root)
         defer { try? store.close() }
         var selected: SoftwarePacketDiskFIFO.Cursor?
         for index in 0..<100 {
@@ -400,8 +392,7 @@ struct SoftwarePacketDiskFIFOTests {
     }
 
     static func retainedTrimRestoreAndRollover(_ root: URL) throws {
-        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 30, retainConsumed: true,
-                                              parentDirectory: root)
+        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 30, parentDirectory: root)
         defer { try? store.close() }
         let records = (0..<12).map { Data(repeating: UInt8($0), count: 2) }
         var cursors = try records.prefix(6).map { try store.append($0) }
@@ -426,24 +417,10 @@ struct SoftwarePacketDiskFIFOTests {
         for index in 6..<12 { try check(try store.pop() == records[index]) }
         try store.trimConsumed(toByteBudget: 59)
         precondition(store.snapshot.count == 0 && store.snapshot.residentByteCount == 30)
-
-        // ReadAhead calls trim unconditionally. Legacy/destructive stores must treat it as a
-        // no-op, leaving both the unread records and existing automatic reclamation unchanged.
-        let legacy = try SoftwarePacketDiskFIFO(chunkTargetBytes: 30, parentDirectory: root)
-        defer { try? legacy.close() }
-        for record in records.prefix(6) { try legacy.append(record) }
-        try legacy.trimConsumed(toByteBudget: 0)
-        precondition(legacy.snapshot.count == 6 && legacy.snapshot.residentByteCount == 60)
-        for index in 0..<6 {
-            try check(try legacy.pop() == records[index])
-            try legacy.trimConsumed(toByteBudget: 0)
-        }
-        precondition(legacy.snapshot.count == 0 && legacy.snapshot.residentByteCount == 0)
     }
 
     static func retainedModelSequence(_ root: URL) throws {
-        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 96, retainConsumed: true,
-                                              parentDirectory: root)
+        let store = try SoftwarePacketDiskFIFO(chunkTargetBytes: 96, parentDirectory: root)
         defer { try? store.close() }
         var data: [Data] = []
         var cursors: [SoftwarePacketDiskFIFO.Cursor] = []
@@ -501,7 +478,8 @@ struct SoftwarePacketDiskFIFOTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         try Data([1, 2, 3]).write(to: directory.appendingPathComponent("0.packets"))
         if marker { try Data().write(to: directory.appendingPathComponent("session.lock")) }
-        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: directory.path)
+        try FileManager.default.setAttributes([.modificationDate: modified, .creationDate: modified],
+                                              ofItemAtPath: directory.path)
         return directory
     }
 

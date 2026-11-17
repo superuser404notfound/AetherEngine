@@ -15,6 +15,13 @@ import Foundation
 enum SessionDirectoryLiveness {
     static let markerName = "session.lock"
 
+    /// What one bounded sweep did, shared by the segment cache and the software packet spool.
+    struct SweepResult: Sendable, Equatable {
+        let inspectedCount: Int
+        let removedCount: Int
+        let failureCount: Int
+    }
+
     /// The held marker's descriptor, or -1 when open or flock failed (such a directory is swept by
     /// age, the pre-AE#451 behaviour rather than a new failure).
     static func acquire(sessionDir: URL, logPrefix: String) -> Int32 {
@@ -79,9 +86,9 @@ enum SessionDirectoryLiveness {
         maxEntries: Int, maxRemovals: Int,
         isCandidate: (String) -> Bool = { _ in true },
         logPrefix: String
-    ) -> SegmentCache.StaleSweepResult {
+    ) -> SweepResult {
         guard maxEntries > 0, maxRemovals > 0 else {
-            return SegmentCache.StaleSweepResult(inspectedCount: 0, removedCount: 0, failureCount: 0)
+            return SweepResult(inspectedCount: 0, removedCount: 0, failureCount: 0)
         }
         var failures = 0
         guard let entries = FileManager.default.enumerator(
@@ -89,7 +96,7 @@ enum SessionDirectoryLiveness {
             options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants],
             errorHandler: { _, _ in failures += 1; return false }
         ) else {
-            return SegmentCache.StaleSweepResult(inspectedCount: 0, removedCount: 0, failureCount: max(1, failures))
+            return SweepResult(inspectedCount: 0, removedCount: 0, failureCount: max(1, failures))
         }
         let cutoff = now.addingTimeInterval(-staleAge).timeIntervalSince1970
         var inspected = 0
@@ -129,6 +136,6 @@ enum SessionDirectoryLiveness {
                 removed += 1
             } catch { failures += 1 }
         }
-        return SegmentCache.StaleSweepResult(inspectedCount: inspected, removedCount: removed, failureCount: failures)
+        return SweepResult(inspectedCount: inspected, removedCount: removed, failureCount: failures)
     }
 }
