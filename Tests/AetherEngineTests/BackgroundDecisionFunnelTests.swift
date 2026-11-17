@@ -4,7 +4,8 @@ import Testing
 
 /// Audit LIF-R201: every background decision goes through one pure function. Before it, `pause()`
 /// carried a copy that skipped the owed rule (LIF-201) and assumed a teardown, a pause the player made
-/// itself reached no copy at all (LIF-202),.
+/// itself reached no copy at all (LIF-202), and the interruption end refused a native video that
+/// AE#1080 keeps playing in the background (LIF-203).
 @Suite("One background decision for every entry point", .timeLimit(.minutes(3)))
 struct BackgroundDecisionFunnelTests {
 
@@ -94,6 +95,16 @@ struct BackgroundDecisionFunnelTests {
         #expect(decide(Inputs(isTV: true, state: .paused), .pictureInPictureClosed) == .step(.perform(.teardownVideo)))
     }
 
+    @Test("a call that paused a playing session holds the decision until it ends (audit LIF-203)")
+    func interruptionHoldsTheDecision() {
+        let held = Inputs(state: .paused, interruptionHoldsResume: true)
+        #expect(decide(held, .paused) == .owe)
+        #expect(decide(held, .graceWindowExpired) == .owe)
+        #expect(decide(held, .graceAssertionReclaimed) == .step(.perform(.teardownVideo)))
+        // Ended without a resume: the hold is gone and the paused session gets the normal decision.
+        #expect(decide(Inputs(state: .paused), .owedDecisionSettled) == .step(.deferTeardown(afterSeconds: 15)))
+    }
+
     @Test("only a pause from playing asks for the decision (audit LIF-202)")
     func stateChangeTrigger() {
         #expect(AetherEngine.stateChangeRequestsBackgroundDecision(from: .playing, to: .paused))
@@ -103,6 +114,15 @@ struct BackgroundDecisionFunnelTests {
         #expect(!AetherEngine.stateChangeRequestsBackgroundDecision(from: .playing, to: .ended))
     }
 
+    @Test("the end of a call may resume a native video kept playing in the background (audit LIF-203)")
+    func interruptionResumeIsBackgroundSafe() {
+        let safe = AetherEngine.interruptionResumeIsBackgroundSafe
+        #expect(safe(false, false, false, false), "foreground always resumes")
+        #expect(safe(true, true, false, false), "audio backend")
+        #expect(safe(true, false, true, false), "software host in audio-only mode")
+        #expect(safe(true, false, false, true), "native video kept for its audio (AE#1080)")
+        #expect(!safe(true, false, false, false), "a released video never restarts unseen")
+    }
 }
 
 /// The funnel on a live engine. The lifecycle notifications are iOS / tvOS only, so these drive it
@@ -190,4 +210,25 @@ struct BackgroundDecisionEngineTests {
         #expect(engine.needsForegroundVideoRestore)
     }
 
+    @Test("a call that paused a playing session holds it until the call ends (audit LIF-203)")
+    func interruptionHoldsUntilItEnds() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let log = Self.observe(engine)
+        engine.state = .playing
+        engine.noteDidEnterBackground()
+        engine.resumeAfterInterruption = true
+        engine.noteAudioInterruptionBegan()
+        engine.state = .paused
+        try await waitFor { !log.entries.isEmpty }
+        #expect(log.entries.map(\.1) == [.owe])
+
+        // Ended without a resume: the owed decision is settled and the grace window starts.
+        _ = engine.noteAudioInterruptionEnded()
+        engine.resumeAfterInterruption = false
+        engine.settleOwedBackgroundAction()
+        try await waitFor { log.entries.count == 2 }
+        #expect(log.entries.last?.0 == .owedDecisionSettled)
+        #expect(log.entries.last?.1 == .step(.deferTeardown(afterSeconds: 15)))
+    }
 }

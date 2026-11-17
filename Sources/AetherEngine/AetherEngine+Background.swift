@@ -134,10 +134,12 @@ extension AetherEngine {
                     EngineLog.emit("[AetherEngine] AVAudioSession interruption BEGAN reason=\(reason) resumeArmed=\(self.resumeAfterInterruption) otherAudio=\(session.isOtherAudioPlaying) silenceHint=\(session.secondaryAudioShouldBeSilencedHint)", category: .engine)
                 } else {
                     let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume)
-                    // Background: only audio backends may resume (video is torn down / must not restart unseen).
                     #if os(iOS)
-                    let backgroundSafe = !self.isBackgrounded
-                        || self.audioAVPlayerActive || self.audioHost != nil || self.softwareHost != nil
+                    let backgroundSafe = Self.interruptionResumeIsBackgroundSafe(
+                        isBackgrounded: self.isBackgrounded,
+                        isAudioBackend: self.audioAVPlayerActive || self.audioHost != nil,
+                        hasSoftwareHost: self.softwareHost != nil,
+                        nativeSessionKeptForAudio: self.nativeSessionKeptForBackgroundAudio)
                     #else
                     let backgroundSafe = true
                     #endif
@@ -148,6 +150,9 @@ extension AetherEngine {
                     let pausesBefore = self.userPauseCount
                     let loadBefore = self.loadGeneration
                     EngineLog.emit("[AetherEngine] AVAudioSession interruption ENDED shouldResume=\(shouldResume) otherAudio=\(session.isOtherAudioPlaying) resumeArmed=\(self.resumeAfterInterruption) autoResume=\(firing) deferredPlay=\(deferredPlay)", category: .engine)
+                    // A paused session the interruption held for its resume gets its background
+                    // decision now, resumed or not (LIF-203).
+                    defer { self.settleOwedBackgroundAction() }
                     if firing {
                         self.resumeAfterInterruption = false
                         // AE#549: the native path gets its session back from AVFoundation, the renderer
@@ -264,9 +269,9 @@ extension AetherEngine {
         backgroundActionOwed = false
         guard isBackgrounded, state == .playing || state == .paused else { return }
         EngineLog.emit(
-            "[AetherEngine] background: an owed decision settled (a load or seek in flight, or a "
-            + "retained paused session resuming, AE#870; state=\(state)); applying the background "
-            + "policy now (audit CORE-2)",
+            "[AetherEngine] background: an owed decision settled (a load or seek in flight, a "
+            + "retained paused session resuming, AE#870, or an interruption over; state=\(state)); "
+            + "applying the background policy now (audit CORE-2)",
             category: .engine)
         Task { @MainActor [weak self] in await self?.runBackgroundDecision(.owedDecisionSettled) }
     }
@@ -277,7 +282,7 @@ extension AetherEngine {
     /// perform the action instead of deferring it a second time.
     enum BackgroundTrigger: Equatable, Sendable {
         case enteredBackground
-        /// A load or seek that owed the decision settled (CORE-2, LIF-101, AE#870).
+        /// A load, seek or interruption that owed the decision settled (CORE-2, LIF-101, AE#870).
         case owedDecisionSettled
         /// A pause while backgrounded, from `pause()` or from the player itself (LIF-201, LIF-202).
         case paused
@@ -295,6 +300,8 @@ extension AetherEngine {
         var isBackgrounded = true
         var loadInFlight = false
         var state: PlaybackState = .playing
+        /// An interruption is active and armed to resume what it paused (LIF-203).
+        var interruptionHoldsResume = false
         /// The background teardown already ran and nothing reloaded since (`needsForegroundVideoRestore`).
         var pipelineReleased = false
         var isAudioBackend = false
@@ -309,7 +316,7 @@ extension AetherEngine {
     enum BackgroundDecision: Equatable, Sendable {
         /// Not backgrounded, or nothing is left to release.
         case none
-        /// A load or seek is still deciding the state; settled from its exit.
+        /// A load, seek or interruption is still deciding the state; settled from its exit.
         case owe
         case step(BackgroundStep)
     }
@@ -327,8 +334,12 @@ extension AetherEngine {
         _ i: BackgroundDecisionInputs, trigger: BackgroundTrigger
     ) -> BackgroundDecision {
         guard i.isBackgrounded else { return .none }
-        if trigger != .graceAssertionReclaimed,
-           !backgroundDecisionSettles(state: i.state, loadInFlight: i.loadInFlight) { return .owe }
+        if trigger != .graceAssertionReclaimed {
+            if !backgroundDecisionSettles(state: i.state, loadInFlight: i.loadInFlight) { return .owe }
+            // LIF-203: a call or Siri paused a session that was playing, and the system resumes it when
+            // it ends. Releasing it meanwhile leaves nothing to resume.
+            if i.interruptionHoldsResume && i.state == .paused { return .owe }
+        }
         if i.pipelineReleased { return .none }
         let action = backgroundAction(
             isAudioBackend: i.isAudioBackend,
@@ -358,6 +369,7 @@ extension AetherEngine {
             isBackgrounded: isBackgrounded,
             loadInFlight: loadInFlight,
             state: state,
+            interruptionHoldsResume: audioInterruptionActive && resumeAfterInterruption,
             pipelineReleased: backgroundTeardownSelection != nil,
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
@@ -372,6 +384,23 @@ extension AetherEngine {
     /// engine's `pause()`, AVPlayer on a removed route, AVKit on its own controls (LIF-202).
     nonisolated static func stateChangeRequestsBackgroundDecision(from: PlaybackState, to: PlaybackState) -> Bool {
         from == .playing && to == .paused
+    }
+
+    /// Audit LIF-203: whether the end of an interruption may restart playback while backgrounded.
+    /// Audio backends and the software host (background audio-only) always could. Since AE#1080 a
+    /// native session is kept playing in the background for its audio too, so it may resume as well,
+    /// unless the background teardown already released it.
+    nonisolated static func interruptionResumeIsBackgroundSafe(
+        isBackgrounded: Bool, isAudioBackend: Bool, hasSoftwareHost: Bool, nativeSessionKeptForAudio: Bool
+    ) -> Bool {
+        !isBackgrounded || isAudioBackend || hasSoftwareHost || nativeSessionKeptForAudio
+    }
+
+    /// A native session the background policy keeps for its audio: the AVPlayer is up, nothing
+    /// released it, and background playback is on (which is what lets iOS keep the item playing).
+    var nativeSessionKeptForBackgroundAudio: Bool {
+        playbackBackend == .native && nativeHost != nil && backgroundTeardownSelection == nil
+            && backgroundPlaybackEnabled
     }
 
     /// The synchronous entry. A decision that has to wait for a load or seek is owed right here, so
