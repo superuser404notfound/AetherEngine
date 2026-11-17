@@ -163,6 +163,32 @@ final class LiveProductionHaltTests: XCTestCase {
                        "halted session must stop advertising CAN-BLOCK-RELOAD, beating the host override")
     }
 
+    /// Audit HLS-203: a host retry resumes production, and the next blocking reload must hold again.
+    func testResumeLetsALiveHoldWaitAgainAfterAHalt() {
+        let cache = SegmentCache(forwardWindow: 10, backwardWindow: 10)
+        defer { cache.close() }
+        let provider = VideoSegmentProvider(
+            cache: cache, segments: segments(12), codecsString: "hvc1", supplementalCodecs: nil,
+            resolution: (1920, 1080), videoRange: .sdr, frameRate: 25.0, hdcpLevel: nil,
+            sourceBitrate: 8_000_000, isLive: true,
+            blockingReloadOverride: true)
+        provider.markLiveProductionHalted()
+        XCTAssertFalse(provider.waitForLiveSegment(index: 12, timeout: 600), "halted: answers at once")
+        provider.resumeLiveProduction()
+
+        final class ResultBox: @unchecked Sendable { var value = false }
+        let box = ResultBox()
+        let released = expectation(description: "resumed hold released by the new segment")
+        Thread.detachNewThread {
+            box.value = provider.waitForLiveSegment(index: 12, timeout: 600)
+            released.fulfill()
+        }
+        while provider.parkedWaiterCount == 0 { usleep(200) }
+        provider.appendLiveSegment(index: 12, startSeconds: 48, durationSeconds: 4)
+        wait(for: [released], timeout: 300)
+        XCTAssertTrue(box.value, "after resume the hold waits for the segment instead of answering at once")
+    }
+
     // MARK: - Server 503 on unsatisfiable held reload (socket level)
 
     private func fetch(_ url: URL) throws -> (status: Int, body: String) {

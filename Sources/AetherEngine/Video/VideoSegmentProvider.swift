@@ -975,6 +975,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Set by cancelWaiters() on stop(). Without it, parked LL-HLS blocking-reload threads sleep
     /// their full timeout (18-30 s) and can write stale playlists into a recycled fd of the next session.
     private var waitersCancelled = false
+    /// Audit HLS-203: the halt's own release. Separate from `waitersCancelled` (permanent, stop()) so
+    /// a host-authorized retry can clear it and let blocking reloads hold again.
+    private var waitersHaltedForRetune = false
     /// Terminal latch (#167 follow-up): the live pump exited for host retune (SSAI cutter wedge,
     /// source replay, custom-reader death), so no further segment will ever be cut into this provider.
     /// The cadence policy cannot see this (it observes ingest arrivals, which keep flowing while the
@@ -1713,7 +1716,26 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     func mediaSegmentURL(at index: Int) -> URL? {
         guard index >= 0, index < currentSegmentCount else { return nil }
         handleTargetChange(to: index)
-        return cache.peekURL(index: index)
+        guard let url = cache.peekURL(index: index) else {
+            // The server asks `mediaSegmentSource` next; its serve path must not declare the same
+            // request again (audit slice 11: double count, handleTargetChange twice).
+            stateLock.lock()
+            targetDeclaredByURLPath = index
+            stateLock.unlock()
+            return nil
+        }
+        return url
+    }
+
+    /// Set by `mediaSegmentURL` on a miss, taken by the serve path that follows it.
+    private var targetDeclaredByURLPath: Int?
+
+    private func takeTargetDeclaredByURLPath(_ index: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard targetDeclaredByURLPath == index else { return false }
+        targetDeclaredByURLPath = nil
+        return true
     }
 
     /// Total media-segment requests seen (both serve paths). The #65 consumer re-engage watchdog
@@ -1944,27 +1966,37 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     private var fetchesProgressively: Bool { !isLive && servesSegmentsProgressively }
 
+    /// Live only: the index can never be served again. Below the first visible entry, or not
+    /// resident although a later segment is already stored (live stores in order, so a newer
+    /// stored index proves this one was produced and then dropped). Only an index above the
+    /// stored front can still arrive.
+    func liveSegmentIsGone(_ index: Int) -> Bool {
+        guard isLive else { return false }
+        stateLock.lock()
+        let firstVisible = _liveFirstVisible
+        stateLock.unlock()
+        if index < firstVisible { return true }
+        return index < cache.highestStoredIndex && cache.peekURL(index: index) == nil
+    }
+
     private func serveSource(at index: Int) -> SegmentSource? {
         guard index >= 0, index < currentSegmentCount else { return nil }
+        let alreadyDeclared = takeTargetDeclaredByURLPath(index)
 
-        // Segment below the live window is evicted; returning nil = fast 404 so AVPlayer resyncs.
-        // Without this, the 30 s cache.fetch parks the connection for a segment that will never reappear.
-        if isLive {
-            stateLock.lock()
-            let firstVisible = _liveFirstVisible
-            stateLock.unlock()
-            if index < firstVisible {
-                EngineLog.emit(
-                    "[HLSVideoEngine] seg\(index): below live window (firstVisible=\(firstVisible)), fast 404",
-                    category: .session
-                )
-                return nil
-            }
+        // A live segment that is gone (below the window, or evicted while its playlist entry is still
+        // listed) will never be produced again; answering nil at once makes the server 404 it so
+        // AVPlayer resyncs, instead of the 30 s cache.fetch park and a retriable 503 (audit HLS-204).
+        if liveSegmentIsGone(index) {
+            EngineLog.emit(
+                "[HLSVideoEngine] seg\(index): gone from the live window, fast 404",
+                category: .session
+            )
+            return nil
         }
 
         let totalStart = DispatchTime.now()
 
-        handleTargetChange(to: index)
+        if !alreadyDeclared { handleTargetChange(to: index) }
 
         // Fast path: serve from cache.
         if let hit = cache.peek(index: index) {
@@ -2961,7 +2993,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stateLock.lock()
         _liveProductionHalted = true
         stateLock.unlock()
-        cancelWaiters()
+        firstSegmentCondition.lock()
+        waitersHaltedForRetune = true
+        firstSegmentCondition.broadcast()
+        firstSegmentCondition.unlock()
     }
 
     /// A host-authorized source retry continues this same cache and playlist.
@@ -2969,6 +3004,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stateLock.lock()
         _liveProductionHalted = false
         stateLock.unlock()
+        firstSegmentCondition.lock()
+        waitersHaltedForRetune = false
+        firstSegmentCondition.unlock()
     }
     var liveTargetDurationFloorSeconds: Double? {
         // The floor tracks observed cadence regardless of the gate override: patience must cover the real
@@ -3138,7 +3176,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         parkedWaiters += 1
         defer { parkedWaiters -= 1 }
         while true {
-            if waitersCancelled { return false }
+            if waitersCancelled || waitersHaltedForRetune { return false }
             if !didLogStartupPolicy {
                 didLogStartupPolicy = true
                 let grace = startupGraceSeconds.map(LiveEdgePolicy.seconds) ?? "auto"
@@ -3369,7 +3407,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         parkedWaiters += 1
         defer { parkedWaiters -= 1 }
         while true {
-            if waitersCancelled { return false }
+            if waitersCancelled || waitersHaltedForRetune { return false }
             stateLock.lock()
             let count = segments.count
             stateLock.unlock()
