@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.70.0] - 2026-11-17
+
 ### Security
 
 - **A DASH manifest can no longer collect your server credentials.** The token, cookie and Authorization
