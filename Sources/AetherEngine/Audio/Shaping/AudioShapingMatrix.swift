@@ -79,8 +79,7 @@ enum AudioShapingMatrix {
         guard built >= 0 else { return nil }
         guard lift > 1 else { return matrix }
 
-        let centre = Int(av_channel_layout_index_from_channel(input, AV_CHAN_FRONT_CENTER))
-        if centre >= 0 {
+        if let centre = frontCentreIndex(of: input) {
             for o in 0..<outCount { matrix[o * inCount + centre] *= lift }
         }
         return matrix
@@ -90,15 +89,7 @@ enum AudioShapingMatrix {
     /// an unspecified layout, like `coefficients`. A mono source counts as no centre: its one channel
     /// is the whole mix, not the dialogue.
     static func hasCentre(_ layout: UnsafePointer<AVChannelLayout>) -> Bool {
-        guard layout.pointee.nb_channels > 1 else { return false }
-        var resolved = AVChannelLayout()
-        defer { av_channel_layout_uninit(&resolved) }
-        if layout.pointee.order == AV_CHANNEL_ORDER_UNSPEC {
-            av_channel_layout_default(&resolved, layout.pointee.nb_channels)
-        } else {
-            av_channel_layout_copy(&resolved, layout)
-        }
-        return av_channel_layout_index_from_channel(&resolved, AV_CHAN_FRONT_CENTER) >= 0
+        frontCentreIndex(of: layout) != nil
     }
 
     /// Hand the matrix to an allocated, not yet initialized resampler. Returns false when the

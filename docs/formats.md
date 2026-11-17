@@ -716,6 +716,7 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 
 - **Padded:** AC-3, E-AC-3 and FLAC always; AAC-LC and ALAC since FFmpegBuild 3.10.0 (the encoders come from the FFmpeg build).
 - **Not padded:** HE-AAC, MP3, Opus and a stand-in sample entry (the APAC bed). These log `AE#847 audio tail not padded` with the reason.
+- **Cap.** The fill is at most 10 minutes (`AudioTailPadding.maxFillSeconds`), written packet by packet as the encoder produces it. A final segment is seconds long, so only a corrupt last timestamp ever reaches the cap, and the log says `capped`.
 - **Limit.** The fill exists only in the segment written at end of file. On a source that arrives barely faster than its bitrate, with a silent tail longer than the producer's lead, AVPlayer waits at the end of the audio until that segment exists, and then plays on.
 
 ### Audio shaping
@@ -767,6 +768,8 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 - It is used instead of an instant-attack limiter because it measured far cleaner. On a steady overload its THD was -155 dB against -48.6. On two tones under limiting bass hits, its splatter above 3 kHz was -67 dB against -42 (relative to the tones), at the input's own floor.
 
 **Timing.** `dialoguenhance` delays its content by three quarters of its FFT window (1536 samples at 48 kHz, 3072 at 96 kHz) and stamps its output with its input's timestamps regardless. So the engine runs the graph on a sample counter of its own: it drops the delay's priming, pushes the same number of silent samples at the end of the stream, and carries the timestamps itself. Output sample k is then input sample k. Measured: an impulse at sample 60000 of a stereo source comes out of the bridge at sample 60000 with 96000 samples in and out, and the software decoder presents it at 1.25000 s, its source time.
+
+**A source that changes layout mid-stream.** A live programme can switch between stereo and 5.1. The remix matrix follows the new layout and lifts the front centre when there is one. The graph's `dialoguenhance` runs only when there is none, so the engine rebuilds the graph when that answer changes (`AudioShapingStage`). The loudness measurement and the graph's held tail carry over, so the gain does not restart at 0 dB and the last milliseconds before the change are not dropped. A mono source gets no matrix lift, only the graph's.
 
 **Requirements.** The graph (`AudioShapingGraph`) needs FFmpegBuild 3.11.0 or later, which adds `abuffer`, `abuffersink`, `aformat`, `aresample`, `pan`, `dialoguenhance`, `acompressor` and `alimiter`. The loudness target needs no filter of its own (it is Swift, `LoudnessNormalizer`). Where the graph cannot be built, the remix still applies and the log says the dynamics do not; the loudness target is then off as well, because without the limiter its gain could clip.
 

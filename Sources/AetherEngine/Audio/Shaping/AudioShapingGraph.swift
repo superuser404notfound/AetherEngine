@@ -51,7 +51,7 @@ final class AudioShapingGraph {
     /// Whether the full chain is built, limiter included; false on the passthrough fallback.
     private var builtFull = false
     /// AE#1036; nil without a loudness target. Outlives `reset()`, so a seek keeps the measurement.
-    private let normalizer: LoudnessNormalizer?
+    let normalizer: LoudnessNormalizer?
     private var gained: [Float] = []
     /// The loudness target's gain in force, in dB; nil without a target.
     var loudnessGainDB: Double? { normalizer?.gainDB }
@@ -61,9 +61,13 @@ final class AudioShapingGraph {
     private var sink: UnsafeMutablePointer<AVFilterContext>?
     private var inputSamples: Int64 = 0
     private var trimRemaining = 0
-    private var ended = false
+    /// True once `drain` ran; the graph takes no input until `reset()`.
+    private(set) var ended = false
     /// Caller pts per queued input chunk, in samples; nil where the caller had none.
     private var pending: [(pts: Int64?, count: Int)] = []
+
+    /// Whether this graph runs `dialoguenhance`.
+    var enhancesDialogue: Bool { latency > 0 }
 
     /// Whether `dialoguenhance` runs: stereo out, no front centre in the source to lift directly.
     static func usesStereoDialogueEnhance(shaping: AudioShaping, outputChannels: Int32, sourceHasCentre: Bool) -> Bool {
@@ -111,7 +115,7 @@ final class AudioShapingGraph {
     /// nil when the graph cannot be built (a filter missing from the FFmpeg build, an option it
     /// refuses); the caller then plays unshaped and says so.
     init?(shaping: AudioShaping, sampleRate: Int32, layout: UnsafePointer<AVChannelLayout>,
-          sourceHasCentre: Bool, outputFormat: AVSampleFormat) {
+          sourceHasCentre: Bool, outputFormat: AVSampleFormat, normalizer carried: LoudnessNormalizer? = nil) {
         var described = [CChar](repeating: 0, count: 64)
         guard av_channel_layout_describe(layout, &described, described.count) >= 0 else { return nil }
         let layoutDescription = String(decoding: described.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
@@ -124,7 +128,7 @@ final class AudioShapingGraph {
         self.channels = layout.pointee.nb_channels
         self.layoutDescription = layoutDescription
         self.latency = enhance ? Self.dialogueEnhanceLatency(sampleRate: sampleRate) : 0
-        self.normalizer = shaping.clamped.loudnessTargetLUFS.map {
+        self.normalizer = carried ?? shaping.clamped.loudnessTargetLUFS.map {
             LoudnessNormalizer(targetLUFS: $0, maxGainDB: AudioShaping.maxLoudnessGainDB,
                                sampleRate: sampleRate, layout: layout)
         }

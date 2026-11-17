@@ -69,3 +69,25 @@ struct ResamplerInputParameters {
         rate = 0
     }
 }
+
+/// Index of the front-centre channel in `layout`, nil when there is none or the layout is the centre
+/// alone: a mono track is not a dialogue stem, its one channel is the whole mix. A layout that only
+/// states a count (AAC with a program config element, a plain WAV) is read in the default order for
+/// that count, which is what swresample itself assumes for it (#908, AE#923).
+///
+/// The one definition of "has a centre" shared by the shaping lift (`AudioShapingMatrix`) and the
+/// dialogue tap (`AudioTapDecoder`), which have to agree on it (audit AUD-R204).
+func frontCentreIndex(of layout: UnsafePointer<AVChannelLayout>) -> Int? {
+    let count = layout.pointee.nb_channels
+    guard count > 1 else { return nil }
+    var assumed = AVChannelLayout()
+    defer { av_channel_layout_uninit(&assumed) }
+    let index: Int32
+    if layout.pointee.order == AV_CHANNEL_ORDER_UNSPEC {
+        av_channel_layout_default(&assumed, count)
+        index = av_channel_layout_index_from_channel(&assumed, AV_CHAN_FRONT_CENTER)
+    } else {
+        index = av_channel_layout_index_from_channel(layout, AV_CHAN_FRONT_CENTER)
+    }
+    return index >= 0 ? Int(index) : nil
+}
