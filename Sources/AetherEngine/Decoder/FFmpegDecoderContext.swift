@@ -50,7 +50,10 @@ enum FFmpegDecoderContext {
             throw Failure.parameters(parametersResult)
         }
         configure(ctx)
-        ctx.pointee.max_pixels = maxPixels
+        // A subtitle canvas seeded from an 8K video must still open (avcodec_open2 drops a size above
+        // max_pixels), so the cap grows to the seeded size, never past the video cap.
+        let seeded = Int64(max(0, ctx.pointee.width)) * Int64(max(0, ctx.pointee.height))
+        ctx.pointee.max_pixels = min(max(maxPixels, seeded), maxVideoPixels)
 
         var dictionary: OpaquePointer?
         for (key, value) in options { av_dict_set(&dictionary, key, value, 0) }

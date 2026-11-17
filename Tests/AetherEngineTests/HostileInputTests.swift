@@ -200,6 +200,28 @@ struct HostileInputTests {
 
     // MARK: - DEC-201 subtitle and video pixel caps
 
+    @Test("DEC-201: a bitmap canvas seeded from 8K video keeps its size, a seed past the video cap does not")
+    func seededSubtitleCanvasFollowsTheVideoCap() throws {
+        let codec = try #require(avcodec_find_decoder(AV_CODEC_ID_HDMV_PGS_SUBTITLE))
+        func openSeeded(width: Int32, height: Int32) throws -> UnsafeMutablePointer<AVCodecContext> {
+            let codecpar = try #require(avcodec_parameters_alloc())
+            defer { var local: UnsafeMutablePointer<AVCodecParameters>? = codecpar; avcodec_parameters_free(&local) }
+            codecpar.pointee.codec_type = AVMEDIA_TYPE_SUBTITLE
+            codecpar.pointee.codec_id = AV_CODEC_ID_HDMV_PGS_SUBTITLE
+            return try FFmpegDecoderContext.open(codec: codec, codecpar: codecpar,
+                                                 maxPixels: FFmpegDecoderContext.maxSubtitlePixels) { ctx in
+                ctx.pointee.width = width
+                ctx.pointee.height = height
+            }
+        }
+        var eightK: UnsafeMutablePointer<AVCodecContext>? = try openSeeded(width: 7680, height: 4320)
+        defer { avcodec_free_context(&eightK) }
+        #expect(eightK?.pointee.width == 7680)
+        #expect(eightK?.pointee.height == 4320)
+        // avcodec_open2 refuses a size above max_pixels outright (EINVAL), so a hostile seed fails the open.
+        #expect(throws: FFmpegDecoderContext.Failure.self) { _ = try openSeeded(width: 16_384, height: 16_384) }
+    }
+
     @Test("DEC-201: a PGS composition of 16000x16000 is refused by the decoder context's pixel cap")
     func hostilePGSCanvasIsRefused() throws {
         let codec = try #require(avcodec_find_decoder(AV_CODEC_ID_HDMV_PGS_SUBTITLE))

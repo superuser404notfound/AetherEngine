@@ -1816,8 +1816,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func liveVideoSegmentIndex(pts: Int64, dts: Int64, isKeyframe: Bool) -> Int {
         // A packet with a DTS but no PTS (one reorder frame, PES PTS omitted) would read as -1e14 s (audit SEG-201).
         let stamp = Self.liveCutTimestamp(pts: pts, dts: dts)
-        if stamp == nil, liveFirstSegmentOpened { return liveCurrentSegmentIndex }
-        let ptsSeconds = Double(stamp ?? 0) * sourceVideoTbSeconds
+        // Without any stamp the packet joins the current segment; the first one opens on a real time.
+        guard let stamp else { return liveFirstSegmentOpened ? liveCurrentSegmentIndex : baseIndex }
+        let ptsSeconds = Double(stamp) * sourceVideoTbSeconds
         if !liveFirstSegmentOpened {
             liveFirstSegmentOpened = true
             liveCurrentSegmentIndex = baseIndex
