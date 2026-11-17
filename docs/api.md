@@ -1738,7 +1738,7 @@ If you need it, say so on the tracker instead of working around it.
 | `$activeVideoProcessing` | `VideoProcessingStatus?`: what the picture processing (`LoadOptions.videoProcessing`, #957) does for this session. See [Picture processing status](#picture-processing-status). |
 | `sourceVideoWidth`, `sourceVideoHeight`, `sourceVideoPixelAspectRatio` | The source's CODED size, and the multiplier that turns it into the presented one (`width * ratio`), read once from the probe. See note 1. |
 | `pictureInPictureActive` | Host-set. Keeps the pipeline and the loopback server alive across a background transition, and keeps the software path decoding video for the window. |
-| `needsForegroundVideoRestore` | True after the background policy actually released the video item. Before play, restore with `reloadAtCurrentPosition(applying:)` and choose the transport intent you want. False when video was retained, or after stop/load. |
+| `needsForegroundVideoRestore` | True after the background policy actually released the video item (see [Background behaviour](#background-behaviour)). Before play, restore with `reloadAtCurrentPosition(applying:)` and choose the transport intent you want. False when video was retained, or after stop/load. |
 | `retainsVideoPipelineWhenBackgrounded` | Opt in to keeping a paused video pipeline through background suspension. Default false. Set before backgrounding. See [Background behaviour](#background-behaviour). |
 | `backgroundPlaybackEnabled`, `backgroundTeardownGraceSeconds` | Background audio policy. See note 2. |
 | `presentationAxisMap` | `PresentationAxisMap`: `sourceSeconds(forItemSeconds:)`, `itemSeconds(forSourceSeconds:)`, `shiftSeconds(atItemSeconds:)`, `seams` (each a `PresentationAxisMap.Seam` of `itemSeconds` and `shiftSeconds`), `isEmpty`. Readable off the main actor. See note 3. |
@@ -1813,7 +1813,25 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
 
 ### Background behaviour
 
-`retainsVideoPipelineWhenBackgrounded` (default false; set before backgrounding):
+In the background the engine keeps a session only while something is still playing or showing. Everything else is released before the app can be suspended, and `needsForegroundVideoRestore` turns true.
+
+**What keeps a session in the background (iOS):**
+
+- Audio-only sessions, always.
+- A playing native video, for its audio, while `backgroundPlaybackEnabled` is on (AE#1080).
+- A playing software session, in audio-only mode, when it renders audio of its own.
+- An active PiP window.
+- A paused video, only with `retainsVideoPipelineWhenBackgrounded` (below).
+
+On tvOS only a PiP window (and the retention opt-in) keeps a video session; everything else is released at once.
+
+**A pause is a pause, whoever made it.** A paused video in the background is released after the grace window (`backgroundTeardownGraceSeconds`, 15 s by default). That holds for `pause()`, and also for a pause the system makes without the engine: AVPlayer pausing when AirPods are taken out, AVKit pausing from its own controls.
+
+**Loads and seeks wait.** A decision that falls into a `load()` or seek is made when it returns, never under it. That includes a pause pressed during a load, and a load the host starts in the background (next-episode autoplay, a playlist advance).
+
+**Phone calls and Siri.** An interruption that pauses a playing session holds the decision until it ends. When the system grants `.shouldResume`, the session resumes, native video in the background included. When it ends without that grant, the paused session gets the normal decision, so the grace window starts then.
+
+**`retainsVideoPipelineWhenBackgrounded`** (default false; set before backgrounding):
 
 - By opting in, the host accepts that decoder sessions the system invalidated can still need `reloadAtCurrentPosition()`. In return it saves a rebuild when the pipeline survives.
 - It does not enable background playback. A retained session that resumes while still in the background gets the playing-session policy at that point: teardown with background playback off, software audio-only.

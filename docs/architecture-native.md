@@ -734,7 +734,11 @@ See [TrueHD Atmos with heights](formats.md#truehd-atmos-with-heights) and [DTS:X
 
 When the app goes to the background while playing, the engine keeps audio going instead of tearing the pipeline down.
 
-**The decision.** It is a pure, unit-tested policy, `backgroundAction(isAudioBackend:hasSoftwareHost:softwareHostHasAudio:keepVideoAlive:pipActive:state:retainPausedVideoPipeline:)`, driven from the `UIApplication` lifecycle observers.
+**The decision.** Every entry point asks one pure, unit-tested function, `backgroundDecision(_:trigger:)` in `AetherEngine+Background.swift` (audit LIF-R201). The entry points are `didEnterBackground`, a pause (from `pause()` or from the player itself), a load, seek or interruption that settles, a PiP window closing, and the grace window's expiry.
+
+- It first owes the decision while a load or seek is in flight, or while an interruption holds a session it will resume. The load's own exit, or the interruption's end, settles it.
+- It does nothing for a session the background teardown already released.
+- Otherwise it applies `backgroundAction(isAudioBackend:hasSoftwareHost:softwareHostHasAudio:keepVideoAlive:pipActive:state:retainPausedVideoPipeline:)` and, for the step, `backgroundStep(action:state:supportsGraceWindow:graceSeconds:)`.
 
 - `keepVideoAlive` comes from `shouldKeepVideoAlive(enabled:pipActive:state:)` on iOS.
 - tvOS tears down unless a PiP window is active (`shouldKeepVideoAliveTV`), for safety: a frozen decode session crossing a multi-hour suspension can wedge `mediaserverd`.
@@ -765,6 +769,7 @@ A paused session waits a short grace window before it tears down in the backgrou
 - The teardown is deferred by `backgroundTeardownGraceSeconds` (default 15 s; 0 restores the immediate teardown), held under a `UIBackgroundTask` assertion.
 - `didBecomeActive` cancels the window, so a quick switch resumes on the live pipeline.
 - At expiry the action is evaluated again (PiP can start, and lock-screen play can resume, during the window). The teardown runs while the app is still really running, never across an idle suspension. The assertion's expiration handler is a synchronous backstop.
+- Each window ends only its own assertion. A window that expired is still draining its teardown (3.5 s) when the app can come back and leave again, and the new window's assertion must outlive that drain.
 - The step decision is the pure `backgroundStep(action:state:supportsGraceWindow:graceSeconds:)`.
 - A playing teardown (background playback disabled) stays immediate, because its audio would keep sounding through the window. tvOS keeps the teardown, with the same PiP and `retainsVideoPipelineWhenBackgrounded` exceptions.
 
