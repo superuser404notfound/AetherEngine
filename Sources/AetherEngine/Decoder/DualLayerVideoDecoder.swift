@@ -703,9 +703,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// The time base the external base-layer route stamps its packets in; nil on the software host,
     /// where the base layer is decoded here. Guarded by `lock`.
     private var externalBaseLayerTimeBase: AVRational?
-    /// Whether the external-base-layer route composes into the buffers the host handed in. Off by default:
-    /// those buffers belong to the host's player, and no API contract says they may be written. Guarded by
-    /// `lock`.
+    /// Whether the external-base-layer route composes into the buffers the host handed in. Those buffers
+    /// belong to the host's player and no API contract says they may be written; the AVPlayer-output route
+    /// opens with it on all the same (see `openExternalBaseLayer`). Guarded by `lock`.
     private var externalBaseLayerComposesInPlace = false
 
     /// The software host always composes into its own decoder's buffers. The external-base-layer route does
@@ -726,8 +726,12 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// frames carry.
     ///
     /// `composeInPlace` writes the composition into the host's buffers instead of the output pool. It saves
-    /// the pool (129 to 195 MB measured for 4K) and is only safe when nothing else reads those buffers again, which
-    /// the host's player does not promise, so it is an opt-in for measurement and never the default.
+    /// the pool (129 to 195 MB measured for 4K) and is only safe when nothing else reads those buffers again,
+    /// which the host's player does not promise. The AVPlayer-output route turns it on by default since
+    /// `b34475dc`: on the Mac the video output vends x420 copies it converted from the decoder's own format,
+    /// and the in-place result is bit-identical to the pool's. Whether a tvOS or iOS player ever vends a
+    /// buffer it still reads is not measured (`docs/dolby-vision-fel.md` §5.2.4); `AETHER_FEL_OUTPUT_INPLACE=0`
+    /// turns it off for that comparison. The parameter itself defaults to off.
     func openExternalBaseLayer(
         codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational, frameRate: Double?,
         composeInPlace: Bool = false,
@@ -1584,7 +1588,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // the GPU started writing drops the frame (the buffer holds half-composed pixels, so the
             // base-layer fallback below would show them). On the external-base-layer route the buffer is the
             // host player's, so this holds only as far as that player never hands it out again, which it
-            // does not promise; the route reaches this branch only when it was opened with `composeInPlace`.
+            // does not promise; the route reaches this branch when it was opened with `composeInPlace`, which
+            // the AVPlayer-output route does by default (see `openExternalBaseLayer`).
             composer.composeInPlaceAsyncWithAcquiredSlot(
                 baseBuffer: req.base,
                 enhancementBuffer: req.enhancement,
