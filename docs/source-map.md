@@ -525,6 +525,7 @@ Notes:
 | `HLSVideoEngine+SegmentPlanning.swift` | Native path: keyframe / uniform segment plans, extradata and AAC fixups. |
 | `HLSVideoEngine+LiveReopen.swift` | Native path: live source-loss recovery (capped-backoff reopen on the same timeline), and the VOD backpressure-wedge re-anchor plus consumer re-engage nudge. The nudge re-reads the rendered position at nudge time, so the zero-tolerance seek never lands behind the on-screen frame (#115). |
 | `CodecRoutePolicy.swift` | Native path: DV / HDR / codec routing decisions (track types, CODECS strings, VIDEO-RANGE). |
+| `AnnexB.swift` | The one Annex-B NAL scanner (3- and 4-byte start codes, leading bytes skipped, trailing zeros trimmed, empty NALs dropped). Every NAL walker goes through it. |
 | `AnnexBSampleConverter.swift` | Native path: the session muxer rewrites Annex-B HEVC samples to length-prefixed NALs, keeping in-band VPS/SPS/PPS. movenc's own conversion under `hvc1` drops them, so a stream that sends a new PPS mid-title stopped decoding at the change (PR #703). |
 | `HEVCConformanceCrop.swift` | tvOS native path: clears the SPS conformance window of HEVC coded 3840x2176 and cropped to 2160, in the init segment and in-band, because an Apple TV restarts on it; the muxer crops with `clap` instead (PR #1072). |
 | `FelCurves/` | `DolbyVisionFelCurves` trait. See note. |

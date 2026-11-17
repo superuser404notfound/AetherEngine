@@ -84,21 +84,9 @@ struct BluRayDolbyVisionLayers {
     /// unit has none. Trailing zero bytes (the next start code's leading zero, padding) are not part of it.
     static func rpu(inAnnexB data: UnsafeRawBufferPointer) -> [UInt8]? {
         let bytes = data.bindMemory(to: UInt8.self)
-        let n = bytes.count
-        var i = 0
-        func startCode(at j: Int) -> Bool { j + 2 < n && bytes[j] == 0 && bytes[j + 1] == 0 && bytes[j + 2] == 1 }
-        while i + 3 < n {
-            guard startCode(at: i) else { i += 1; continue }
-            let nal = i + 3
-            var end = nal + 1
-            while end < n && !startCode(at: end) { end += 1 }
-            if (bytes[nal] >> 1) & 0x3F == 62 {
-                var last = end
-                while last > nal && bytes[last - 1] == 0 { last -= 1 }
-                guard last - nal > 2 else { return nil }
-                return [0, 0, 1] + Array(bytes[nal..<last])
-            }
-            i = end
+        for range in AnnexB.nalRanges(data) where (bytes[range.lowerBound] >> 1) & 0x3F == 62 {
+            guard range.count > 2 else { return nil }
+            return [0, 0, 1] + Array(bytes[range])
         }
         return nil
     }

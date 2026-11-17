@@ -157,23 +157,16 @@ enum HDR10PlusMetadataScan {
                 offset += count
             }
         case .annexB:
-            var nalStart: Int?
-            var zeros = 0
-            for index in bytes.indices {
-                let byte = bytes[index]
-                if byte == 1, zeros >= 2 {
-                    let end = index - zeros
-                    if let start = nalStart {
-                        guard visit(start, end) else { return found }
-                        if found { return true }
-                    } else if end != 0 {
-                        return found
-                    }
-                    nalStart = index + 1
-                }
-                zeros = byte == 0 ? zeros + 1 : 0
+            let ranges = bytes.baseAddress.map { base in
+                AnnexB.nalRanges(UnsafeRawBufferPointer(start: base, count: bytes.count))
+            } ?? []
+            guard let first = ranges.first else { return found }
+            // Bytes in front of the first start code must be padding: anything else is not an Annex-B unit.
+            for index in 0..<(first.lowerBound - 3) where bytes[index] != 0 { return found }
+            for range in ranges {
+                guard visit(range.lowerBound, range.upperBound) else { return found }
+                if found { return true }
             }
-            guard let start = nalStart, visit(start, bytes.count - zeros) else { return found }
         }
         return found
     }
