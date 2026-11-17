@@ -80,4 +80,24 @@ struct Issue1070AirPlayInterlaceTests {
         #expect(!AetherEngine.interlaceRouteNeedsReload(
             receiverAtLoad: false, receiverNow: true, sessionSettled: true, reopensAtPosition: false))
     }
+
+    /// Audit LOAD-207: the catch restored the old answer whenever the field still read the new one.
+    /// A host load that superseded the reload and routed with no receiver writes that same value, and
+    /// the restore then told the new session it was loaded under a receiver, so picking an Apple TV
+    /// later never moved its picture.
+    @Test("a failed reload restores the old receiver answer only when no load ran since the decision")
+    func failedReloadRestore() {
+        // Threw before its teardown (a refused reload): the session is the one the decision saw.
+        #expect(AetherEngine.interlaceReloadFailureRestoresReceiver(
+            generationAtDecision: 7, generationNow: 7, receiverAtLoadNow: false, receiverNow: false))
+        // A host load superseded it and decided the route itself, with the same answer.
+        #expect(!AetherEngine.interlaceReloadFailureRestoresReceiver(
+            generationAtDecision: 7, generationNow: 9, receiverAtLoadNow: false, receiverNow: false))
+        // The reload's own load failed after its teardown.
+        #expect(!AetherEngine.interlaceReloadFailureRestoresReceiver(
+            generationAtDecision: 7, generationNow: 8, receiverAtLoadNow: nil, receiverNow: true))
+        // Something else wrote another answer meanwhile.
+        #expect(!AetherEngine.interlaceReloadFailureRestoresReceiver(
+            generationAtDecision: 7, generationNow: 7, receiverAtLoadNow: true, receiverNow: false))
+    }
 }
