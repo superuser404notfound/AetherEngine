@@ -82,6 +82,34 @@ the public-API contract.
   answer a retriable 503, and segments below the window answered 503 too. AVPlayer resyncs on the 404.
 - **Stopping the load of a remote `.iso`, `.img` or `.udf` cancels its size probe.** Up to four range
   requests used to keep running for about two minutes, outside the origin request budget.
+- **A pause during a load in the background no longer cancels the load (iOS).** Pausing while a next
+  episode or track loaded in the background tore the session down under the load, and the host's `load()`
+  threw `CancellationError`. The decision now waits for the load to return.
+- **A background video paused by the system is released like one paused by the app (iOS).** Taking out
+  AirPods, or pausing from AVKit's own controls, left the whole pipeline running into the suspension. It is
+  now released after the grace window, like a `pause()`.
+- **Background video sound resumes after a phone call (iOS).** Since 7.69.1 a native video keeps playing in
+  the background, but the end of a call never resumed it. It now resumes when the system grants
+  `.shouldResume`, and the session is held for that during the call.
+- **A quick return during a background teardown no longer ends the next grace window early (iOS).** A
+  foreground and background round trip inside the 3.5 s teardown drain could end the new window's
+  background-task assertion.
+- **A cancelled load no longer leaves its tracks and format published.** After a host cancelled `load()`,
+  the idle engine kept publishing the cancelled item's tracks, duration, metadata and video format.
+- **`currentAVPlayerItem` goes nil when the item is removed.** After a stop or background teardown it kept
+  naming, and retaining, the removed item (regression since AE#998).
+- **Dialogue Boost and Night Mode work in a film that follows a music track.** After the engine had played
+  one track through AVPlayer, live shaping changes on later video sessions were ignored, and
+  `audioShapingState` read `.unavailable` for FFmpeg-hosted tracks.
+- **Dialogue lift no longer doubles or disappears when a source changes layout.** A live 2.0 to 5.1 switch
+  raised the dialogue twice, a 5.1 to 2.0 switch dropped the lift, and a VOD TrueHD whose layout was
+  unresolved at start behaved the same. A mono source is now lifted once.
+- **The loudness target keeps its measurement across a format change on the software host.** At every
+  5.1/2.0 programme boundary the gain fell to 0 dB and climbed back at 2 dB/s, and the graph's last
+  milliseconds were dropped.
+- **The software video host no longer drops the last audio at end of file.** Up to about 21 ms, and about
+  58 ms with a dialogue lift, were lost.
+- **Normalized tracks end with a valid timestamp.** The last ~5 ms went to the renderer with an invalid PTS.
 - **Infinite or NaN float samples no longer crash or freeze the loudness target.** They are left out of
   the measurement.
 - **A live packet without a PTS no longer produces a segment that claims to last 1e14 seconds.** It cuts
@@ -98,6 +126,9 @@ the public-API contract.
   path used to trim the shared list to two and ignore the budget.
 - **The disk-reserve check no longer reads the volume's free space on every 64 KiB write.** The reading
   is reused for 0.5 s.
+- **The normalization tap no longer allocates on the audio render thread.**
+- **The end-of-file silence fill (AE#847) is capped at 10 minutes and written as it is encoded.** A corrupt
+  last timestamp used to build hours of silent packets in memory first.
 - **A GPU pipeline that fails to build is compiled once per process.** The frame chain and the upscaler
   used to recompile both shader libraries on every stage build after a failure.
 
