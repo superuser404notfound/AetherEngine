@@ -952,6 +952,7 @@ tvOS sends APAC over HDMI as Dolby MAT, and some sinks show Dolby Atmos for it o
 
 - The stream is 2 s of digital silence written bit by bit from the E-AC-3 and object audio specifications (`Scripts/make-silent-atmos.swift`).
 - It plays only while the engine's player plays or waits to play a rendered item on a route whose every output is HDMI, and is released otherwise.
+- **Its player goes with the stream.** The second player is built when the stream starts and thrown away when it is released, at `stop()` too. Kept around paused and empty, it held an Apple TV 4K's HDMI route (tvOS 27.3) in its 32-channel layout, and on an engine reused across titles the next title's 5.1 PCM reached the receiver as Dolby Atmos (#1081).
 - **Pause grace.** A pause does not stop it at once. It keeps playing for 60 s and pauses only if the engine's player is still paused then, because stopping it let the output leave Atmos, and a Samsung HW-Q990H re-locked on every resume and scrub (#848). The grace is bounded so a long pause does not keep the receiver busy, and it ends before tvOS's shortest screen saver delay.
 - **DTS:X.** A rendered DTS:X programme runs it too. tvOS carries a bed with heights over HDMI only as Dolby MAT, so the receiver shows Dolby Atmos for an intact DTS:X bed either way. Without the stream, the Sonos above, with Continuous Audio off, kept a DTS:X bed rendered to PCM on stereo.
 - **AirPlay.** Not run. There is no sink indicator to light, and the second player restarting beside the programme on resume left a HomePod pair silent after a pause (#834).
