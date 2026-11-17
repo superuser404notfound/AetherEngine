@@ -46,6 +46,23 @@ struct SoftwarePathEscalationTests {
             errorDomain: nil, availability: Self.availability()))
     }
 
+    /// Audit LOAD-204: a non-seekable custom live source refuses every rebuild, so the rung is not on offer.
+    @Test("A session whose rebuild is always refused is not offered the software path")
+    func rebuildImpossibleIsNotOffered() {
+        var availability = Self.availability()
+        availability.rebuildPossible = false
+        #expect(!SoftwarePathEscalation.shouldEscalate(
+            errorDomain: SoftwarePathEscalation.liveJoinErrorDomain, availability: availability))
+    }
+
+    /// Audit LOAD-202: a software rebuild shows the track the host resolved, not the nil request.
+    @Test("A software reload shows the host's resolved audio index")
+    func softwareReloadAudioIndexPrefersHost() {
+        #expect(AetherEngine.softwareReloadAudioIndex(hostIndex: 3, requested: nil) == 3)
+        #expect(AetherEngine.softwareReloadAudioIndex(hostIndex: -1, requested: 2) == 2)
+        #expect(AetherEngine.softwareReloadAudioIndex(hostIndex: -1, requested: nil) == nil)
+    }
+
     @Test("The session spends its escalation once")
     func onlyOnce() {
         #expect(!SoftwarePathEscalation.shouldEscalate(

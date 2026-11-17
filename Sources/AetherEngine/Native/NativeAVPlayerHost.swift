@@ -52,7 +52,7 @@ final class NativeAVPlayerHost {
     var iFramePlaylistWithheld: (@Sendable () -> Bool)?
     /// AE#561: what the session can still offer when AVPlayer refuses the media, answered by the
     /// engine because the host owns none of it. Set at mount, read only while classifying a failure.
-    var softwarePathAvailability: (@Sendable () -> SoftwarePathEscalation.Availability?)?
+    var softwarePathAvailability: (@MainActor () -> SoftwarePathEscalation.Availability?)?
     /// #50: latched on first .playing; discriminates startup failures (never played) from mid-playback transients. .failed and timeControlStatus KVOs are unsynchronized, so instantaneous status is unreliable. Reset with the item on a reused host.
     private var hasEverPlayed = false
     @Published private(set) var didReachEnd: Bool = false

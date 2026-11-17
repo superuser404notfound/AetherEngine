@@ -7,6 +7,25 @@ import AetherLibavutil
 
 extension AetherEngine {
 
+    /// The audio index a software rebuild shows as active: the host's own pick when it resolved one
+    /// (a nil override plays the default track), else the request. Audit LOAD-202.
+    nonisolated static func softwareReloadAudioIndex(hostIndex: Int32, requested: Int32?) -> Int? {
+        hostIndex >= 0 ? Int(hostIndex) : requested.map { Int($0) }
+    }
+
+    /// The open profile every playback open uses (the probe, the loaders and the reload rebuild), so a
+    /// new profile field reaches all of them. Audit LOAD-R202.
+    func playbackOpenProfile(options: LoadOptions) -> DemuxerOpenProfile {
+        DemuxerOpenProfile.playback.withProbeBudget(
+            probesize: options.probesize, maxAnalyzeDuration: options.maxAnalyzeDuration)
+            .withSequentialOrigin(options.sequentialOrigin, declaredDuration: options.declaredDurationSeconds)
+            .withHeldSourceConnection(options.heldSourceConnection)
+            .skippingAttachments(options.skipsContainerAttachments)
+            .withSourceOpenPolicy(options.sourceOpenPolicy)
+            .withDiagnosticContext(options.sourceDiagnosticsContext)
+            .withRequestHeaders(sessionRequestHeaders)
+    }
+
     /// Apply an AVPlayer clock tick (native VOD/live path) to the engine clock. `nativeClockSeconds`
     /// (the raw pre-shift clock, re-derived against by `onPlaylistShiftChanged`) and the active seam
     /// shift always track it. The UI scrub clock (`clock.currentTime`) is HELD while a recovery seek is
@@ -430,6 +449,8 @@ extension AetherEngine {
             self.currentAVPlayer = host.avPlayer
         }
 
+        // Audit LOAD-203: this route never subscribes to a stereo refusal, so a kept host must not still be armed.
+        host.armStereoRefusalFallback(false)
         nativeCancellables.removeAll()
         host.$currentTime
             .sink { [weak self] value in
@@ -532,16 +553,7 @@ extension AetherEngine {
         // is rebuilt with `.software`, which the TS ingest serves. Assigned on every mount, because a
         // host kept from a loopback session still carries that session's closure and budget, and
         // with its subscriber gone an escalation it granted would swallow the failure.
-        let escalationBudget = softwarePathEscalationBudget
-        host.softwarePathAvailability = {
-            SoftwarePathEscalation.Availability(
-                alreadyEscalated: escalationBudget.isSpent,
-                preferredDecodePath: options.preferredDecodePath,
-                nativeRemoteHLS: true,
-                hostAllowsEscalation: options.escalatesToSoftwarePath,
-                finitePlaylist: !options.isLive
-            )
-        }
+        host.softwarePathAvailability = { [weak self] in self?.currentEscalationAvailability }
         wireSoftwarePathEscalation(host: host, generation: bypassGeneration)
         startLiveWindowTimer(host: host)
         // settlePausedAtReadiness off when autostarting: the terminal host.play() runs, so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
@@ -835,8 +847,8 @@ extension AetherEngine {
         if rememberVerdict { rerouteVerdictMemory.record(url, now: Date()) }
         var options = loadedOptions
         options.nativeRemoteHLS = false
-        let reader = HLSLiveIngestReader(playlistURL: url, httpHeaders: options.httpHeaders,
-                                        diagnosticContext: options.sourceDiagnosticsContext)
+        let reader = HLSLiveIngestReader.engineIngest(playlistURL: url, httpHeaders: options.httpHeaders,
+                                                      diagnosticContext: options.sourceDiagnosticsContext)
         do {
             _ = try await load(source: .custom(reader, formatHint: "mpegts"), options: options)
         } catch is CancellationError {
@@ -1175,12 +1187,7 @@ extension AetherEngine {
                     positionSeconds: 0
                 )
                 let offered = SoftwarePathEscalation.shouldEscalate(
-                    errorDomain: request.domain,
-                    availability: SoftwarePathEscalation.Availability(
-                        alreadyEscalated: self.softwarePathEscalationBudget.isSpent,
-                        preferredDecodePath: self.loadedOptions.preferredDecodePath,
-                        nativeRemoteHLS: self.loadedOptions.nativeRemoteHLS,
-                        hostAllowsEscalation: self.loadedOptions.escalatesToSoftwarePath))
+                    errorDomain: request.domain, availability: self.currentEscalationAvailability)
                 guard offered else {
                     EngineLog.emit(
                         "[AetherEngine] AE#627 software path not on offer for this session; "
@@ -1925,18 +1932,7 @@ extension AetherEngine {
         // reads the demuxer directly and answers a sample Apple's parser rejects by skipping one
         // frame, so it is offered the session before the failure is made terminal. Once per session,
         // and only for a verdict on the MEDIA (see SoftwarePathEscalation).
-        let escalationBudget = softwarePathEscalationBudget
-        let escalationPreferred = loadedOptions.preferredDecodePath
-        let escalationRemoteHLS = loadedOptions.nativeRemoteHLS
-        let escalationAllowed = loadedOptions.escalatesToSoftwarePath
-        host.softwarePathAvailability = {
-            SoftwarePathEscalation.Availability(
-                alreadyEscalated: escalationBudget.isSpent,
-                preferredDecodePath: escalationPreferred,
-                nativeRemoteHLS: escalationRemoteHLS,
-                hostAllowsEscalation: escalationAllowed
-            )
-        }
+        host.softwarePathAvailability = { [weak self] in self?.currentEscalationAvailability }
         wireSoftwarePathEscalation(host: host, generation: generation)
 
         // appliesPerFrameHDRDisplayMetadata unconditionally true: DV P5 has no HDR10 base layer, so the per-frame RPU is what AVPlayer's tone-mapper needs on a non-DV panel (DrHurt #4 2026-05-26). Prior servingMasterPlaylist gate broke P5. Apple's default is also true; explicit write surfaces the live value in diagnostics.
@@ -2289,13 +2285,7 @@ extension AetherEngine {
 
         // Reuse probe demuxer when present (avoids second avformat_open_input; also required for forward-only custom sources). Detach the open so @MainActor keeps ticking.
         // Capture the caller's probe budget (#68) before the detach: loadedOptions is @MainActor-isolated and unreachable inside the closure. Only used on the fallback open (probe absent).
-        let probesize = loadedOptions.probesize
-        let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
-        let sequentialOrigin = loadedOptions.sequentialOrigin
-        let heldSourceConnection = loadedOptions.heldSourceConnection
-        let sourceOpenPolicy = loadedOptions.sourceOpenPolicy
-        let diagnosticContext = loadedOptions.sourceDiagnosticsContext
-        let declaredDuration = loadedOptions.declaredDurationSeconds
+        let openProfile = playbackOpenProfile(options: loadedOptions)
         // Built on the main actor, captured into the detach: surfaces source stall/reconnect to playbackPhase (#85).
         let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
             self?.hop(for: generation) { [weak self] in self?.setReaderNetworkPhase(phase) }   // audit Vcore-101
@@ -2307,13 +2297,13 @@ extension AetherEngine {
         let dvrRetention = loadedOptions.softwareDVRRetention
         let liveDVRByteBudget = loadedOptions.liveDVRByteBudget
         try await BlockingWork.detached(priority: .userInitiated) {
-            [host, preopenedDemuxer, url, sourceHTTPHeaders, requestHeaders = sessionRequestHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration, sequentialOrigin, heldSourceConnection, declaredDuration, networkPhaseSink] in
+            [host, preopenedDemuxer, url, sourceHTTPHeaders, openProfile, isLive, dvrWindowSeconds, networkPhaseSink] in
             let dem: Demuxer
             if let pre = preopenedDemuxer {
                 dem = pre
             } else {
                 dem = Demuxer()
-                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration).withHeldSourceConnection(heldSourceConnection).skippingAttachments().withSourceOpenPolicy(sourceOpenPolicy).withDiagnosticContext(diagnosticContext).withRequestHeaders(requestHeaders), isLive: isLive)
+                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: openProfile, isLive: isLive)
             }
             dem.onNetworkPhaseChanged = networkPhaseSink
             try await host.load(
@@ -2389,26 +2379,20 @@ extension AetherEngine {
 
         // Reuse probe demuxer (required for custom sources; no URL to reopen). Detach so @MainActor keeps ticking.
         // Caller's probe budget (#68) captured before the detach; only used on the fallback open (probe absent).
-        let probesize = loadedOptions.probesize
-        let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
-        let sequentialOrigin = loadedOptions.sequentialOrigin
-        let heldSourceConnection = loadedOptions.heldSourceConnection
-        let sourceOpenPolicy = loadedOptions.sourceOpenPolicy
-        let diagnosticContext = loadedOptions.sourceDiagnosticsContext
-        let declaredDuration = loadedOptions.declaredDurationSeconds
+        let openProfile = playbackOpenProfile(options: loadedOptions)
         // Built on the main actor, captured into the detach: surfaces source stall/reconnect to playbackPhase (#85).
         let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
             self?.hop(for: generation) { [weak self] in self?.setReaderNetworkPhase(phase) }   // audit Vcore-101
         }
         if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }   // #361
         try await BlockingWork.detached(priority: .userInitiated) {
-            [host, preopenedDemuxer, url, sourceHTTPHeaders, requestHeaders = sessionRequestHeaders, probesize, maxAnalyzeDuration, sequentialOrigin, heldSourceConnection, declaredDuration, networkPhaseSink] in
+            [host, preopenedDemuxer, url, sourceHTTPHeaders, openProfile, networkPhaseSink] in
             let dem: Demuxer
             if let pre = preopenedDemuxer {
                 dem = pre
             } else {
                 dem = Demuxer()
-                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration).withHeldSourceConnection(heldSourceConnection).skippingAttachments().withSourceOpenPolicy(sourceOpenPolicy).withDiagnosticContext(diagnosticContext).withRequestHeaders(requestHeaders))
+                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: openProfile)
             }
             dem.onNetworkPhaseChanged = networkPhaseSink
             try await host.load(
@@ -2581,6 +2565,7 @@ extension AetherEngine {
         let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
             ? loadedSidecarURL
             : nil
+        let sidecarHeadersToResume = sidecarToResume == nil ? nil : loadedSidecarHeaders
         // #170: stopInternal wipes the native-rendition pick; snapshot it for a post-reload
         // replay (mirroring the #65 recovery), or an audio switch during PiP/AirPlay strands
         // the receiver without subtitles. The active track id also routes an external (#88)
@@ -2707,11 +2692,7 @@ extension AetherEngine {
 
         // Custom sources: no URL to reopen; rebuild on the retained reader. Demuxer opens at byte 0; loadSoftware/loadNative seek to startPosition.
         // Preserve the caller's probe budget (#68) across the reopen so an audio/title switch doesn't re-incur the full find_stream_info cost the caller paid to avoid.
-        let reloadProfile = DemuxerOpenProfile.playback.withProbeBudget(
-            probesize: loadedOptions.probesize, maxAnalyzeDuration: loadedOptions.maxAnalyzeDuration)
-            .skippingAttachments()
-            .withSourceOpenPolicy(loadedOptions.sourceOpenPolicy)
-            .withDiagnosticContext(loadedOptions.sourceDiagnosticsContext)
+        let reloadProfile = playbackOpenProfile(options: loadedOptions)
         var customPreopened: Demuxer? = nil
         if isCustomSource, let reader = customReader {
             let hint = customFormatHint
@@ -2835,6 +2816,14 @@ extension AetherEngine {
             }
         }
 
+        // Audit LOAD-202: loadNative builds the subtitle renditions and the AVKit audio menu from these
+        // lists, so a different title's lists are in place before it runs.
+        if titleToReopen != outgoingDiscTitleID, !reopenedDiscTitles.isEmpty {
+            audioTracks = reopenedAudioTracks
+            applyConfirmedTrackFlags()
+            subtitleTracks = reopenedSubtitleTracks
+        }
+
         do {
             let loadStart = DispatchTime.now()
             if targetSoftwarePath {
@@ -2856,7 +2845,8 @@ extension AetherEngine {
                 EngineLog.emit("[AetherEngine] reload: loadSoftware done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .software
                 lastRequiresDeinterlaceWarmup = reopenedRequiresDeinterlaceWarmup
-                activeAudioTrackIndex = audioStreamIndex.map { Int($0) }
+                activeAudioTrackIndex = Self.softwareReloadAudioIndex(
+                    hostIndex: softwareHost?.audioStreamIndex ?? -1, requested: audioStreamIndex)
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: preservedVideoCodec,
                     isSoftware: !(softwareHost?.usesHardwareVideoDecoder ?? false)
@@ -3020,9 +3010,8 @@ extension AetherEngine {
             discChapters = reopenedDiscChapters
             selectedDiscTitle = reopenedSelectedTitleID.flatMap { id in reopenedDiscTitles.first { $0.id == id } }
             sourceStartSeconds = reopenedStartSeconds
-            // A title switch changes the title's stream set. The native path already republished the session's
-            // real list via syncPublishedAudioStateFromNativeSession above; only the software path, which does
-            // not reconcile tracks post-load, needs the probe-derived lists re-applied here.
+            // The software path does not reconcile tracks post-load, so it re-applies the probe-derived
+            // lists here. A title switch already published them before the rebuild (audit LOAD-202).
             if targetSoftwarePath {
                 audioTracks = reopenedAudioTracks
                 applyConfirmedTrackFlags()   // #214 follow-up: a title switch re-applies probe lists
@@ -3040,7 +3029,7 @@ extension AetherEngine {
             if let active = activeTrackToResume, externalSubtitleRegistry[active] != nil {
                 selectSubtitleTrack(index: active, startAt: preSwitchSourceTime)
             } else {
-                selectSidecarSubtitle(url: sidecar)
+                selectSidecarSubtitle(url: sidecar, httpHeaders: sidecarHeadersToResume)
             }
         } else if embeddedStreamToResume >= 0 {
             // #112 (audio-switch reanchor): pass the pre-stopInternal source PTS explicitly; the parameterless form
@@ -3056,6 +3045,7 @@ extension AetherEngine {
         }
         restoreSecondarySubtitleAfterRebuild(
             externalID: secondaryToResume.externalID, sidecarURL: secondaryToResume.sidecarURL,
+            sidecarHeaders: secondaryToResume.sidecarHeaders,
             embeddedIndex: secondaryToResume.embeddedIndex, startAt: preSwitchSourceTime)
         nativeSubtitleMarkerOrdinal = markerOrdinalToRestore   // AE#1052: before the replay reads it
         // #170: replay the native-rendition pick onto the rebuilt item, the way the #65 recovery

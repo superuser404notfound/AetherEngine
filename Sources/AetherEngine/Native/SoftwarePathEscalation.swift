@@ -87,6 +87,9 @@ enum SoftwarePathEscalation {
         var hostAllowsEscalation: Bool = true
         /// AE#990: the bypass is playing a finite playlist, the one shape with an ingest to land on.
         var finitePlaylist: Bool = false
+        /// The session can be rebuilt in place. A non-seekable custom source (a live ingest, a host's
+        /// forward-only reader) refuses every rebuild, so the rung is not on offer (audit LOAD-204).
+        var rebuildPossible: Bool = true
     }
 
     /// The rebuild a still-waiting `load()` hands its wait to (AE#629). `supersededGeneration` is the
@@ -119,6 +122,7 @@ enum SoftwarePathEscalation {
         guard let availability, !availability.alreadyEscalated else { return false }
         // AE#629: a host with its own fallback ladder needs the failure, not a rescue it cannot see.
         guard availability.hostAllowsEscalation else { return false }
+        guard availability.rebuildPossible else { return false }
         // Already there, or the host asked for a path this cannot improve on.
         guard availability.preferredDecodePath == .automatic else { return false }
         // The bypass decodes nothing itself. AE#990: a finite playlist's rebuild re-runs the load with

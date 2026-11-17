@@ -4898,8 +4898,8 @@ public final class AetherEngine: ObservableObject {
             )
             options.nativeRemoteHLS = false
             source = .custom(
-                HLSLiveIngestReader(playlistURL: candidate, httpHeaders: options.httpHeaders,
-                                    diagnosticContext: options.sourceDiagnosticsContext),
+                HLSLiveIngestReader.engineIngest(playlistURL: candidate, httpHeaders: options.httpHeaders,
+                                                 diagnosticContext: options.sourceDiagnosticsContext),
                 formatHint: "mpegts"
             )
         }
@@ -4970,6 +4970,7 @@ public final class AetherEngine: ObservableObject {
         // this one through a reader that outlived it.
         sessionRequestHeaders = RequestHeaderStore(options.httpHeaders)
         relayCredentialRefusals(of: sessionRequestHeaders)
+        (customReader as? HLSLiveIngestReader)?.adoptSessionHeaderStore(sessionRequestHeaders)
         audioSessionRequestsOwnedByAVFoundation = false
         // #377: register the host's concurrency ceiling for this origin before anything fetches
         // from it. Keyed on the origin rather than the load, so the subtitle side reader and any
@@ -5146,9 +5147,9 @@ public final class AetherEngine: ObservableObject {
             continueStartupAcrossReroute()
             return try await load(
                 source: .custom(
-                    HLSLiveIngestReader(playlistURL: livePlaylistURL,
-                                        httpHeaders: loadedOptions.httpHeaders,
-                                        diagnosticContext: loadedOptions.sourceDiagnosticsContext),
+                    HLSLiveIngestReader.engineIngest(playlistURL: livePlaylistURL,
+                                                     httpHeaders: loadedOptions.httpHeaders,
+                                                     diagnosticContext: loadedOptions.sourceDiagnosticsContext),
                     formatHint: "mpegts"
                 ),
                 startPosition: startPosition,
@@ -5180,18 +5181,10 @@ public final class AetherEngine: ObservableObject {
             // AetherEngine#10: a @MainActor async body without a suspension point blocks the main thread
             // despite the async signature; a detached task's value introduces a real background hop,
             // and BlockingWork keeps that hop off the cooperative pool while the open blocks.
-            try await BlockingWork.detached(priority: .userInitiated) { [probe, source, options, requestHeaders = sessionRequestHeaders] in
+            let probeProfile = playbackOpenProfile(options: options)
+            try await BlockingWork.detached(priority: .userInitiated) { [probe, source, options, probeProfile] in
                 // Caller-bounded find_stream_info budget (#68); nil keeps the .playback default. This probe
                 // demuxer is reused as the session demuxer, so the cap lands on the open that actually pays it.
-                let probeProfile = DemuxerOpenProfile.playback.withProbeBudget(
-                    probesize: options.probesize, maxAnalyzeDuration: options.maxAnalyzeDuration)
-                    .withSequentialOrigin(options.sequentialOrigin,
-                                          declaredDuration: options.declaredDurationSeconds)
-                    .withHeldSourceConnection(options.heldSourceConnection)
-                    .skippingAttachments(options.skipsContainerAttachments)
-                    .withSourceOpenPolicy(options.sourceOpenPolicy)
-                    .withDiagnosticContext(options.sourceDiagnosticsContext)
-                    .withRequestHeaders(requestHeaders)
                 switch source {
                 case .url(let u):
                     // isLive configures the AVIOReader for endless-feed mode; must be set at open time because
@@ -5376,9 +5369,9 @@ public final class AetherEngine: ObservableObject {
             continueStartupAcrossReroute()
             return try await load(
                 source: .custom(
-                    HLSLiveIngestReader(playlistURL: livePlaylistURL,
-                                        httpHeaders: loadedOptions.httpHeaders,
-                                        diagnosticContext: loadedOptions.sourceDiagnosticsContext),
+                    HLSLiveIngestReader.engineIngest(playlistURL: livePlaylistURL,
+                                                     httpHeaders: loadedOptions.httpHeaders,
+                                                     diagnosticContext: loadedOptions.sourceDiagnosticsContext),
                     formatHint: "mpegts"
                 ),
                 startPosition: startPosition,
@@ -8778,8 +8771,11 @@ public final class AetherEngine: ObservableObject {
 
     /// Most recent sidecar subtitle URL; rehydrated by selectAudioTrack after pipeline reload. Cleared on clearSubtitle/stop.
     var loadedSidecarURL: URL?
+    /// The explicit headers `loadedSidecarURL` was selected with, kept so a rebuild fetches it the same way (audit SUB-204).
+    var loadedSidecarHeaders: [String: String]?
     /// Active secondary sidecar URL, or nil. Mirror of loadedSidecarURL.
     var loadedSecondarySidecarURL: URL?
+    var loadedSecondarySidecarHeaders: [String: String]?
 
     // MARK: - Internal teardown
 
@@ -9183,6 +9179,7 @@ public final class AetherEngine: ObservableObject {
         activeEmbeddedSubtitleStreamIndex = -1
         activeSubtitleTrackIndex = nil
         loadedSidecarURL = nil
+        loadedSidecarHeaders = nil
         isSubtitleActive = false
         subtitleCues = []
         pgsStaleArrivalGates = [:]   // #100: both channels; a hold never survives the session
@@ -9199,6 +9196,7 @@ public final class AetherEngine: ObservableObject {
         cancelSidecarTask(channel: .secondary)
         setSecondarySubtitleIdentity()
         loadedSecondarySidecarURL = nil
+        loadedSecondarySidecarHeaders = nil
         isSecondarySubtitleActive = false
         secondarySubtitleCues = []
         isLoadingSecondarySubtitles = false
