@@ -196,4 +196,31 @@ struct NormalizationGainTests {
         #expect(ceilinged <= NormalizationGainProcessor.ceilingDBFS + 0.01)
         #expect((limited.context.statistics?.maxReductionDB ?? 0) > 0)
     }
+
+    /// Audit AUD-204: the tap or the volume cut was written after the asset's track read, and the
+    /// load's own supersede check came only after that. A track whose read failed once a skip had
+    /// replaced it put its cut on the shared `avPlayer.volume`, so the next track played quieter.
+    @Test("a load replaced during its track read leaves the next track's volume alone",
+          .timeLimit(.minutes(3)))
+    @MainActor
+    func supersededLoadKeepsItsCutToItself() async throws {
+        let origin = try #require(HeldHTTPOrigin())
+        defer { origin.stop() }
+        let host = AudioAVPlayerHost(ownsNowPlaying: false)
+        defer { host.stop() }
+        host.normalizationGainDB = -12
+
+        let first = Task { @MainActor in
+            try await host.load(url: origin.url("/replaced.m4a"), startPosition: nil, httpHeaders: [:])
+        }
+        try await waitFor { origin.connectionCount > 0 }
+        host.normalizationGainDB = nil
+        try await host.load(url: URL(string: "http://127.0.0.1:9/next.m4a")!, startPosition: nil,
+                            httpHeaders: [:])
+        origin.release()
+        _ = await first.result
+
+        #expect(host.avPlayer.volume == 1)
+        #expect(host.normalizationReport == nil)
+    }
 }

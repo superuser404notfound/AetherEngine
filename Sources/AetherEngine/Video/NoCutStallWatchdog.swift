@@ -95,8 +95,36 @@ final class NoCutStallWatchdog: @unchecked Sendable {
     private var firstVideoPts: Int64 = Int64.min
     private var lastVideoPts: Int64 = Int64.min
 
+    /// The exit's abort and the pump's retirement meet under their own lock, not `lock`: the abort
+    /// closes the demuxer, and the pump's `note…` calls must not queue behind that.
+    private let exitGate = NSLock()
+    private var retired = false
+
     init(videoTimeBaseSeconds: Double) {
         self.videoTimeBaseSeconds = videoTimeBaseSeconds
+    }
+
+    // MARK: - Exit gate
+
+    /// The pump calls this on its way out, before it reports its exit. Returns only once an abort
+    /// already running has finished, and no abort runs after it. A live producer rebuilt in place
+    /// reads the same demuxer, so an abort that landed after this would close the successor's read
+    /// (audit 03, cross-slice to the segment pipeline).
+    func retire() {
+        exitGate.lock()
+        retired = true
+        exitGate.unlock()
+    }
+
+    /// Runs the exit's `abort` unless the pump has already retired this watchdog. False when it did
+    /// not run.
+    @discardableResult
+    func performExit(_ abort: () -> Void) -> Bool {
+        exitGate.lock()
+        defer { exitGate.unlock() }
+        guard !retired else { return false }
+        abort()
+        return true
     }
 
     // MARK: - Pump thread

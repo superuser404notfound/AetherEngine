@@ -279,4 +279,58 @@ struct Issue406NoCutWatchdogTests {
         #expect(window.packetsRead == 4_000)
         #expect(window.audioPackets == 4_000)
     }
+
+    // MARK: - Exit gate (audit 03 cross-slice)
+
+    /// The pump reported its exit before its watchdog stopped, and cancelling the timer does not stop
+    /// a tick already running. A live producer rebuilt in place on the same demuxer could then have
+    /// that demuxer closed under it by the old producer's exit.
+    @Test("a retired watchdog runs no exit abort")
+    func retiredWatchdogAbortsNothing() {
+        let w = makeWatchdog()
+        var aborts = 0
+        #expect(w.performExit { aborts += 1 })
+        w.retire()
+        #expect(!w.performExit { aborts += 1 })
+        #expect(aborts == 1)
+    }
+
+    @Test("retire waits for an abort already running", .timeLimit(.minutes(3)))
+    func retireWaitsForRunningAbort() async throws {
+        let w = makeWatchdog()
+        let entered = DispatchSemaphore(value: 0)
+        let finish = DispatchSemaphore(value: 0)
+        let order = OrderLog()
+        Thread.detachNewThread {
+            w.performExit {
+                entered.signal()
+                finish.wait()
+                order.append("abort finished")
+            }
+        }
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            Thread.detachNewThread {
+                entered.wait()
+                Thread.detachNewThread {
+                    // Lets the abort go only once retire() is already waiting on it.
+                    while !order.contains("retire called") { usleep(1_000) }
+                    usleep(20_000)
+                    finish.signal()
+                }
+                order.append("retire called")
+                w.retire()
+                order.append("retire returned")
+                done.resume()
+            }
+        }
+        #expect(order.entries == ["retire called", "abort finished", "retire returned"])
+    }
+
+    private final class OrderLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var log: [String] = []
+        func append(_ entry: String) { lock.withLock { log.append(entry) } }
+        func contains(_ entry: String) -> Bool { lock.withLock { log.contains(entry) } }
+        var entries: [String] { lock.withLock { log } }
+    }
 }

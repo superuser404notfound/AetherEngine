@@ -619,8 +619,12 @@ extension AetherEngine {
         // AE#495: a host that answered the trust evaluator needs the media on a session the engine
         // owns, and the same stand-in does that. With sidecars it mounts a relay behind the
         // rewritten master, without them the relay stands alone.
-        let playbackURL = await prepareRemoteHLSStandIn(
+        let playbackURL = try await prepareRemoteHLSStandIn(
             originURL: url, options: options, expectedGeneration: bypassGeneration) ?? url
+        // Audit LOAD-201: a stop() or zap during the stand-in's fetches owns the host now. Mounting and
+        // playing on it would put this URL's sound on a torn-down player, or this item over the
+        // successor's. A stand-in adopted before the zap is the successor's teardown to release.
+        try checkLoadCurrent(bypassGeneration)
         // With a relay in front, the item AVPlayer fails is a loopback 502 and the refused handshake
         // happened out of its sight, so the classification has to be able to ask the side that made it.
         if let relay = remoteHLSSubtitleProxy?.server.relay {
@@ -722,7 +726,9 @@ extension AetherEngine {
 
     /// Stand a loopback origin in front of the remote master and return the URL AVPlayer should open.
     /// Nil means "play the origin directly", which is the answer for a live source, and for a session
-    /// with neither text sidecars to inject (#316) nor a trust evaluator to honor (AE#495).
+    /// with neither text sidecars to inject (#316) nor a trust evaluator to honor (AE#495). Throws
+    /// `CancellationError` when a load() or stop() superseded the session during its fetches, so nil
+    /// never stands for "superseded" (audit LOAD-201).
     ///
     /// Bitmap sidecars (`.sup`) are excluded: WebVTT is a text rendition, and promising one for a PGS file
     /// would serve an empty `.vtt` that AVPlayer never re-fetches. Those keep the overlay (and Phase D OCR).
@@ -739,7 +745,7 @@ extension AetherEngine {
     @MainActor
     private func prepareRemoteHLSStandIn(originURL: URL,
                                          options: LoadOptions,
-                                         expectedGeneration: UInt64) async -> URL? {
+                                         expectedGeneration: UInt64) async throws -> URL? {
         let mayNeedRelay = EngineTLS.serverTrustEvaluator != nil
             && originURL.scheme?.lowercased() == "https"
         let tracks = options.isLive
@@ -753,18 +759,18 @@ extension AetherEngine {
         let needsRelay = mayNeedRelay
             ? await HLSOriginRelay.systemTrustRefuses(originURL, headers: options.httpHeaders)
             : false
+        try checkLoadCurrent(expectedGeneration)
         guard !options.isLive || needsRelay else { return nil }
         guard !tracks.isEmpty || needsRelay else { return nil }
 
-        guard let prepared = await RemoteHLSSubtitleProxy.prepare(
+        let prepared = await RemoteHLSSubtitleProxy.prepare(
             originURL: originURL, tracks: tracks, httpHeaders: options.httpHeaders,
-            needsRelay: needsRelay) else { return nil }
+            needsRelay: needsRelay)
         // The playlist fetches suspend; a load()/stop() can have superseded this session meanwhile, and a
         // proxy nobody owns would keep its socket and decode task for the rest of the process.
-        guard loadGeneration == expectedGeneration else {
-            prepared.tearDown()
-            return nil
-        }
+        if loadGeneration != expectedGeneration { prepared?.tearDown() }
+        try checkLoadCurrent(expectedGeneration)
+        guard let prepared else { return nil }
         remoteHLSSubtitleProxy = prepared
         // Audit NAT-2: the NAMEs the served master carries, which the selection and the legible-list
         // filter match against, not the names the tracks asked for (the rewriter disambiguates and
@@ -2666,8 +2672,10 @@ extension AetherEngine {
             if keepAudioSwitchItem { nativeHost?.pause() }
             let heldGeneration = loadGeneration
             await holdPictureAcrossItemSwap()
-            // A stop() or load() that landed while the frame was read owns the engine now.
-            guard loadGeneration == heldGeneration, !Task.isCancelled else {
+            // A stop() or load() that landed while the frame was read owns the engine now. A caller that
+            // cancelled its task does not (audit LIF-204): nothing is torn down yet, and leaving here
+            // would strand the session paused in `.loading`, so the rebuild carries on.
+            guard loadGeneration == heldGeneration else {
                 releaseHeldPicture(reason: "rebuild superseded")
                 return nil
             }
@@ -2720,8 +2728,9 @@ extension AetherEngine {
                     return d
                 }.value
             } catch {
-                // A superseded or caller-cancelled reopen is not a reload failure.
-                if loadGeneration != gen || Task.isCancelled {
+                // A superseded reopen is not this rebuild's failure. A caller that cancelled its task
+                // still owns the session this rebuild tore down, so its failure is published (audit LOAD-209).
+                if loadGeneration != gen {
                     EngineLog.emit("[AetherEngine] reload superseded during custom reader reopen; unwinding", category: .engine)
                     return nil
                 }
@@ -2750,8 +2759,9 @@ extension AetherEngine {
                     return d
                 }.value
             } catch {
-                // A superseded or caller-cancelled reopen is not a reload failure.
-                if loadGeneration != gen || Task.isCancelled {
+                // A superseded reopen is not this rebuild's failure. A caller that cancelled its task
+                // still owns the session this rebuild tore down, so its failure is published (audit LOAD-209).
+                if loadGeneration != gen {
                     EngineLog.emit("[AetherEngine] reload superseded during disc URL reopen; unwinding", category: .engine)
                     return nil
                 }
@@ -2985,11 +2995,12 @@ extension AetherEngine {
                 armLiveReloadWatchdog(generation: gen)
             }
             EngineLog.emit("[AetherEngine] reload: state=\(state == .playing ? ".playing" : ".paused") total=\(elapsedMs(since: reloadStart))ms", category: .engine)
-        } catch is CancellationError {
+        } catch is CancellationError where loadGeneration != gen {
             // Superseded by a newer load/stop: it owns the engine state.
             return nil
         } catch {
-            guard loadGeneration == gen, !Task.isCancelled else { return nil }
+            // Audit LOAD-209: supersession by generation alone, as above.
+            guard loadGeneration == gen else { return nil }
             releaseHeldPicture(reason: "rebuild failed")
             EngineLog.emit(
                 "[AetherEngine] selectAudioTrack reload failed: \(error), playback stopped",
@@ -3236,9 +3247,10 @@ extension AetherEngine {
                 // from the raw spans so it does not carry the retired epoch's offset until the next
                 // segment lands (AE#468 follow-up).
                 self.republishResidentRanges()
-                // AE#422: read off-main before building the line (see `avPlayerBufferAheadSeconds`).
-                let avBufAhead = await self.avPlayerBufferAheadSeconds()
                 // Re-fold immediately so currentTime doesn't lag the next periodic tick (origin-corrected).
+                // Audit LOAD-206: before the read below, which only the log line needs. That read can
+                // wait seconds on a stalled queue (AE#422), and a shift, seek or zap that lands meanwhile
+                // must not get this one's fold written over its clock.
                 self.clock.currentTime = self.isLive && self.videoRoute == .loopback
                     ? self.nativeClockSeconds + self.liveSessionShiftSeconds
                         + self.liveItemAxisOffsetSeconds
@@ -3246,6 +3258,8 @@ extension AetherEngine {
                         sourcePTS: self.nativeClockSeconds + activeShift,
                         origin: self.displayOrigin(forShift: activeShift))
                 // sourceTime re-folds on next $renderedTime tick; keeping it there tracks the rendered picture, not the optimistic clock (#49).
+                // AE#422: read off-main before building the line (see `avPlayerBufferAheadSeconds`).
+                let avBufAhead = await self.avPlayerBufferAheadSeconds()
                 EngineLog.emit(
                     "[AetherEngine] VOD shift published: \(String(format: "%.3f", seconds))s "
                     + "(prev \(String(format: "%.3f", prevShift))s, delta \(String(format: "%.3f", delta))s, "

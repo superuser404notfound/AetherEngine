@@ -681,6 +681,7 @@ A custom source (`IOReader`, the disc-folder readers) is described under [Custom
 - The kept transport includes a pause the viewer made in AVKit's own controls, which call the `AVPlayer` directly.
 - **Position.** A VOD session comes back at the playhead; a playhead at or below 1 s restarts from the beginning. A live session does not keep its position: it rejoins at the live edge, and the DVR window starts over.
 - **It ends an active recording** with `.ended(.sourceReset)`, because the reopened source can bring back different codecs (see [Recording a live stream](#recording-a-live-stream)).
+- **Cancelling the caller's Task.** A URL source reopens through `load()`, so a cancel ends it the way [Cancelling a load](#cancelling-a-load) describes. A custom source rebuilds in place and does not stop for a cancel: only a `stop()` or a newer `load()` supersedes it, and then it throws `CancellationError`. If that rebuild fails, it throws the failure and publishes `.error`, cancelled Task or not.
 
 To change options at the same time, use [`reloadAtCurrentPosition(applying:)`](#correcting-a-loadoption-without-restarting-the-item).
 
@@ -937,7 +938,7 @@ A rebuild consumes no new stream. Anything a host sets up at the moment it hands
 | `volume` | Pass 0.0 to 1.0 (not clamped). A write before a session exists is remembered and applied at load. |
 | `selectTitle(id:)`, `selectChapter(id:)` | Disc titles and chapters. See the note below. |
 
-**Titles and chapters.** `selectTitle` is synchronous and returns before the switch. It rebuilds the session at the start of the new title, like a fresh load. A pick made while a `load` is still running waits for that load to return, as an audio pick does. It ignores an unknown id, the title already playing, and a forward-only custom source; a reload that fails is only logged. `selectChapter` looks only in `discChapters` and seeks with `exact: true`. It cannot reach container chapters (`mediaChapters`): pass their `startSeconds` to `seek(to:exact: true)`.
+**Titles and chapters.** `selectTitle` is synchronous and returns before the switch. It rebuilds the session at the start of the new title, like a fresh load. A pick made while a `load` is still running waits for that load to return, as an audio pick does. When several picks wait like that, only the last one rebuilds. It ignores an unknown id, the title already playing, and a forward-only custom source; a reload that fails is only logged. `selectChapter` looks only in `discChapters` and seeks with `exact: true`. It cannot reach container chapters (`mediaChapters`): pass their `startSeconds` to `seek(to:exact: true)`.
 
 ### Seeking
 
@@ -1953,7 +1954,7 @@ Two families: cache-backed stills from the active session (no second connection)
 | `clearResidentPreviewFrames()` | Cancels in-flight resident previews and drops their cached approximations; playback media is untouched. |
 | `releaseScrubPreviewDecoders()` | Closes every still decoder and returns once they are closed. Call it when a scrub ends. Cached stills stay. See [Memory while scrubbing](#memory-while-scrubbing). |
 
-1. **`scrubThumbnail`** works on single-connection sources where a second demuxer is refused (debrid / torrent links, IPTV accounts capped at one request). A native session decodes from its segment cache; a software session from its packet cache (VOD, AE#605) or its DVR packet ring (live, #544). A VOD target outside what is retained returns nil, not the nearest retained frame.
+1. **`scrubThumbnail`** works on single-connection sources where a second demuxer is refused (debrid / torrent links, IPTV accounts capped at one request). A native session decodes from its segment cache; a software session from its packet cache (VOD, AE#605) or its DVR packet ring (live, #544). A VOD target outside what is retained returns nil, not the nearest retained frame. A still whose session ended while it decoded (a `stop()`, a new `load()`) also returns nil, so a zap never puts the old item's picture on the new timeline.
 2. **The two variants** also serve software sessions. The live one reads the DVR packet ring (#544). The VOD one reads the packet cache its seeks land in (AE#605), from keyframe to target, on the same axis `seek(to:)` takes.
 
 **`supportsCacheBackedStills`** is true for any native session, a software live session, a software VOD session reading a remote source, and one playing a local file. False before load.
@@ -1977,6 +1978,7 @@ Two families: cache-backed stills from the active session (no second connection)
 A still decoder costs memory in proportion to the video's size. On an Apple TV 4K one VideoToolbox decoder for 4K HEVC 10-bit holds 100 to 160 MB of reference frames, a 1080p one a quarter of that (AE#1059).
 
 - The engine keeps up to six recent segments ready for stills. Their open decoders share a budget of six 1080p pictures, so a 1080p title keeps all six open and a 4K title keeps one. The others close down to their cached still, and a repeat request at the same width is still answered from that cache.
+- Live and VOD sessions follow the same rules, and every still API shares the one list.
 - Before a decoder opens, the older ones close, so the budget holds at the peak and not only after it.
 - A resident segment's decoder closes by itself after 3 s without a request.
 - Call `releaseScrubPreviewDecoders()` when the scrub ends to close the rest at once.

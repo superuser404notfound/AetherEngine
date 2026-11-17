@@ -154,7 +154,7 @@ final class AudioAVPlayerHost {
         AudioRatePolicy.apply(to: item)
         // Sodalite#242: the mix has to be on the item before AVPlayer renders a sample of it, or the
         // first moments of a lifted track play at the source level.
-        await installNormalization(on: item, asset: asset)
+        await installNormalization(on: item, asset: asset, token: token)
         guard token == loadToken else {
             EngineLog.emit("[AudioAVPlayerHost] load superseded while preparing normalization; item dropped",
                            category: .swPlayback)
@@ -463,18 +463,23 @@ final class AudioAVPlayerHost {
 
     /// Builds the tap for `item`, or, when the asset has no audio track to bind it to or MediaToolbox
     /// refuses one, lets `avPlayer.volume` carry the cut part of the gain.
-    private func installNormalization(on item: AVPlayerItem, asset: AVURLAsset) async {
+    private func installNormalization(on item: AVPlayerItem, asset: AVURLAsset, token: UInt64) async {
         normalizationTap = nil
         normalizationTapRefusal = nil
         setVolumeFallback(nil)
         guard let gain = normalizationGainDB.map(NormalizationGainProcessor.clampedGainDB) else { return }
         let track: AVAssetTrack?
+        var refusal: String?
         do {
             track = try await asset.loadTracks(withMediaType: .audio).first
         } catch {
             track = nil
-            normalizationTapRefusal = "audio track did not load (\(error.localizedDescription))"
+            refusal = "audio track did not load (\(error.localizedDescription))"
         }
+        // Audit AUD-204: the tap, the refusal and the volume cut are the host's, and a newer load owns
+        // them once it has started. Only the item this load built is still its own.
+        guard token == loadToken else { return }
+        normalizationTapRefusal = refusal
         attachTap(gainDB: gain, item: item, track: track)
     }
 

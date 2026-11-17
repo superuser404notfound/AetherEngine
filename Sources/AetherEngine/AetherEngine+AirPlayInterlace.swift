@@ -27,6 +27,18 @@ extension AetherEngine {
         staysLocal && interlaceReceiverAtLoad == false && reopensAtPosition
     }
 
+    /// Whether a failed AE#1070 reload puts the old receiver answer back. Only when no load ran since
+    /// the decision (audit LOAD-207): the reload's own teardown moves the generation, and so does a host
+    /// load that superseded it, and either way that load wrote the answer the session now has.
+    nonisolated static func interlaceReloadFailureRestoresReceiver(
+        generationAtDecision: UInt64,
+        generationNow: UInt64,
+        receiverAtLoadNow: Bool?,
+        receiverNow: Bool
+    ) -> Bool {
+        generationAtDecision == generationNow && receiverAtLoadNow == receiverNow
+    }
+
     /// A URL source reopens at the playhead, a live one rejoins its edge. A forward-only VOD source would
     /// restart from byte 0, and a custom source keeps its route until the next load.
     var interlaceRouteReopensAtPosition: Bool {
@@ -52,13 +64,20 @@ extension AetherEngine {
             "[AirPlay] AE#1070 interlaced H.264: a video receiver \(receiverNow ? "now holds" : "let go of") "
             + "the route; reloading onto the \(receiverNow ? "native route so it gets the picture" : "software deinterlacer")",
             category: .engine)
+        let generation = loadGeneration
         Task {
+            // A host load that ran first decided the route itself.
+            guard loadGeneration == generation else { return }
             do {
                 try await reloadAtCurrentPosition()
             } catch {
                 // A reload that threw before its load decided the route again leaves the session where it
                 // was, so the next route change has to see the old answer and try again.
-                if interlaceRouteReceiverAtLoad == receiverNow { interlaceRouteReceiverAtLoad = receiverBefore }
+                if Self.interlaceReloadFailureRestoresReceiver(
+                    generationAtDecision: generation, generationNow: loadGeneration,
+                    receiverAtLoadNow: interlaceRouteReceiverAtLoad, receiverNow: receiverNow) {
+                    interlaceRouteReceiverAtLoad = receiverBefore
+                }
                 EngineLog.emit("[AirPlay] AE#1070 interlace route reload failed: \(error)", category: .engine)
             }
         }

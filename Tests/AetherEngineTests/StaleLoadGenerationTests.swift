@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import AetherEngine
@@ -25,5 +26,61 @@ struct StaleLoadGenerationTests {
         }
         #expect(engine.nativeHost == nil)
         #expect(engine.playbackBackend == .none)
+    }
+
+    /// Audit LOAD-201: with a text sidecar declared, the bypass fetches the master for its stand-in
+    /// before it mounts anything. A load that a stop() superseded during that fetch used to go on and
+    /// mount its URL on the host the stop() had just torn down, and play it: sound with no player.
+    @Test("A remote-HLS load stopped during its stand-in fetch mounts nothing", .timeLimit(.minutes(3)))
+    func standInFetchThenStopMountsNothing() async throws {
+        let origin = try #require(HeldHTTPOrigin())
+        defer { origin.stop() }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+
+        let stale = Task { @MainActor in
+            try await engine.load(url: origin.url("/stopped/master.m3u8"),
+                                  options: Self.bypassWithSidecar(origin))
+        }
+        try await waitFor { origin.connectionCount > 0 }
+        let host = try #require(engine.nativeHost)
+        engine.stop()
+        origin.release()
+
+        await #expect(throws: CancellationError.self) { try await stale.value }
+        #expect(host.avPlayer.currentItem == nil)
+        #expect(host.avPlayer.rate == 0)
+        #expect(engine.nativeHost == nil)
+        #expect(engine.state == .idle)
+    }
+
+    /// Audit LOAD-201: the same fetch outlived by a zap. The native host survives a native-to-native
+    /// load, so the stale load mounted its own URL over the successor's item on the shared player.
+    @Test("A remote-HLS load superseded during its stand-in fetch leaves the successor's item alone",
+          .timeLimit(.minutes(3)))
+    func standInFetchThenZapLeavesSuccessor() async throws {
+        let origin = try #require(HeldHTTPOrigin())
+        defer { origin.stop() }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+
+        let stale = Task { @MainActor in
+            try await engine.load(url: origin.url("/zapped/master.m3u8"),
+                                  options: Self.bypassWithSidecar(origin))
+        }
+        try await waitFor { origin.connectionCount > 0 }
+        let successorURL = URL(string: "http://127.0.0.1:9/successor.m3u8")!
+        _ = try await engine.load(url: successorURL, options: LoadOptions(nativeRemoteHLS: true))
+        origin.release()
+
+        await #expect(throws: CancellationError.self) { try await stale.value }
+        let mounted = engine.nativeHost?.avPlayer.currentItem?.asset as? AVURLAsset
+        #expect(mounted?.url == successorURL)
+    }
+
+    private static func bypassWithSidecar(_ origin: HeldHTTPOrigin) -> LoadOptions {
+        LoadOptions(nativeRemoteHLS: true,
+                    externalSubtitles: [ExternalSubtitleTrack(url: origin.url("/en.srt"),
+                                                              name: "English", language: "en")])
     }
 }

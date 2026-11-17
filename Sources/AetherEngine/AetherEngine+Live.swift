@@ -31,21 +31,12 @@ extension AetherEngine {
         guard let source else { return nil }
         // Guard against zap/stop clearing the LRU: a stale extractor's segment indices collide with the next channel's.
         guard loadGeneration == gen else { return nil }
-        let extractor: FrameExtractor
-        if let idx = scrubThumbnailExtractors.firstIndex(where: { $0.segmentIndex == source.segmentIndex }) {
-            let hit = scrubThumbnailExtractors.remove(at: idx)
-            scrubThumbnailExtractors.append(hit)
-            extractor = hit.extractor
-        } else {
-            guard let reader = source.makeReader() else { return nil }
-            extractor = FrameExtractor(reader: reader, formatHint: "mp4")
-            scrubThumbnailExtractors.append((source.segmentIndex, extractor))
-            while scrubThumbnailExtractors.count > 2 {
-                let evicted = scrubThumbnailExtractors.removeFirst()
-                Task { await evicted.extractor.shutdown() }
-            }
+        guard let extractor = scrubExtractor(key: source.segmentIndex, make: {
+            source.makeReader().map { FrameExtractor(reader: $0, formatHint: "mp4") }
+        }) else { return nil }
+        return await decodeScrubStill(on: extractor, generation: gen) {
+            await extractor.thumbnail(at: outputSeconds, maxWidth: maxWidth)
         }
-        return await extractor.thumbnail(at: outputSeconds, maxWidth: maxWidth)
     }
 
     /// 1 Hz timer to update live surfaces while paused (the `$currentTime` sink already covers the playing case).
