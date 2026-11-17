@@ -18,6 +18,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+SubtitleDelivery.swift` | Emits the #357 subtitle-delivery line. See note. |
 | `AetherEngine+SubtitleResolution.swift` | Emits the #250 subtitle-resolution line. See note. |
 | `AetherEngine+AudioTap.swift` | Opt-in decoded PCM audio tap (#95): `installAudioTap()` returns the `AsyncStream` and picks native loopback, remote HLS or software mirror. |
+| `AetherEngine+Background.swift` | The app lifecycle: background and foreground return, the owed background decision (CORE-2, LIF-101), the #127 grace window, media-services reset and audio-session interruptions. |
 | `AetherEngine+BackgroundAudioTestHooks.swift` | DEBUG-only hooks so `aetherctl bgaudio` can toggle the software background-audio keepalive without a `UIApplication` lifecycle. Never shipped. |
 | `PlaybackClock.swift` | `engine.clock`: the ~10 Hz values (`currentTime`, `sourceTime`, `bufferedPosition`, `progress`, live-edge fields) as a separate `ObservableObject`. |
 | `PresentationAxis.swift` | Display-axis fold for disc titles (source PTS to the 0-based published axis, AE#105). |
