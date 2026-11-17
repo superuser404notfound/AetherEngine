@@ -907,25 +907,22 @@ final class UpscaleKernels: @unchecked Sendable {
     let toRGBA: MTLComputePipelineState
     let toNV12: MTLComputePipelineState
 
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var byDevice: [UInt64: UpscaleKernels] = [:]
+    private static let cache = MetalPipelineCache<UpscaleKernels>()
 
     private init(toRGBA: MTLComputePipelineState, toNV12: MTLComputePipelineState) {
         self.toRGBA = toRGBA
         self.toNV12 = toNV12
     }
 
+    /// nil when they did not build; that is kept, so a later stage does not compile them again.
     static func shared(for device: MTLDevice) -> UpscaleKernels? {
-        lock.lock(); defer { lock.unlock() }
-        if let kernels = byDevice[device.registryID] { return kernels }
-        guard let library = try? device.makeLibrary(source: UpscaleShaderSource.source, options: nil),
-              let f1 = library.makeFunction(name: "nv12ToRGBA"), let f2 = library.makeFunction(name: "rgbaToNV12"),
-              let toRGBA = try? device.makeComputePipelineState(function: f1),
-              let toNV12 = try? device.makeComputePipelineState(function: f2)
-        else { return nil }
-        let kernels = UpscaleKernels(toRGBA: toRGBA, toNV12: toNV12)
-        byDevice[device.registryID] = kernels
-        return kernels
+        try? cache.resolve(device: device) {
+            let library = try device.makeLibrary(source: UpscaleShaderSource.source, options: nil)
+            guard let f1 = library.makeFunction(name: "nv12ToRGBA"), let f2 = library.makeFunction(name: "rgbaToNV12")
+            else { throw UpscaleError("upscale kernels missing") }
+            return UpscaleKernels(toRGBA: try device.makeComputePipelineState(function: f1),
+                                  toNV12: try device.makeComputePipelineState(function: f2))
+        }
     }
 }
 

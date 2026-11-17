@@ -5,7 +5,8 @@ import Metal
 @testable import AetherEngine
 
 /// The Metal plumbing the GPU frame stages share (audit GPU-R201): the dispatch fallback for GPUs without
-/// non-uniform threadgroups and the lease that keeps a frame's texture cache alive.
+/// non-uniform threadgroups, the lease that keeps a frame's texture cache alive, and the per-device
+/// pipeline cache that keeps a failed build.
 @Suite("Metal frame I/O shared by the GPU stages", .timeLimit(.minutes(3)),
        .enabled(if: MTLCreateSystemDefaultDevice() != nil, "needs a Metal device"))
 struct MetalFrameIOTests {
@@ -49,5 +50,36 @@ struct MetalFrameIOTests {
         io = nil
         #expect(lease.cache === cache)
         #expect(lease.count == 2)
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func bump() { lock.lock(); value += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    private struct BuildFailed: Error {}
+
+    /// Audit GPU-R202: the chain's and the upscaler's kernels kept only successes, so a build that failed was
+    /// compiled again (two libraries for the chain) on every tone-map rebuild and every upscaler stage.
+    @Test("a failed pipeline build is kept and later callers fail without compiling again")
+    func failedBuildIsKept() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let cache = MetalPipelineCache<Int>()
+        let compiles = Counter()
+        for _ in 0..<5 {
+            #expect(throws: BuildFailed.self) {
+                try cache.resolve(device: device) {
+                    compiles.bump()
+                    throw BuildFailed()
+                }
+            }
+        }
+        #expect(compiles.count == 1)
+        cache.removeAll()
+        #expect(try cache.resolve(device: device) { compiles.bump(); return 7 } == 7)
+        #expect(try cache.resolve(device: device) { compiles.bump(); return 8 } == 7)
+        #expect(compiles.count == 2)
     }
 }

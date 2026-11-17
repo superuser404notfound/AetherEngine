@@ -378,7 +378,7 @@ See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.
   - A stage replaced while its pass ran (the MetalFX-only fallback, a rebuild) delivers that frame as decoded.
 - `FrameChain.encode` and the upscaler's `encode` return the work uncommitted, because Metal takes a completion handler only before the commit. The synchronous `process` and `upscale` (tests, the probe) commit and wait; `upscale` also waits for an off-thread ML pass. The benchmark still runs the ML pass in line, so its wall time is one frame start to finish.
 
-**Shared Metal plumbing.** The frame chain, the upscaler's MetalFX path, the FEL composer and `GPUFrameConverter` make their plane textures, dispatch their kernels and hold their textures through one helper, `MetalFrameIO`.
+**Shared Metal plumbing.** The frame chain, the upscaler's MetalFX path, the FEL composer and `GPUFrameConverter` make their plane textures, dispatch their kernels and hold their textures through one helper, `MetalFrameIO`. Their pipelines are compiled once per device and process (`MetalPipelineCache`), and a failed build is kept, so it is not compiled again for every stage.
 
 A GPU without non-uniform threadgroups (the A10X in the first Apple TV 4K) cannot run `dispatchThreads`. There every kernel is dispatched in whole threadgroups, and each kernel's bounds guard drops the threads past the picture's edge.
 

@@ -56,7 +56,12 @@ final class FrameChain {
     init(device: MTLDevice, queue: MTLCommandQueue, sourceWidth: Int, sourceHeight: Int,
          targetWidth: Int, targetHeight: Int, stages: [any FrameChainStage], fusesRoundTrip: Bool = true,
          io: MetalFrameIO? = nil) throws {
-        guard let kernels = FrameChainKernels.shared(for: device) else { throw Failure("chain kernels not built") }
+        let kernels: FrameChainKernels
+        do {
+            kernels = try FrameChainKernels.shared(for: device)
+        } catch {
+            throw Failure("chain kernels not built", underlying: error)
+        }
         guard let io = io ?? MetalFrameIO(device: device) else { throw Failure("no Metal texture cache") }
         guard targetWidth % 2 == 0, targetHeight % 2 == 0 else { throw Failure("odd target size") }
         self.device = device
@@ -435,7 +440,7 @@ struct FrameChainColorParams {
     }
 }
 
-/// The chain's pipelines, compiled once per process and device.
+/// The chain's pipelines, compiled once per process and device (`MetalPipelineCache`).
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class FrameChainKernels: @unchecked Sendable {
     let toRGB: MTLComputePipelineState
@@ -454,8 +459,7 @@ final class FrameChainKernels: @unchecked Sendable {
     let clampStatsColumns: MTLComputePipelineState
     let clampHighlights: MTLComputePipelineState
 
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var byDevice: [UInt64: FrameChainKernels] = [:]
+    private static let cache = MetalPipelineCache<FrameChainKernels>()
 
     private init(toRGB: MTLComputePipelineState, toYCbCr: MTLComputePipelineState, roundTrip: MTLComputePipelineState,
                  roundTripWide: MTLComputePipelineState, roundTripToneMapped: MTLComputePipelineState,
@@ -481,11 +485,14 @@ final class FrameChainKernels: @unchecked Sendable {
         self.lineArtDepthToSpace = lineArtDepthToSpace
     }
 
-    static func shared(for device: MTLDevice) -> FrameChainKernels? {
-        lock.lock(); defer { lock.unlock() }
-        if let kernels = byDevice[device.registryID] { return kernels }
+    /// The device's kernels, compiled on first use; a failed build is kept and rethrown.
+    static func shared(for device: MTLDevice) throws -> FrameChainKernels {
+        try cache.resolve(device: device) { try compile(device) }
+    }
+
+    private static func compile(_ device: MTLDevice) throws -> FrameChainKernels {
         /// `constants` are bool function constants by index: 0 `clampsHighlights`, 1 `toneMapsInRoundTrip`.
-        func pipeline(_ library: MTLLibrary, _ name: String, constants: [Int: Bool] = [:]) -> MTLComputePipelineState? {
+        func pipeline(_ library: MTLLibrary, _ name: String, constants: [Int: Bool] = [:]) throws -> MTLComputePipelineState {
             let function: MTLFunction?
             if !constants.isEmpty {
                 let values = MTLFunctionConstantValues()
@@ -493,39 +500,30 @@ final class FrameChainKernels: @unchecked Sendable {
                     var v = value
                     values.setConstantValue(&v, type: .bool, index: index)
                 }
-                function = try? library.makeFunction(name: name, constantValues: values)
+                function = try library.makeFunction(name: name, constantValues: values)
             } else {
                 function = library.makeFunction(name: name)
             }
-            return function.flatMap { try? device.makeComputePipelineState(function: $0) }
+            guard let function else { throw FrameChain.Failure("kernel \(name) missing") }
+            return try device.makeComputePipelineState(function: function)
         }
-        guard let chain = try? device.makeLibrary(source: FrameChainShaderSource.source, options: nil),
-              let lineArt = try? device.makeLibrary(source: LineArtShaderSource.source, options: nil),
-              let toRGB = pipeline(chain, "frameChainToRGB"), let toYCbCr = pipeline(chain, "frameChainToYCbCr"),
-              let roundTrip = pipeline(chain, "frameChainRoundTrip", constants: [1: false]),
-              let roundTripWide = pipeline(chain, "frameChainRoundTripWide", constants: [1: false]),
-              let roundTripToneMapped = pipeline(chain, "frameChainRoundTrip", constants: [1: true]),
-              let roundTripWideToneMapped = pipeline(chain, "frameChainRoundTripWide", constants: [1: true]),
-              let toneMap = pipeline(chain, "frameChainToneMap"),
-              let lineArtOutput = pipeline(chain, "frameChainLineArtOutput", constants: [0: false]),
-              let lineArtOutputClamped = pipeline(chain, "frameChainLineArtOutput", constants: [0: true]),
-              let clampStatsRows = pipeline(chain, "frameChainClampStatsRows"),
-              let clampStatsColumns = pipeline(chain, "frameChainClampStatsColumns"),
-              let clampHighlights = pipeline(chain, "frameChainClampHighlights"),
-              let depthToSpace = pipeline(lineArt, LineArtShaderSource.depthToSpaceKernel)
-        else { return nil }
-        let convolutions = LineArtShaderSource.convolutionKernels.compactMap { pipeline(lineArt, $0) }
-        let restore = LineArtShaderSource.restoreKernels.compactMap { pipeline(lineArt, $0) }
-        guard convolutions.count == LineArtShaderSource.convolutionKernels.count,
-              restore.count == LineArtShaderSource.restoreKernels.count else { return nil }
-        let kernels = FrameChainKernels(
-            toRGB: toRGB, toYCbCr: toYCbCr, roundTrip: roundTrip, roundTripWide: roundTripWide,
-            roundTripToneMapped: roundTripToneMapped, roundTripWideToneMapped: roundTripWideToneMapped, toneMap: toneMap,
-            lineArtConvolutions: convolutions, lineArtDepthToSpace: depthToSpace,
-            lineArtOutput: lineArtOutput, lineArtOutputClamped: lineArtOutputClamped, restoreConvolutions: restore,
-            clampStatsRows: clampStatsRows, clampStatsColumns: clampStatsColumns, clampHighlights: clampHighlights)
-        byDevice[device.registryID] = kernels
-        return kernels
+        let chain = try device.makeLibrary(source: FrameChainShaderSource.source, options: nil)
+        let lineArt = try device.makeLibrary(source: LineArtShaderSource.source, options: nil)
+        return FrameChainKernels(
+            toRGB: try pipeline(chain, "frameChainToRGB"), toYCbCr: try pipeline(chain, "frameChainToYCbCr"),
+            roundTrip: try pipeline(chain, "frameChainRoundTrip", constants: [1: false]),
+            roundTripWide: try pipeline(chain, "frameChainRoundTripWide", constants: [1: false]),
+            roundTripToneMapped: try pipeline(chain, "frameChainRoundTrip", constants: [1: true]),
+            roundTripWideToneMapped: try pipeline(chain, "frameChainRoundTripWide", constants: [1: true]),
+            toneMap: try pipeline(chain, "frameChainToneMap"),
+            lineArtConvolutions: try LineArtShaderSource.convolutionKernels.map { try pipeline(lineArt, $0) },
+            lineArtDepthToSpace: try pipeline(lineArt, LineArtShaderSource.depthToSpaceKernel),
+            lineArtOutput: try pipeline(chain, "frameChainLineArtOutput", constants: [0: false]),
+            lineArtOutputClamped: try pipeline(chain, "frameChainLineArtOutput", constants: [0: true]),
+            restoreConvolutions: try LineArtShaderSource.restoreKernels.map { try pipeline(lineArt, $0) },
+            clampStatsRows: try pipeline(chain, "frameChainClampStatsRows"),
+            clampStatsColumns: try pipeline(chain, "frameChainClampStatsColumns"),
+            clampHighlights: try pipeline(chain, "frameChainClampHighlights"))
     }
 }
 

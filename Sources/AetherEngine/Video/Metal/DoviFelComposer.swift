@@ -177,26 +177,7 @@ final class DoviFelComposer: @unchecked Sendable {
 
         /// Per-device results, failures included: a shader that does not compile will not compile on the next
         /// frame either, so the failure is kept and every later call fails fast instead of recompiling.
-        final class Cache: @unchecked Sendable {
-            private let lock = NSLock()
-            private var entries: [ObjectIdentifier: Result<SharedPipelines, Error>] = [:]
-
-            func resolve(device: MTLDevice, compile: () throws -> SharedPipelines) throws -> SharedPipelines {
-                lock.lock()
-                defer { lock.unlock() }
-                let key = ObjectIdentifier(device)
-                if let entry = entries[key] { return try entry.get() }
-                let result = Result { try compile() }
-                entries[key] = result
-                return try result.get()
-            }
-
-            func removeAll() {
-                lock.lock()
-                entries.removeAll()
-                lock.unlock()
-            }
-        }
+        typealias Cache = MetalPipelineCache<SharedPipelines>
 
         private static let shared = Cache()
 

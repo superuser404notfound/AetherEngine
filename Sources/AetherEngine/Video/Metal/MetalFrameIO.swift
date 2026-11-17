@@ -101,3 +101,29 @@ final class MetalTextureLease: @unchecked Sendable {
         held.removeAll()
     }
 }
+
+/// Compiled pipelines per Metal device, kept for the process (audit GPU-R202). A failed build is kept
+/// too: a shader that did not compile will not compile on the next try either, so later callers fail at
+/// once instead of compiling the libraries again on every stage build. Callers that arrive while the
+/// first build runs wait for it instead of compiling twice.
+final class MetalPipelineCache<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [UInt64: Result<Value, Error>] = [:]
+
+    init() {}
+
+    func resolve(device: MTLDevice, compile: () throws -> Value) throws -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        if let entry = entries[device.registryID] { return try entry.get() }
+        let result = Result { try compile() }
+        entries[device.registryID] = result
+        return try result.get()
+    }
+
+    func removeAll() {
+        lock.lock()
+        entries.removeAll()
+        lock.unlock()
+    }
+}
