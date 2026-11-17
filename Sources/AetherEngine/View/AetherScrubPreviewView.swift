@@ -115,11 +115,13 @@ public final class AetherScrubPreviewView: PlatformBaseView {
         players[back].replaceCurrentItem(with: item)
         let deadline = ContinuousClock.now + .seconds(2)
         while !(item.status == .readyToPlay && playerLayers[back].isReadyForDisplay) {
-            guard item.status != .failed, ContinuousClock.now < deadline else {
+            // Audit GPU-206: a cancelled task ends the wait at its next tick instead of spinning the main
+            // actor until the deadline (a cancelled `Task.sleep` returns at once).
+            guard item.status != .failed, ContinuousClock.now < deadline,
+                  await DisplayCriteriaController.gateTick(milliseconds: 4, isCurrent: { true }) else {
                 if mine == request { players[back].replaceCurrentItem(with: nil) }
                 return false
             }
-            try? await Task.sleep(for: .milliseconds(4))
             guard mine == request else { return false }
         }
         CATransaction.begin()
