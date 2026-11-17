@@ -616,7 +616,7 @@ enum LogRedaction {
     private static let maximumEncodedLength = 16 * 1024
 
     /// Whether the first two decoded bytes of the run read as the opening of a JSON object or array.
-    private static func startsLikeJSON(_ bytes: [UInt8], at index: Int) -> Bool {
+    static func startsLikeJSON(_ bytes: [UInt8], at index: Int) -> Bool {
         func sextet(_ b: UInt8) -> UInt8? {
             switch b {
             case UInt8(ascii: "A")...UInt8(ascii: "Z"): return b - UInt8(ascii: "A")

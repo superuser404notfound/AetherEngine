@@ -445,12 +445,17 @@ struct LogRedactionTests {
         #expect(LogRedaction.redact("see http://a.test and foo@bar") == "see http://a.test and foo@bar")
     }
 
-    @Test("a long run of e- starts redacts in linear time")
+    /// The scan used to start at every `e` after a `-` and run to the end of the line, quadratic on
+    /// `e-e-e-...`. The JSON prefilter rejects those starts before any scan; checked directly, since a
+    /// wall-clock bound flaked under the parallel suite.
+    @Test("a long run of e- starts is rejected before any scan")
     func repeatedEncodedStarts() {
-        let line = "https://h/" + String(repeating: "e-", count: 32 * 1024)
-        let start = ContinuousClock.now
-        _ = LogRedaction.redact(line)
-        #expect(ContinuousClock.now - start < .milliseconds(500))
+        let run = Array(("https://h/" + String(repeating: "e-", count: 32 * 1024)).utf8)
+        let starts = run.indices.filter { run[$0] == UInt8(ascii: "e") }
+        #expect(starts.allSatisfy { !LogRedaction.startsLikeJSON(run, at: $0) })
+        #expect(LogRedaction.startsLikeJSON(Array("eyJzdG9y".utf8), at: 0))
+        let line = String(decoding: run, as: UTF8.self)
+        #expect(LogRedaction.redact(line) == line)
         let blob = "http://addon/v1-eyJzdG9yZXMiOlsiYSJdLCJjIjoiU0VDUkVUeHl6IiwidCI6InQifQ/manifest.json"
         #expect(!LogRedaction.redact(blob).contains("eyJzdG9yZXM"))
     }
