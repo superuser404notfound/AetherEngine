@@ -938,7 +938,7 @@ A rebuild consumes no new stream. Anything a host sets up at the moment it hands
 | `volume` | Pass 0.0 to 1.0 (not clamped). A write before a session exists is remembered and applied at load. |
 | `selectTitle(id:)`, `selectChapter(id:)` | Disc titles and chapters. See the note below. |
 
-**Titles and chapters.** `selectTitle` is synchronous and returns before the switch. It rebuilds the session at the start of the new title, like a fresh load. A pick made while a `load` is still running waits for that load to return, as an audio pick does. It ignores an unknown id, the title already playing, and a forward-only custom source; a reload that fails is only logged. `selectChapter` looks only in `discChapters` and seeks with `exact: true`. It cannot reach container chapters (`mediaChapters`): pass their `startSeconds` to `seek(to:exact: true)`.
+**Titles and chapters.** `selectTitle` is synchronous and returns before the switch. It rebuilds the session at the start of the new title, like a fresh load. A pick made while a `load` is still running waits for that load to return, as an audio pick does. When several picks wait like that, only the last one rebuilds. It ignores an unknown id, the title already playing, and a forward-only custom source; a reload that fails is only logged. `selectChapter` looks only in `discChapters` and seeks with `exact: true`. It cannot reach container chapters (`mediaChapters`): pass their `startSeconds` to `seek(to:exact: true)`.
 
 ### Seeking
 

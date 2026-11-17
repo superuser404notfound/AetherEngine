@@ -4268,6 +4268,9 @@ public final class AetherEngine: ObservableObject {
     var heldPictureLastRoute: String?
     private var pendingAudioSelection: Int?
     private var audioSelectionEpoch = UUID()
+    /// Audit LIF-208: bumped by every `selectTitle`, so of the picks queued behind a load only the
+    /// newest rebuilds.
+    private var titleSelectionToken: UInt64 = 0
 
     private func cancelPendingAudioSelection() {
         audioSelectionEpoch = UUID()
@@ -8731,9 +8734,12 @@ public final class AetherEngine: ObservableObject {
             )
             return
         }
+        // A pick of the title already playing still replaces one queued before it.
+        titleSelectionToken &+= 1
         if activeDiscTitleID == id { return }
 
         EngineLog.emit("[AetherEngine] selectTitle: scheduling switch to title \(id)", category: .engine)
+        let token = titleSelectionToken
         let gen = loadGeneration
         // Stream indices are per title, so an initial subtitle track id named for the old title could
         // activate an unrelated track on the new one. Drop it here (both reload paths read loadedOptions);
@@ -8746,7 +8752,14 @@ public final class AetherEngine: ObservableObject {
             // AE#1061: the custom branch rebuilds exactly as an audio pick does, the URL branch would
             // unwind the host's load() with a CancellationError. Both wait for the load to return.
             await self.awaitLoadInFlightSettled(pick: "selectTitle(\(id))")
+            // Audit LIF-208: the first pick to run used to move the generation with its own teardown,
+            // and every later one was dropped as superseded. The newest pick is the one the viewer wants.
+            guard self.titleSelectionToken == token else {
+                EngineLog.emit("[AetherEngine] selectTitle(\(id)) replaced by a newer pick; dropped", category: .engine)
+                return
+            }
             if case .error = self.state { return }
+            EngineLog.emit("[AetherEngine] selectTitle: switching to title \(id)", category: .engine)
             if custom {
                 // Custom readers (e.g. SMB ISO) have no URL to reopen; rebuild on the retained reader with the
                 // title override, restarting at the new title's head.

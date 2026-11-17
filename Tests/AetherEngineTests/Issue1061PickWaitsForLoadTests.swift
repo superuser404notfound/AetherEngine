@@ -81,4 +81,31 @@ struct Issue1061PickWaitsForLoadTests {
         #expect(engine.loadInFlight)
         engine.endLoadInFlight(second)
     }
+
+    /// Audit LIF-208: every title pick made during a load waited for it and then rebuilt with the
+    /// generation it had captured. The first one to run moved that generation with its own teardown,
+    /// so every later pick was dropped as superseded: pick title 3, correct to title 5, get title 3.
+    @Test("two title picks during a load: the later one is the one that rebuilds",
+          .timeLimit(.minutes(3)))
+    func laterTitlePickWins() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let log = EngineLogCapture()
+        defer { log.end() }
+        engine.stopInternal(resetDisplayCriteria: false)
+        engine.loadedURL = URL(fileURLWithPath: "/nonexistent/lif208-disc.iso")
+        engine.discTitles = [7013, 7015].map {
+            TitleInfo(id: $0, name: "Title \($0)", durationSeconds: 60, chapterCount: 1)
+        }
+        let generation = engine.loadGeneration
+        engine.beginLoadInFlight(generation)
+
+        engine.selectTitle(id: 7013)
+        engine.selectTitle(id: 7015)
+        try await waitFor { !log.matching("selectTitle(7015) waits for the load in flight").isEmpty }
+        engine.endLoadInFlight(generation)
+
+        try await waitFor { !log.matching("selectTitle: switching to title 7015").isEmpty }
+        #expect(log.matching("selectTitle: switching to title 7013").isEmpty)
+    }
 }
