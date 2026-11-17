@@ -44,7 +44,7 @@ final class LiveReplayPacketReader: @unchecked Sendable {
     private func free(_ packets: [Pending]) {
         for entry in packets {
             var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
-            av_packet_free(&packet)
+            trackedPacketFree(&packet)
         }
     }
 
@@ -121,7 +121,7 @@ final class LiveReplayPacketReader: @unchecked Sendable {
             }
             guard isCurrent() else {
                 var stale: UnsafeMutablePointer<AVPacket>? = packet
-                av_packet_free(&stale)
+                trackedPacketFree(&stale)
                 reset()
                 return nil
             }
@@ -143,7 +143,7 @@ final class LiveReplayPacketReader: @unchecked Sendable {
             }
             if decision?.drop == true, !guardState.isDroppingReplay, decision?.event == nil {
                 var duplicate: UnsafeMutablePointer<AVPacket>? = packet
-                av_packet_free(&duplicate)
+                trackedPacketFree(&duplicate)
                 continue
             }
             let untimedBoundaryVideo = guardState.isHoldingDamagedBoundary && signature == nil && index == videoIndex

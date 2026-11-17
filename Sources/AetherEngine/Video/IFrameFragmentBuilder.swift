@@ -26,7 +26,7 @@ final class IFrameFragmentBuilder {
               video.timeBase.num > 0, video.timeBase.den > 0 else { return nil }
         var initBytes = Data()
         guard let muxer = try? MP4SegmentMuxer(
-            initialSegmentIndex: index, sessionDir: stagingDir, video: video, audio: nil,
+            initialSegmentIndex: index, sessionDir: stagingDir, video: video, audio: nil, isOneShot: true,
             onInitCaptured: { initBytes = $0 }) else { return nil }
         var completed: URL?
         defer {

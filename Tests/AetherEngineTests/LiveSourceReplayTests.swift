@@ -93,7 +93,7 @@ struct LiveSourceReplayTests {
         }
         let cache = retainedCache ?? SegmentCache(forwardWindow: 32, backwardWindow: 32)
         let baseIndex = predecessor == nil ? 0 : cache.count
-        let producer = try HLSSegmentProducer(
+        let producer = HLSSegmentProducer(
             demuxer: demuxer, videoStreamIndex: index,
             video: .init(codecpar: UnsafePointer(stream.pointee.codecpar),
                          timeBase: stream.pointee.time_base, codecTagOverride: "avc1"),

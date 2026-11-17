@@ -1701,6 +1701,7 @@ Measured through `aetherctl play --live` on a live-paced synthetic channel, medi
 Some channels carry AC-3 2.0 during ads and 5.1 during the programme on the same PID. The fMP4 `dac3` / `dec3` box (the audio track's configuration) is written once per init segment, from one parsed frame.
 
 - On a live source the producer compares each stream-copied AC-3 / E-AC-3 frame with the layout of the current init: sample rate, bsid, `acmod`, LFE, and the E-AC-3 substreams.
+- A new layout counts only after three frames in a row, and a frame flagged corrupt is skipped, so one damaged packet does not cost a discontinuity.
 - On a change it cuts at the next keyframe, marks the segment with `#EXT-X-DISCONTINUITY` and gives it a versioned `#EXT-X-MAP` primed with a frame in the new layout, the same rotation as the SSAI program switch. The log line is `audio layout change`.
 - Until that keyframe, the frames in the new layout stay in the segment on the old init.
 - A bridged track is untouched: its encoder output keeps one layout.

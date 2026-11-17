@@ -215,6 +215,7 @@ struct HEVCConformanceCropTests {
             Issue.record("No fragment was written")
             return
         }
+        #expect(muxer.ownedStagingPathCount == 1, "audit SEG-204: only the next staging file is still owned")
         let fragment = try Data(contentsOf: path)
         let initSegment = initial.get()
         // 3840x2160 with a vertical offset of +8: the sign tvOS needs, the opposite of the spec's.

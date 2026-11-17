@@ -145,7 +145,7 @@ final class IFrameSideReader: @unchecked Sendable {
             if isInterrupted { return nil }
             guard let packet = try? dem.readPacket() else { return nil }
             var owned: UnsafeMutablePointer<AVPacket>? = packet
-            defer { av_packet_free(&owned) }
+            defer { trackedPacketFree(&owned) }
             guard packet.pointee.stream_index == videoIndex,
                   (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 else { continue }
             if convertP7ToProfile81 {

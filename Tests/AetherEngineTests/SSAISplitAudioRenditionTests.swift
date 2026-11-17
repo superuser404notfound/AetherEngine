@@ -74,7 +74,7 @@ struct SSAISplitAudioRenditionTests {
             inputTimeBase: audioStream.pointee.time_base, sourceTimeBase: audioStream.pointee.time_base,
             bridge: nil, stripAacAdts: true)
         let cache = SegmentCache(forwardWindow: 64, backwardWindow: 64)
-        let producer = try HLSSegmentProducer(
+        let producer = HLSSegmentProducer(
             demuxer: demuxer, videoStreamIndex: videoIndex,
             video: .init(codecpar: UnsafePointer(video.pointee.codecpar),
                          timeBase: video.pointee.time_base, codecTagOverride: "avc1"),

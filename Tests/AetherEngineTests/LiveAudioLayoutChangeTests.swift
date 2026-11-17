@@ -93,6 +93,26 @@ struct LiveAudioLayoutChangeTests {
         #expect(AC3FrameLayout(packet: [0xF8, 0x72, 0x6F, 0xBA, 0, 0, 0, 0]) == nil, "TrueHD major sync")
     }
 
+    /// Audit SEG-202: one damaged frame is not a programme change.
+    @Test("a layout latches after three frames in a row, a single odd frame does not")
+    func changeNeedsSeveralFrames() throws {
+        let independent = Self.eac3Frame(streamType: 0, codingMode: 7, lfe: true)
+        let dependent = Self.eac3Frame(streamType: 1, codingMode: 2, lfe: false)
+        let withDependent = try #require(AC3FrameLayout(packet: independent + dependent))
+        let bed = try #require(AC3FrameLayout(packet: independent))
+        var gate = AudioLayoutChangeGate()
+        let verdicts = [
+            gate.confirmsChange(bed, from: withDependent),
+            gate.confirmsChange(withDependent, from: withDependent),
+            gate.confirmsChange(bed, from: withDependent),
+            gate.confirmsChange(bed, from: withDependent),
+            gate.confirmsChange(bed, from: withDependent),
+            gate.confirmsChange(bed, from: withDependent),
+        ]
+        // The good frame in the middle reset the streak; the third bed frame after it latches; the next starts over.
+        #expect(verdicts == [false, false, false, false, true, false])
+    }
+
     // MARK: - Through the producer
 
     private final class Outcome: @unchecked Sendable {
@@ -143,7 +163,7 @@ struct LiveAudioLayoutChangeTests {
             inputTimeBase: audioStream.pointee.time_base, sourceTimeBase: audioStream.pointee.time_base,
             bridge: nil)
         let cache = SegmentCache(forwardWindow: 64, backwardWindow: 64)
-        let producer = try HLSSegmentProducer(
+        let producer = HLSSegmentProducer(
             demuxer: demuxer, videoStreamIndex: videoIndex,
             video: .init(codecpar: UnsafePointer(video.pointee.codecpar),
                          timeBase: video.pointee.time_base, codecTagOverride: "avc1"),

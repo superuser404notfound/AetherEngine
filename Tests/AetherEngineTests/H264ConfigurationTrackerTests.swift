@@ -171,7 +171,7 @@ struct H264ConfigurationTrackerTests {
         let cache = SegmentCache(forwardWindow: 10, backwardWindow: 10)
         defer { cache.close() }
         let result = Results()
-        let producer = try HLSSegmentProducer(demuxer: dem, videoStreamIndex: dem.videoStreamIndex,
+        let producer = HLSSegmentProducer(demuxer: dem, videoStreamIndex: dem.videoStreamIndex,
             video: .init(codecpar: UnsafePointer(stream.pointee.codecpar), timeBase: stream.pointee.time_base, codecTagOverride: nil),
             cache: cache, videoFallbackDurationPts: 100000, desiredFirstVideoTfdtPts: 0,
             segmentBoundaries: [0, 4800000, 7200000])
@@ -191,7 +191,7 @@ struct H264ConfigurationTrackerTests {
         let cache = SegmentCache(forwardWindow: 4, backwardWindow: 4)
         defer { cache.close() }
         func producer(epoch: UInt64) throws -> HLSSegmentProducer {
-            try HLSSegmentProducer(demuxer: dem, videoStreamIndex: dem.videoStreamIndex,
+            HLSSegmentProducer(demuxer: dem, videoStreamIndex: dem.videoStreamIndex,
                 video: .init(codecpar: UnsafePointer(stream.pointee.codecpar), timeBase: stream.pointee.time_base, codecTagOverride: nil),
                 cache: cache, videoFallbackDurationPts: 100000, desiredFirstVideoTfdtPts: 0,
                 segmentBoundaries: [0, 7200000], epoch: epoch)

@@ -95,7 +95,6 @@ struct ErrorLocalizedDescriptionTests {
         AVIOReaderError.hlsPlaylistOnVODPath,
         AVIOReaderError.requestTimeout,
         HLSLocalServerError.bind(errno: 48),
-        HLSSegmentProducer.ProducerError.writeHeaderFailed(code: -22),
         MP4SegmentMuxer.MuxerError.openStagingFileFailed(errno: 2),
         AudioBridge.AudioBridgeError.encoderNotFound(codecID: AV_CODEC_ID_EAC3),
         DemuxerError.openFailed(code: FFmpegErr.invalidData),

@@ -91,7 +91,7 @@ struct StoppedPumpInFlightReadTests {
         let stream = try #require(demuxer.stream(at: videoIndex))
         let cache = SegmentCache(forwardWindow: 4, backwardWindow: 4)
         defer { cache.close() }
-        let producer = try HLSSegmentProducer(
+        let producer = HLSSegmentProducer(
             demuxer: demuxer, videoStreamIndex: videoIndex,
             video: .init(codecpar: UnsafePointer(stream.pointee.codecpar),
                          timeBase: stream.pointee.time_base, codecTagOverride: nil),

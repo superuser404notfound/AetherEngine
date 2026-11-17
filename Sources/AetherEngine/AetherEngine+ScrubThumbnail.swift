@@ -258,9 +258,14 @@ extension AetherEngine {
     func decodeScrubStill<Still>(on extractor: FrameExtractor, generation: UInt64,
                                  stillWanted: () -> Bool = { true },
                                  _ decode: () async -> Still?) async -> Still? {
+        await extractor.reserveDecode()
         await enforceScrubDecoderBudget(before: extractor)
-        guard generation == loadGeneration, stillWanted() else { return nil }
+        guard generation == loadGeneration, stillWanted() else {
+            await extractor.endDecodeReservation()
+            return nil
+        }
         let still = await decode()
+        await extractor.endDecodeReservation()
         return generation == loadGeneration && stillWanted() ? still : nil
     }
 

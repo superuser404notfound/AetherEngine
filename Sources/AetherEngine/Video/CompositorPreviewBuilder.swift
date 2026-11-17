@@ -84,7 +84,7 @@ enum CompositorPreviewBuilder {
                                           video: MP4SegmentMuxer.VideoConfig, stagingDir: URL) -> Output? {
         var initBytes = Data()
         guard let muxer = try? MP4SegmentMuxer(
-            initialSegmentIndex: 0, sessionDir: stagingDir, video: video, audio: nil,
+            initialSegmentIndex: 0, sessionDir: stagingDir, video: video, audio: nil, isOneShot: true,
             onInitCaptured: { initBytes = $0 }) else { return nil }
         var completed: URL?
         defer {
