@@ -390,6 +390,22 @@ private final class PacketRecordingDecoder: VideoDecodingPipeline, @unchecked Se
     func close() {}
 }
 
+/// A decoder whose session rebuild always succeeds, for the AE#739 recovery path.
+private final class RebuildableDecoder: VideoDecodingPipeline, VideoSessionRebuilding, @unchecked Sendable {
+    var onFrame: DecodedFrameHandler?
+    var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
+    var onA53Captions: (@Sendable ([CCDataParser.CCTriplet], Double) -> Void)?
+    var onDecodedFormat: (@Sendable (DecodedVideoFormat) -> Void)?
+    var onSessionLost: (@Sendable () -> Void)?
+    var skipUntilPTS: CMTime?
+    var feedEpoch: UInt64 { 0 }
+    func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {}
+    func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64?) {}
+    func flush() {}
+    func close() {}
+    func rebuildSession() -> Bool { true }
+}
+
 /// A reader over in-memory data that blocks, once armed, any read from `blockFrom` bytes on until it is
 /// released, so a session cannot reach the end of media while a test looks at the state it is in before
 /// it. Before it is armed, or short of `blockFrom`, it behaves as `DataIOReader` does.
@@ -588,6 +604,23 @@ struct FlushRecoveryHostTests {
         // The floor restarts at the playhead, not at whatever frame arrives first.
         #expect(decoder.skipUntilPTS.map { abs($0.seconds - 20) < 0.01 } == true)
         #expect(host.flushRecoveryLog.map(\.action) == [.flushVideoOnly])
+    }
+
+    /// NAT-202: the AE#739 session rebuild used to seek to the published `currentTime`, which the
+    /// 0.25 s timer writes, so up to a tick of audio played twice on every recovery.
+    @Test("a rebuilt video session repositions to the clock, not to the stale published time")
+    func sessionRebuildRepositionsToTheClock() async throws {
+        let targets = Targets()
+        let host = try await loadedHost(targets)
+        defer { host.stop() }
+        host.setVideoDecoderForTesting(RebuildableDecoder())
+        host.seekClockForTesting(to: 20)
+        #expect(host.currentTime < 19, "the published time must still be stale for the test to mean anything")
+        host.setVideoSessionRecoveryOwedForTesting()
+        host.exitBackgroundAudioOnly()
+        try await waitFor { !targets.values.isEmpty }
+        let target = try #require(targets.values.first)
+        #expect(abs(target - 20) < 0.01, "got \(target)")
     }
 
     @Test("a keyframe beyond the audio lead: the session goes back to the playhead")
