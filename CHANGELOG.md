@@ -57,6 +57,20 @@ the public-API contract.
   It also kept an overlay drawn for an older frame size.
 - **Cancelling a held still or a scrub preview no longer pins the main thread.** A cancelled wait used to
   spin until its 3 s or 2 s deadline.
+- **A recording no longer ends on one bad timestamp.** The TS muxer refused a packet whose decode
+  timestamp did not rise, and the recording stopped as `.writeFailed`. The writer now repairs or drops that
+  packet and keeps recording.
+- **A read error no longer leaves a subtitle file cut short but marked complete.** The native subtitle
+  readers restart on a read error, and only a real end of file finishes a whole-program track.
+- **A deinterlace filter error no longer freezes the picture or fills memory.** The graph is rebuilt on the
+  next interlaced frame (hardware falls back to software), and frames pass through as decoded after
+  repeated failures.
+- **The last interlaced picture is no longer lost at the end of a stream.** The deinterlacer is flushed
+  before the decoder is reset.
+- **VideoToolbox errors reported after a decode call are now counted and logged.** An error that ends the
+  session (`kVTInvalidSessionErr`, `kVTVideoDecoderMalfunctionErr`) starts the normal session recovery.
+- **After a video session rebuild on the software host, the audio no longer repeats up to a quarter
+  second.** The reposition uses the clock instead of the published time.
 - **Infinite or NaN float samples no longer crash or freeze the loudness target.** They are left out of
   the measurement.
 - **A live packet without a PTS no longer produces a segment that claims to last 1e14 seconds.** It cuts
