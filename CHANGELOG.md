@@ -42,6 +42,21 @@ the public-API contract.
 - **The last title picked during a disc load is the one that plays.** Earlier picks used to win.
 - **A live stream rebuilt after a muxer failure no longer has its source closed by the old pump's
   watchdog.**
+- **Tone mapping no longer risks a crash when a title's HDR metadata changes mid-stream.** Each frame on
+  the GPU now keeps alive the texture cache its textures came from. The tone mapper could release that
+  cache while two frames were still in flight: on a metadata change, an overrun switch-off, or HDR10+
+  appearing.
+- **On iOS, tone mapping and line-art upscaling survive the app going to the background.** iOS refuses GPU
+  work in the background. Three refused frames used to switch the stage off for the rest of the process
+  and reload the session to native. Those frames now go out as decoded and do not count as failures.
+- **Tone mapping and line-art upscaling work on the first Apple TV 4K (A10X).** Its GPU lacks non-uniform
+  threadgroups, which these stages assumed. They now dispatch whole threadgroups there, as the FEL
+  composer already did.
+- **PiP subtitles show the right track after a track switch.** The compositor reused its rendered overlay
+  whenever cue ids matched, and ids repeat across sidecar tracks and between primary and secondary cues.
+  It also kept an overlay drawn for an older frame size.
+- **Cancelling a held still or a scrub preview no longer pins the main thread.** A cancelled wait used to
+  spin until its 3 s or 2 s deadline.
 - **Infinite or NaN float samples no longer crash or freeze the loudness target.** They are left out of
   the measurement.
 - **A live packet without a PTS no longer produces a segment that claims to last 1e14 seconds.** It cuts
@@ -56,6 +71,8 @@ the public-API contract.
 
 - **Live scrub previews keep six warm decoders, as VOD does, inside the AE#1059 memory budget.** The live
   path used to trim the shared list to two and ignore the budget.
+- **A GPU pipeline that fails to build is compiled once per process.** The frame chain and the upscaler
+  used to recompile both shader libraries on every stage build after a failure.
 
 ## [7.69.1] - 2026-11-17
 
