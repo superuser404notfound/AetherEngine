@@ -63,6 +63,11 @@ struct DASHManifest: Equatable, Sendable {
     var durationSeconds: Double?
     var adaptationSets: [AdaptationSet]
 
+    /// Audio tracks carried at most. Each one is its own file, reader, URLSession and block cache (up to
+    /// 8 MiB), and an 8 MB MPD can declare tens of thousands of sets (audit NET-204). Real
+    /// presentations carry a handful of languages; 16 leaves room and bounds the cost near 128 MiB.
+    static let maxAudioRepresentations = 16
+
     /// The representations the engine muxes into one virtual file: the highest-bandwidth playable
     /// video representation, then the highest-bandwidth playable representation of every audio
     /// adaptation set in manifest order. Representations inside one adaptation set are bitrate
@@ -77,7 +82,7 @@ struct DASHManifest: Equatable, Sendable {
         let videoSets = adaptationSets.filter { $0.kind == .video }
         let audioSets = adaptationSets.filter { $0.kind == .audio }
         let video = videoSets.compactMap(best).max { $0.bandwidth < $1.bandwidth }
-        let audio = audioSets.compactMap(best)
+        let audio = Array(audioSets.compactMap(best).prefix(Self.maxAudioRepresentations))
         if !videoSets.isEmpty, video == nil {
             throw DASHSourceError.noPlayableRepresentation(Self.refusal(videoSets, kind: "video"))
         }
@@ -204,7 +209,7 @@ extension DASHManifest {
             case "0"..."9", ".":
                 number.append(ch)
             default:
-                guard let value = Double(number) else { return nil }
+                guard let value = Double(number), value.isFinite else { return nil }
                 number = ""
                 sawComponent = true
                 switch (ch, inTime) {
@@ -216,14 +221,15 @@ extension DASHManifest {
                 }
             }
         }
-        return number.isEmpty && sawComponent ? total : nil
+        guard number.isEmpty, sawComponent, total.isFinite, total <= MediaDurationCeiling.seconds else { return nil }
+        return total
     }
 
     /// `first-last`, both inclusive, as `indexRange` and `Initialization@range` write it.
     static func parseByteRange(_ text: String) -> ClosedRange<Int64>? {
         let parts = text.trimmingCharacters(in: .whitespaces).split(separator: "-", omittingEmptySubsequences: false)
         guard parts.count == 2, let first = Int64(parts[0]), let last = Int64(parts[1]),
-              first >= 0, last >= first else { return nil }
+              first >= 0, last >= first, last - first < DASHSourceOpener.maxHeadBytes else { return nil }
         return first...last
     }
 }

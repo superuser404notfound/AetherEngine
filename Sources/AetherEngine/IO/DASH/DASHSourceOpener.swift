@@ -5,19 +5,21 @@ import Foundation
 /// representation file and reads its initialization segment and segment index, which is all the
 /// layout needs: no media byte is fetched before the demuxer asks for one.
 ///
-/// Every request carries the session's headers. `cancel()` is safe from any thread and reaches the
+/// Every request carries the session's headers, credentials only for the origin of the manifest URL. `cancel()` is safe from any thread and reaches the
 /// manifest fetch and every reader opened so far, which is what lets a teardown that races the open
 /// end it instead of waiting out the request timeouts (audit DMX-102's rule for the disc path).
 final class DASHSourceOpener: @unchecked Sendable {
 
-    /// A manifest is text; an on-demand one is a few kilobytes. The bound only stops a misrouted
-    /// media file from being read whole into memory.
+    /// A manifest is text; an on-demand one is a few kilobytes. The fetch stops at this size, so a
+    /// misrouted media file is never read whole into memory.
     static let manifestByteLimit = 8 * 1024 * 1024
     /// Init and index further apart than this are read with two requests instead of one.
     static let contiguousHeadSlack: Int64 = 256 * 1024
 
     private let manifestURL: URL
     private let headers: [String: String]
+    /// Credentials go only to the origin that received them; an MPD can name any host (audit NET-201).
+    private let scope: CredentialScope
     private let requestTimeout: TimeInterval
     private let session: URLSession
 
@@ -47,8 +49,11 @@ final class DASHSourceOpener: @unchecked Sendable {
         self.manifestURL = manifestURL
         self.headers = headers
         self.requestTimeout = requestTimeout
+        scope = CredentialScope(headers: headers, anchor: manifestURL)
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // The request timeout is an idle timeout; this one ends a body that trickles forever (audit NET-204).
+        config.timeoutIntervalForResource = 120
         session = URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
     }
 
@@ -69,6 +74,11 @@ final class DASHSourceOpener: @unchecked Sendable {
         let (data, baseURL) = try fetchManifest()
         let manifest = try DASHManifest.parse(data, manifestURL: baseURL)
         let selected = try manifest.selectRepresentations()
+        let audioSets = manifest.adaptationSets.filter { $0.kind == .audio }.count
+        if audioSets > DASHManifest.maxAudioRepresentations {
+            EngineLog.emit("[DASH] the MPD declares \(audioSets) audio adaptation sets; carrying the first "
+                           + "\(DASHManifest.maxAudioRepresentations) (audit NET-204)", category: .demux)
+        }
         if isCancelled { throw DASHSourceError.cancelled }
 
         let slots = Slots(count: selected.count)
@@ -130,38 +140,39 @@ final class DASHSourceOpener: @unchecked Sendable {
         var values: [Result<(IOReader, DASHVirtualLayout.Source), Error>?] { lock.withLock { storage } }
     }
 
-    /// One GET on the opener's own session, so `cancel()` reaches it.
-    private func fetch(_ url: URL, range: ClosedRange<Int64>? = nil) throws -> (Data, HTTPURLResponse) {
-        var request = URLRequest(engineURL: url, timeoutInterval: requestTimeout)
+    /// The manifest, read through the bounded fetch the HLS paths use: a declared length over the limit
+    /// is refused at the head and an undeclared one is cut at it, so a misrouted media file or an
+    /// endless body never sits whole in memory (audit NET-204).
+    private func fetchManifestBody() throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(engineURL: manifestURL, timeoutInterval: requestTimeout)
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
-        if let range { request.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range") }
-        let done = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var outcome: (Data?, URLResponse?, Error?) = (nil, nil, nil)
-        let task = session.dataTask(with: request) { data, response, error in
-            outcome = (data, response, error)
-            done.signal()
+        let session = session
+        let limit = Self.manifestByteLimit
+        if isCancelled { throw DASHSourceError.cancelled }
+        let result: Result<(Data, URLResponse), Error>
+        do {
+            result = .success(try BoundedFetch.blockingData(for: request, session: session, limit: limit))
+        } catch {
+            result = .failure(error)
         }
         if isCancelled { throw DASHSourceError.cancelled }
-        task.resume()
-        done.wait()
-        if isCancelled { throw DASHSourceError.cancelled }
-        let (data, response, error) = outcome
-        if let error {
+        switch result {
+        case .success(let (data, response)):
+            guard let http = response as? HTTPURLResponse else {
+                throw DASHSourceError.representationUnreachable("no HTTP response")
+            }
+            guard (200..<300).contains(http.statusCode) else { throw AVIOReaderError.httpStatus(http.statusCode) }
+            return (data, http)
+        case .failure(let error as BoundedFetch.Exceeded):
+            throw DASHSourceError.manifestTooLarge(error.limit)
+        case .failure(let error):
             let ns = error as NSError
             throw DASHSourceError.representationUnreachable("\(ns.domain) \(ns.code)")
         }
-        guard let http = response as? HTTPURLResponse else {
-            throw DASHSourceError.representationUnreachable("no HTTP response")
-        }
-        guard (200..<300).contains(http.statusCode) else { throw AVIOReaderError.httpStatus(http.statusCode) }
-        return (data ?? Data(), http)
     }
 
     private func fetchManifest() throws -> (Data, URL) {
-        let (data, response) = try fetch(manifestURL)
-        guard data.count <= Self.manifestByteLimit else {
-            throw DASHSourceError.manifestTooLarge(Self.manifestByteLimit)
-        }
+        let (data, response) = try fetchManifestBody()
         guard DASHManifest.bodyBeginsWithManifest([UInt8](data.prefix(4096))) else {
             throw DASHSourceError.notAManifest
         }
@@ -169,30 +180,48 @@ final class DASHSourceOpener: @unchecked Sendable {
         return (data, response.url ?? manifestURL)
     }
 
+    /// Init and index are never further than this from the file's start in a real file, and a
+    /// declared head beyond it is a hostile or broken MPD, not a bigger index (a sidx indexes at most
+    /// 65535 subsegments, under 1 MB).
+    static let maxHeadBytes: Int64 = 64 * 1024 * 1024
+
     /// The bytes of `range` and the file's total size, from a 206 that starts where it was asked to.
     /// The head requests double as the range probe: a file whose origin answers them with a 200
-    /// cannot be addressed by SegmentBase at all.
+    /// cannot be addressed by SegmentBase at all. One bounded range GET, the one the disc reader
+    /// uses, on the opener's own session so `cancel()` reaches it (audit NET-R203).
     private func fetchRange(_ rep: DASHManifest.Representation, _ range: ClosedRange<Int64>) throws -> ([UInt8], Int64) {
-        let count = range.upperBound - range.lowerBound + 1
-        guard count > 0, count <= 64 * 1024 * 1024 else {
-            throw DASHSourceError.malformedIndex("representation \(rep.id) declares a \(count) byte head")
+        let (span, overflow) = range.upperBound.subtractingReportingOverflow(range.lowerBound)
+        guard !overflow, span >= 0, span < Self.maxHeadBytes else {
+            throw DASHSourceError.malformedIndex("representation \(rep.id) declares a head of more than \(Self.maxHeadBytes) bytes")
         }
+        let count = span + 1
+        let requestHeaders = scope.headers(for: rep.url)
         var attempt = 0
         while true {
+            if isCancelled { throw DASHSourceError.cancelled }
+            let response = HTTPDiscIOReader.rangeGet(
+                url: rep.url, extraHeaders: requestHeaders, session: session, timeout: requestTimeout,
+                offset: range.lowerBound, length: Int(count))
+            if isCancelled { throw DASHSourceError.cancelled }
             do {
-                let (data, response) = try fetch(rep.url, range: range)
-                guard response.statusCode == 206 else {
+                guard let response else {
+                    throw DASHSourceError.representationUnreachable("representation \(rep.id) did not answer")
+                }
+                guard response.status == 206 || response.status == 200 else {
+                    throw AVIOReaderError.httpStatus(response.status)
+                }
+                guard response.status == 206 else {
                     throw DASHSourceError.representationUnreachable(
                         "representation \(rep.id): the origin ignores Range requests, which SegmentBase addressing needs")
                 }
-                let contentRange = response.value(forHTTPHeaderField: "Content-Range") ?? ""
-                guard contentRange.hasPrefix("bytes \(range.lowerBound)-"),
+                let contentRange = response.contentRange ?? ""
+                guard HTTPDiscIOReader.parseContentRangeStart(contentRange) == range.lowerBound,
                       let total = HTTPDiscIOReader.parseContentRangeTotal(contentRange), total > range.upperBound,
-                      Int64(data.count) >= count else {
+                      Int64(response.body.count) >= count else {
                     throw DASHSourceError.representationUnreachable(
-                        "representation \(rep.id) answered \(data.count) bytes (\(contentRange)) for bytes \(range.lowerBound)-\(range.upperBound)")
+                        "representation \(rep.id) answered \(response.body.count) bytes (\(contentRange)) for bytes \(range.lowerBound)-\(range.upperBound)")
                 }
-                return ([UInt8](data.prefix(Int(count))), total)
+                return ([UInt8](response.body.prefix(Int(count))), total)
             } catch let error as DASHSourceError where attempt == 0 && error != .cancelled
                         && !error.description.contains("ignores Range") {
                 attempt += 1
@@ -221,7 +250,7 @@ final class DASHSourceOpener: @unchecked Sendable {
             (index, _) = try fetchRange(rep, indexRange)
         }
         // The size is known from the head's Content-Range, so the reader starts without a probe.
-        guard let reader = HTTPDiscIOReader(url: rep.url, extraHeaders: headers,
+        guard let reader = HTTPDiscIOReader(url: rep.url, extraHeaders: scope.headers(for: rep.url),
                                             requestTimeout: requestTimeout, knownSize: total) else {
             throw DASHSourceError.representationUnreachable("representation \(rep.id) did not answer")
         }

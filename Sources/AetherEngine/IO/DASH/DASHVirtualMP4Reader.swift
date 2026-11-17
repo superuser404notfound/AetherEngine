@@ -144,7 +144,7 @@ final class DASHVirtualMP4Reader: IOReader, SourceTransferCounting, @unchecked S
             var size = Int64(MP4Box.u32(head, 0))
             if size == 1, head.count >= 16 { size = Int64(bitPattern: MP4Box.u64(head, 8)) }
             if size == 0 { size = piece.size - state.next }
-            guard size >= 8, state.next + size <= piece.size else {
+            guard size >= 8, size <= piece.size - state.next else {
                 EngineLog.emit("[DASH] piece \(index): a box at +\(state.next) runs past its subsegment; "
                                + "the rest of it is served unpatched", category: .demux)
                 state.next = piece.size

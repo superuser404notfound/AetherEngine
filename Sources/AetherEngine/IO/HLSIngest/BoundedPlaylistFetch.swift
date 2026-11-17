@@ -52,6 +52,35 @@ enum BoundedFetch {
         return Int(min(ceiling, max(floor, seconds * 20_000_000)))
     }
 
+    /// `data(for:session:limit:role:)` for a caller that is itself a blocking function on its own thread
+    /// (the DASH open): same delegate and the same limit, no Swift task, so it cannot starve for a
+    /// cooperative thread the blocked callers hold.
+    static func blockingData(for request: URLRequest, session: URLSession, limit: Int,
+                             role: SourceNetworkDiagnostics.Role = .boundedBody) throws -> (Data, URLResponse) {
+        let delegate = BoundedBodyDelegate(limit: limit, role: role, context: SourceNetworkDiagnostics.context(for: request))
+        let done = DispatchSemaphore(value: 0)
+        let landed = OutcomeBox()
+        delegate.installOutcomeHandler { outcome in
+            landed.outcome = outcome
+            done.signal()
+        }
+        let task = session.dataTask(with: request)
+        task.delegate = delegate
+        task.resume()
+        done.wait()
+        switch landed.outcome {
+        case .body(let data, let response)?: return (data, response)
+        case .refused(let response)?: return (Data(), response)
+        case .exceeded?: throw Exceeded(limit: limit)
+        case .failed(let error)?: throw error
+        case nil: throw URLError(.badServerResponse)
+        }
+    }
+
+    private final class OutcomeBox: @unchecked Sendable {
+        nonisolated(unsafe) var outcome: BoundedBodyDelegate.Outcome?
+    }
+
     /// The body and response of `request`. A non-2xx answer comes back with an empty body, since every
     /// caller decides on the status alone. Throws `Exceeded` for a body over `limit`.
     static func data(for request: URLRequest, session: URLSession, limit: Int, role: SourceNetworkDiagnostics.Role = .boundedBody) async throws

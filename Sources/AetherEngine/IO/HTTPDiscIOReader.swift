@@ -444,7 +444,7 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
         }
     }
 
-    private struct RangeResponse {
+    struct RangeResponse {
         let status: Int
         let contentRange: String?
         let body: Data
@@ -470,7 +470,7 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
     /// "URLSession retains completed completion-handler bodies until invalidation" reading of the
     /// AVIOReader leak (see `AVIOReader.persistentSession`): the owner was always the caller
     /// thread's pool, and delegate-based delivery fixed that path by keeping the body off it.
-    private static func rangeGet(url: URL, extraHeaders: [String: String], session: URLSession,
+    static func rangeGet(url: URL, extraHeaders: [String: String], session: URLSession,
                                  timeout: TimeInterval, offset: Int64, length: Int) -> RangeResponse? {
         autoreleasepool {
             var req = URLRequest(engineURL: url, timeoutInterval: timeout)
