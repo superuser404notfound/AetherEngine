@@ -604,6 +604,11 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("`settle()` gives up after 0.5 s", docs)
     }
 
+    func testHeldPictureFrameWaitMatchesDocumentation() throws {
+        XCTAssertEqual(AetherEngine.defaultHeldPictureFrameWaitSeconds, 0.5)
+        assertDocumented("waits up to 0.5 s for that frame", try documentation())
+    }
+
     func testLayerJoinRepairRunMatchesDocumentation() throws {
         XCTAssertEqual(DolbyVisionLayerJoin<Int>.agreeingRunForRepair, 16)
         assertDocumented("once sixteen units agreed", try felDocument())

@@ -294,6 +294,34 @@ struct ItemSwapStillTests {
         #expect(engine.heldPictureLastRelease == "still view unbound")
     }
 
+    @Test("the native read waits as long as the host says, and never on a bad value")
+    func frameWaitFollowsTheSetting() throws {
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0.5) == .milliseconds(500))
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0.12) == .milliseconds(120))
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0) == .zero)
+        #expect(AetherEngine.heldPictureFrameWait(seconds: -1) == .zero)
+        #expect(AetherEngine.heldPictureFrameWait(seconds: .nan) == .zero)
+        #expect(AetherEngine.heldPictureFrameWait(seconds: .infinity) == .zero)
+        #expect(try AetherEngine().heldPictureFrameWaitSeconds == 0.5)
+    }
+
+    @Test("a wait of zero swaps with nothing held and says so")
+    func zeroWaitHoldsNothing() async throws {
+        let file = try await Self.fixtureURL()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let view = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+        engine.bind(view: view)
+        _ = try await engine.load(url: file)
+        let host = try #require(engine.nativeHost)
+        try await waitFor { host.isVideoReadyForDisplay }
+        engine.heldPictureFrameWaitSeconds = 0
+        engine.pause()
+        await engine.holdPictureAcrossItemSwap()
+        #expect(engine.heldPictureLastSkip == "no frame from the outgoing picture")
+    }
+
     @Test("PiP and external playback hold nothing")
     func skipReasons() {
         #expect(AetherEngine.heldPictureSkipReason(

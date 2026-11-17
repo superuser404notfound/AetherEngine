@@ -1731,6 +1731,7 @@ If you need it, say so on the tracker instead of working around it.
 | --- | --- |
 | `videoGravity` | Fill mode of whichever layer is mounted (`AVPlayerLayer` or the software display layer). Settable; this is the aspect-fit / aspect-fill control. |
 | `AetherStillView`, `bindStillView(_:)`, `unbindStillView(_:)` | Holds the outgoing picture across an item swap, for a host that renders the native path through AVKit rather than `AetherPlayerView`. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). |
+| `heldPictureFrameWaitSeconds` | The longest a native audio switch waits for the outgoing frame it holds. Default 0.5 s. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). |
 | `nativePlayerLayer` | The engine's own `AVPlayerLayer`, for a host building `AVPictureInPictureController` around a layer rather than around `currentAVPlayer`. |
 | `$softwarePiPSource` | `SoftwarePiPSource` for sample-buffer PiP on the software path. See [Picture in Picture on the software path](#picture-in-picture-on-the-software-path). |
 | `$softwareDisplaySize` | The rectangle the software path's picture is shown at: the coded size under the decoder's pixel aspect. It follows the stream (not latched), so a mid-stream resolution change reshapes it. nil on every other path. |
@@ -1762,6 +1763,7 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
   - With the trait, the frame is a 960-wide still decoded through the scrub stills' RPU reshaping.
   - Either way the switch waits for it (up to 3 s, with the outgoing picture paused meanwhile).
 - Other profiles hold their base layer.
+- **How long the native read waits.** The frame is read from the paused outgoing item, which answers in about 20 ms. The switch waits up to 0.5 s for that frame and swaps with nothing held when none arrives. `heldPictureFrameWaitSeconds` changes that bound: lower it if your app's output vends no paused frame and every switch stands still for the full wait. 0 holds nothing on the native path. The Dolby Vision bullet above and the software path are not affected.
 - Nothing is held in PiP or on external playback.
 
 ### Picture in Picture on the software path
