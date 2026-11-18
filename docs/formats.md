@@ -505,6 +505,7 @@ With `LoadOptions.forceDolbyVisionOnNonDVDisplay` (experimental, default off, AE
 - **Why it works.** The bitstream never changes, only the container's claim about it. A Profile 8.1 RPU already carries the mapping out of its own HDR10 base layer, so the composer does not need the container to describe that layer.
 - **Why it is experimental.** This is not what the profile field means. A decoder that read the base layer's colorimetry from the profile rather than from the RPU would decode IPT out of YCbCr: the green / violet cast of #4 and #176.
 - **Scope.** Profile 8.1, and Profile 7 once converted to it. Profile 8.4's base layer is HLG, and a profile-5 `dvcC` over an HLG `colr` is a container that contradicts itself.
+- **HDR10+ in the same file.** The forced route gives up the HDR10+ a Profile 8.1 base layer may carry, because the panel then receives composed HDR10. With `LoadOptions.preferHDR10PlusOverForcedDolbyVision`, the load checks the head of the video stream first, and a source with HDR10+ keeps the default route, so an HDR10+ panel gets it (Sodalite#245).
 
 #### Base layer only: `dolbyVisionHandling = .baseLayerOnly`
 

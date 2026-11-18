@@ -2517,6 +2517,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | --- | --- | --- |
 | `dolbyVisionHandling` | `.automatic` | A `DolbyVisionHandling`. `.baseLayerOnly` presents the HDR10 / HLG base layer of a Dolby Vision source, and leaves Dolby Vision out of the container on every display. See [`dolbyVisionHandling`](#dolbyvisionhandling). |
 | `forceDolbyVisionOnNonDVDisplay` | false | **Experimental (AE#455).** Serve an HEVC Profile 8.1 source as Profile 5 on a display with no Dolby Vision of its own. See [`forceDolbyVisionOnNonDVDisplay`](#forcedolbyvisiononnondvdisplay). |
+| `preferHDR10PlusOverForcedDolbyVision` | false | Sodalite#245. A source that carries HDR10+ skips the `forceDolbyVisionOnNonDVDisplay` route and keeps its HDR10+. Set it when the panel takes HDR10+. See [`preferHDR10PlusOverForcedDolbyVision`](#preferhdr10plusoverforceddolbyvision). |
 | `preferDualLayerDolbyVision` | false | Opt in to composing Profile 7 FEL sources on the GPU. Not recommended for a distributed app. See [`preferDualLayerDolbyVision`](#preferduallayerdolbyvision). |
 | `foldsDolbyVisionFEL` | true | With the `DolbyVisionFelCurves` trait: fold a Profile 7 FEL source's enhancement layer into the Profile 8.1 RPU's luma curve. False keeps the plain conversion and its start speed (#1018). Ignored without the trait. See [dolby-vision-fel.md §7](dolby-vision-fel.md#7-curve-fold-on-the-native-route). |
 | `dualLayerRoute` | `DualLayerRoute.softwareHost` | Which route composes a Profile 7 FEL picture once `preferDualLayerDolbyVision` has taken the dual-layer route. See [`dualLayerRoute`](#duallayerroute). |
@@ -2804,6 +2805,17 @@ See [formats.md](formats.md#dolby-vision-signaling).
 - The bitstream is untouched; only the container's claim about it changes.
 - Ignored on a display that does Dolby Vision. Profile 8.1 only.
 - See [formats.md](formats.md#dolby-vision-signaling) for what it gains and what it risks.
+
+#### `preferHDR10PlusOverForcedDolbyVision`
+
+Lets a source's own HDR10+ win over the `forceDolbyVisionOnNonDVDisplay` route. Default false (Sodalite#245).
+
+Many Profile 8.1 remuxes also carry HDR10+ in their HDR10 base layer. The forced route hands the panel composed HDR10, so that HDR10+ never arrives. With this option on, such a source keeps the native Profile 8.1 route, and an HDR10+ panel gets the base layer with its HDR10+ metadata. A source without HDR10+ still takes the forced route.
+
+- **How the engine knows.** The load reads the first video packets before it picks the route (`[AetherEngine] Sodalite#245 HDR10+ head scan: found / none` in the log). Most of them are already queued from stream analysis, so it rarely costs a read. A seekable VOD only: a live load keeps the forced route.
+- **Why it is the host's call.** tvOS cannot report whether the panel takes HDR10+ (`AVPlayer.HDRMode` has no such value). On a panel with static HDR10 only, this option gives up the Dolby Vision composition for exactly the sources that carry HDR10+.
+- **Scope.** Read only where the forced route would apply: no Dolby Vision on the display, HEVC Profile 8.1 or 7, `dolbyVisionHandling == .automatic`.
+- A tuning field. A rebuild through `reloadAtCurrentPosition(applying:)` also counts HDR10+ that playback has seen since, so turning it on mid-session takes effect.
 
 #### `preferDualLayerDolbyVision`
 

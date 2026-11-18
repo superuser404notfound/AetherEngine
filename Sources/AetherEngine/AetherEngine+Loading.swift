@@ -866,6 +866,7 @@ extension AetherEngine {
         audioSourceStreamIndex: Int32? = nil,
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
+        forcedDolbyVisionYieldsToHDR10Plus: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
         dolbyVisionRPUProfile: Int? = nil,
         measuredFrameRate: AVRational? = nil,
@@ -945,6 +946,7 @@ extension AetherEngine {
             displaySupportsHDR: sessionDisplayCaps.supportsHDR,
             keepDvh1TagWithoutDV: keepDvh1TagWithoutDV,
             forceDolbyVisionOnNonDVDisplay: forceDolbyVisionOnNonDVDisplay,
+            forcedDolbyVisionYieldsToHDR10Plus: forcedDolbyVisionYieldsToHDR10Plus,
             dolbyVisionHandling: dolbyVisionHandling,
             dolbyVisionRPUProfile: dolbyVisionRPUProfile,
             measuredFrameRate: measuredFrameRate,
@@ -2922,6 +2924,11 @@ extension AetherEngine {
                     audioSourceStreamIndex: audioStreamIndex,
                     keepDvh1TagWithoutDV: loadedOptions.keepDvh1TagWithoutDV,
                     forceDolbyVisionOnNonDVDisplay: loadedOptions.forceDolbyVisionOnNonDVDisplay,
+                    // Sodalite#245: the load's head scan or the producer's own T.35 sighting since, so a
+                    // preference turned on mid-session takes effect on this rebuild.
+                    forcedDolbyVisionYieldsToHDR10Plus: ForcedDolbyVisionHDR10Plus.yieldsToHDR10Plus(
+                        preferHDR10Plus: loadedOptions.preferHDR10PlusOverForcedDolbyVision,
+                        sourceCarriesHDR10Plus: sourceCarriesHDR10PlusMetadata),
                     dolbyVisionHandling: loadedOptions.dolbyVisionHandling,
                     // AE#532: the verdict the load reached, not a second audit: the source has not
                     // changed and the probe that could answer it is gone.

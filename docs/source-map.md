@@ -592,6 +592,7 @@ Notes:
 | `StereoVideoSignal.swift` | `StereoPresentation` (`LoadOptions.stereoPresentation`) and how the native path signals frame-packed 3D in the served HLS. |
 | `HDR10PlusDetectionProbe.swift` | `probe(url:detecting:)`: the opt-in HDR10+ / HDR Vivid pre-playback scan, its bounds and `ProbeDetail`. |
 | `HDR10PlusMetadataScan.swift` | Decoder-free HDR10+ confirmation from T.35 SEI / OBU or Matroska side data, for playback and the probe. |
+| `ForcedDolbyVisionHDR10Plus.swift` | Sodalite#245: when the load reads the head of the stream for HDR10+, and when the forced Dolby Vision route (AE#455) steps aside for it. |
 | `HDR10PassThroughProbe.swift` | AE#957: with `AETHER_HDR10_PROBE`, runs software-path frames through the frame chain and/or sets HDR10 metadata of its own, to check on a television whether that metadata arrives (`Probes/HDR10PassThrough`). |
 | `HDRVividMetadataScan.swift` | Decoder-free HDR Vivid (CUVA) confirmation for the detail probe (#699). |
 | `DolbyVisionRecordAudit.swift` | AE#532: what a DV source's own RPU says about the profile its container record claims. |

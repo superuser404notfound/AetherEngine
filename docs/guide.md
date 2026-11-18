@@ -397,6 +397,7 @@ An assertion only ever adds a capability, so neither flag can hide one the syste
 - What it does: it serves a Profile 8.1 (or converted Profile 7) source as Profile 5. AVPlayer then composes the Dolby Vision picture itself, instead of handing the TV only the HDR10 base layer ([#455](https://github.com/superuser404notfound/AetherEngine/issues/455)).
 - The risk: a tvOS build that reads the base layer's colours from the profile field would show a green / violet cast.
 - Asserting `panelPresentsDolbyVision` turns it off.
+- A file that also carries HDR10+ loses that HDR10+ on this route. On an HDR10+ TV, also set `preferHDR10PlusOverForcedDolbyVision`, and such a file keeps its HDR10+ (Sodalite#245).
 
 Details in [api.md › forceDolbyVisionOnNonDVDisplay](api.md#forcedolbyvisiononnondvdisplay).
 

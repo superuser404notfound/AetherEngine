@@ -479,6 +479,28 @@ public struct LoadOptions: Sendable, Equatable {
     /// which is served as the Profile 8.1 it is converted to. Reported by DrHurt against a Samsung HDR10 panel.
     public var forceDolbyVisionOnNonDVDisplay: Bool
 
+    /// Sodalite#245, default OFF. Lets a source's own HDR10+ (ST 2094-40) outrank the
+    /// `forceDolbyVisionOnNonDVDisplay` route.
+    ///
+    /// The forced route packages the Dolby Vision as Profile 5, so AVPlayer composes the RPU and the panel
+    /// receives HDR10 with the dynamic mapping already in the pixels. A Profile 8.1 remux very often carries
+    /// HDR10+ in its HDR10 base layer as well, and an HDR10+ panel would rather have that: on the native
+    /// Profile 8.1 route the base layer reaches the panel with its HDR10+ metadata intact. With this on, a
+    /// load that would take the forced route reads the head of the video stream first (the packets
+    /// `avformat_find_stream_info` already queued, plus a few more within a small budget), and a source
+    /// that carries HDR10+ keeps the native route. A source without it still takes the forced route.
+    ///
+    /// Whether the panel takes HDR10+ is not observable on tvOS (`AVPlayer.HDRMode` has no HDR10+ value), so
+    /// the claim is the host's, the same way `panelPresentsDolbyVision` is. On a panel that only takes
+    /// static HDR10 this costs the RPU composition for exactly the sources that carry HDR10+.
+    ///
+    /// Read only where `forceDolbyVisionOnNonDVDisplay` would apply: a display without Dolby Vision, HEVC
+    /// Profile 8.1 or Profile 7, `dolbyVisionHandling == .automatic`, on the native route. The head scan runs
+    /// on a seekable VOD source only; a live load keeps the forced route. A rebuild of the running session
+    /// also counts HDR10+ the segment producer has seen since, so turning this on mid-session through
+    /// `reloadAtCurrentPosition(applying:)` takes effect.
+    public var preferHDR10PlusOverForcedDolbyVision: Bool
+
     /// A `DolbyVisionHandling`. Default `.automatic`. `.baseLayerOnly` presents the HDR10 / HLG base layer
     /// of a Dolby Vision source and leaves the Dolby Vision out of the container, on every display: the
     /// route a host offers as "Dolby Vision: off (HDR10)".
@@ -1220,6 +1242,7 @@ public struct LoadOptions: Sendable, Equatable {
         httpHeaders: [String: String] = [:],
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
+        preferHDR10PlusOverForcedDolbyVision: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
         preferDualLayerDolbyVision: Bool = false,
         dualLayerRoute: DualLayerRoute = .softwareHost,
@@ -1293,6 +1316,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.httpHeaders = httpHeaders
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
+        self.preferHDR10PlusOverForcedDolbyVision = preferHDR10PlusOverForcedDolbyVision
         self.dolbyVisionHandling = dolbyVisionHandling
         self.preferDualLayerDolbyVision = preferDualLayerDolbyVision
         self.dualLayerRoute = dualLayerRoute
