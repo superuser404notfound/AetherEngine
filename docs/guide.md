@@ -139,6 +139,8 @@ Use `seekEvents` (`AnyPublisher<SeekEvent, Never>`) wherever the end of a seek m
 
 `$isSeeking` alone cannot tell you whether a seek landed, gave up or was replaced. And on a stalled source, a seek that gave up can still land minutes later.
 
+Each event also says who asked (`origin`) and where the playhead stood when it was asked (`departure`). A skip from Control Center or the iPhone Remote that the engine handled has origin `.remoteCommand`, so you can react to every skip back without intercepting commands. See [Seek events](api.md#seek-events).
+
 ### videoRoute
 
 `videoRoute` says which pipeline plays the session:

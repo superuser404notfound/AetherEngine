@@ -340,6 +340,7 @@ public final class AetherEngine: ObservableObject {
         let id: UInt64
         let target: Double
         let origin: SeekEvent.Origin
+        var departure: Double? = nil
     }
 
     var programmaticSeekTicket: SeekTicket?
@@ -361,16 +362,17 @@ public final class AetherEngine: ObservableObject {
 
     /// Publishes one `SeekEvent` and logs it. The log line is the device-side record: a host that has not
     /// wired the stream still gets the same statement in `EngineLog`.
-    func emitSeekEvent(id: UInt64, origin: SeekEvent.Origin, outcome: SeekEvent.Outcome, target: Double) {
-        let event = SeekEvent(id: id, origin: origin, outcome: outcome, target: target)
+    func emitSeekEvent(id: UInt64, origin: SeekEvent.Origin, outcome: SeekEvent.Outcome, target: Double,
+                       departure: Double? = nil) {
+        let event = SeekEvent(id: id, origin: origin, outcome: outcome, target: target, departure: departure)
         EngineLog.emit("[AetherEngine] \(event)", category: .engine)
         seekEventSubject.send(event)
     }
 
     /// Opens a ticket and publishes its `.began`.
-    private func beginSeekTicket(origin: SeekEvent.Origin, target: Double) -> SeekTicket {
-        let ticket = SeekTicket(id: nextSeekEventID(), target: target, origin: origin)
-        emitSeekEvent(id: ticket.id, origin: origin, outcome: .began, target: target)
+    private func beginSeekTicket(origin: SeekEvent.Origin, target: Double, departure: Double? = nil) -> SeekTicket {
+        let ticket = SeekTicket(id: nextSeekEventID(), target: target, origin: origin, departure: departure)
+        emitSeekEvent(id: ticket.id, origin: origin, outcome: .began, target: target, departure: departure)
         return ticket
     }
 
@@ -379,7 +381,8 @@ public final class AetherEngine: ObservableObject {
     /// settled, so every terminal path must run through here.
     func closeSeekTicket(_ ticket: inout SeekTicket?, with outcome: SeekEvent.Outcome) {
         guard let open = ticket else { return }
-        emitSeekEvent(id: open.id, origin: open.origin, outcome: outcome, target: open.target)
+        emitSeekEvent(id: open.id, origin: open.origin, outcome: outcome, target: open.target,
+                      departure: open.departure)
         ticket = nil
     }
 
@@ -388,7 +391,8 @@ public final class AetherEngine: ObservableObject {
     /// source finally serves the target (AE#38 follow-up, the case a level signal cannot express).
     func reportSeekStalled() {
         guard let open = programmaticSeekTicket else { return }
-        emitSeekEvent(id: open.id, origin: open.origin, outcome: .stalled, target: open.target)
+        emitSeekEvent(id: open.id, origin: open.origin, outcome: .stalled, target: open.target,
+                      departure: open.departure)
     }
 
     /// Recomputes isSeeking/seekTarget from the in-flight flags. Idempotent to avoid redundant Combine emissions.
@@ -419,9 +423,9 @@ public final class AetherEngine: ObservableObject {
 
     /// Opens (or replaces) the deferred stash entry. A second stashed seek supersedes the first, matching
     /// `pendingPreReadySeek`'s own latest-wins rule.
-    func beginDeferredSeek(target: Double) {
+    func beginDeferredSeek(target: Double, departure: Double? = nil) {
         closeSeekTicket(&deferredSeekTicket, with: .superseded)
-        deferredSeekTicket = beginSeekTicket(origin: .deferred, target: target)
+        deferredSeekTicket = beginSeekTicket(origin: .deferred, target: target, departure: departure)
         setDeferredSeek(inFlight: true, target: target)
     }
 
@@ -445,8 +449,10 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Rejection path: the seek never reached a host, so it gets a standalone event and no `.began`.
-    func emitSeekRejected(_ reason: SeekEvent.Rejection, target: Double) {
-        emitSeekEvent(id: nextSeekEventID(), origin: .programmatic, outcome: .rejected(reason), target: target)
+    func emitSeekRejected(_ reason: SeekEvent.Rejection, target: Double,
+                          origin: SeekEvent.Origin = .programmatic, departure: Double? = nil) {
+        emitSeekEvent(id: nextSeekEventID(), origin: origin, outcome: .rejected(reason), target: target,
+                      departure: departure)
     }
 
     /// Complete the seek state after a late async recovery landing settled the clock through the
@@ -1207,6 +1213,9 @@ public final class AetherEngine: ObservableObject {
         var seconds: Double
         var origin: SeekOrigin
         var exact = false
+        /// AE#1088: where the playhead stood when the seek was asked for. The stash publishes the target
+        /// on the clock, so the replay cannot read this back from `currentTime`.
+        var departure: Double? = nil
     }
     var pendingPreReadySeek: PendingPreReadySeek?
     /// AE#446 round 4: what separates the CURRENT item's own timeline from the session's, in seconds.
@@ -1623,7 +1632,10 @@ public final class AetherEngine: ObservableObject {
         case .replay:
             pendingPreReadySeek = nil
             EngineLog.emit("[AetherEngine] replaying seek stashed during load to \(String(format: "%.2f", pending.seconds))s (#178)", category: .engine)
-            Task { @MainActor in await self.seek(to: pending.seconds, origin: pending.origin, exact: pending.exact) }
+            Task { @MainActor in
+                await self.seek(to: pending.seconds, origin: pending.origin, exact: pending.exact,
+                                departure: pending.departure)
+            }
         }
     }
 
@@ -6851,13 +6863,18 @@ public final class AetherEngine: ObservableObject {
         return frontier.contains(target)
     }
 
-    func seek(to seconds: Double, origin: SeekOrigin, exact: Bool = false) async {
+    func seek(to seconds: Double, origin: SeekOrigin, exact: Bool = false, departure: Double? = nil) async {
+        // AE#1088: read before anything below moves the clock. The engine's own rejoin has no departure
+        // a host could act on.
+        let asked = departure ?? currentTime
+        let departure: Double? = origin == .liveRejoin || !asked.isFinite ? nil : asked
+        let eventOrigin = origin.eventOrigin
         // Guard: a host scrub racing stop() must not flip an idle/error engine to .seeking -> .playing.
         // .ended is terminal too: after end-of-media the host reloads to replay, it does not scrub a parked session.
         switch state {
         case .idle, .ended, .error:
             EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: no active session (state=\(state))", category: .engine)
-            emitSeekRejected(.noActiveSession, target: seconds)
+            emitSeekRejected(.noActiveSession, target: seconds, origin: eventOrigin, departure: departure)
             return
         case .loading:
             // #178: don't drop a seek raced against load(). No hosts exist yet (forwarding would
@@ -6865,10 +6882,11 @@ public final class AetherEngine: ObservableObject {
             // in the #127 slot and resolve it on the transition out of .loading (state didSet):
             // replay into a playable state, discard into a terminal one. Clamp/live guards re-run
             // at replay when the session is actually known; duration may still be unprobed here.
-            pendingPreReadySeek = PendingPreReadySeek(seconds: seconds, origin: origin, exact: exact)
+            pendingPreReadySeek = PendingPreReadySeek(seconds: seconds, origin: origin, exact: exact,
+                                                      departure: departure)
             clock.currentTime = duration > 0 ? max(0, min(seconds, duration)) : max(0, seconds)
             EngineLog.emit("[AetherEngine] seek(to:\(String(format: "%.2f", seconds))) stashed during load; will replay when the session settles (#178)", category: .engine)
-            beginDeferredSeek(target: clock.currentTime)
+            beginDeferredSeek(target: clock.currentTime, departure: departure)
             return
         default:
             break
@@ -6883,12 +6901,12 @@ public final class AetherEngine: ObservableObject {
         if isLive {
             guard let w = liveWindow else {
                 EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: live, DVR disabled", category: .engine)
-                emitSeekRejected(.liveWithoutDVR, target: seconds)
+                emitSeekRejected(.liveWithoutDVR, target: seconds, origin: eventOrigin, departure: departure)
                 return
             }
             if Self.liveSeekRefusedWithoutDVR(origin: origin, windowSeconds: w.windowSeconds) {
                 EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: live, DVR disabled", category: .engine)
-                emitSeekRejected(.liveWithoutDVR, target: seconds)
+                emitSeekRejected(.liveWithoutDVR, target: seconds, origin: eventOrigin, departure: departure)
                 return
             }
         }
@@ -6907,7 +6925,7 @@ public final class AetherEngine: ObservableObject {
                 clock.currentTime = nativeHost.map { displaySeconds(forPlaylistSeconds: $0.currentTime) }
                     ?? PresentationAxis.display(sourcePTS: clock.sourceTime, origin: sourcePresentationOrigin)
             }
-            emitSeekRejected(.sourceNotSeekable, target: seconds)
+            emitSeekRejected(.sourceNotSeekable, target: seconds, origin: eventOrigin, departure: departure)
             return
         }
         // #127: pre-ready native item (background-teardown reload, cold start): forwarding the seek now
@@ -6918,10 +6936,11 @@ public final class AetherEngine: ObservableObject {
             isLive: isLive,
             nativeHostReady: nativeHost?.isReady ?? true
         ) {
-            pendingPreReadySeek = PendingPreReadySeek(seconds: seconds, origin: origin, exact: exact)
+            pendingPreReadySeek = PendingPreReadySeek(seconds: seconds, origin: origin, exact: exact,
+                                                      departure: departure)
             clock.currentTime = max(0, min(seconds, duration))
             EngineLog.emit("[AetherEngine] seek(to:\(String(format: "%.2f", seconds))) deferred until item ready (#127)", category: .engine)
-            beginDeferredSeek(target: clock.currentTime)
+            beginDeferredSeek(target: clock.currentTime, departure: departure)
             return
         }
         // VOD: clamp to [0, duration] in source PTS. Live/DVR: clamp to the window's
@@ -6997,7 +7016,7 @@ public final class AetherEngine: ObservableObject {
         // Whatever was in flight lost; its ticket closes here rather than at the generation guards, which
         // are spread over every exit of the deadline loop.
         closeSeekTicket(&programmaticSeekTicket, with: .superseded)
-        programmaticSeekTicket = beginSeekTicket(origin: .programmatic, target: target)
+        programmaticSeekTicket = beginSeekTicket(origin: eventOrigin, target: target, departure: departure)
         setProgrammaticSeek(inFlight: true, target: target)
         // Capture loadGeneration so the live finalize can detect a concurrent stop()/load()/zap
         // (which bumps loadGeneration in stopInternal but leaves seekGeneration untouched), matching

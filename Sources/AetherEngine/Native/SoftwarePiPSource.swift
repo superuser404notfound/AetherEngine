@@ -124,8 +124,10 @@ public final class SoftwarePiPSource {
     /// `skip(by:)` that returns once the seek has settled, for the PiP skip completion handler.
     func skipAndWait(by seconds: Double) async {
         guard let engine else { return }
-        let target = Self.skipTarget(isLive: isLive, currentTime: engine.currentTime, duration: engine.duration, by: seconds)
-        await engine.seek(to: target)
+        let departure = engine.currentTime
+        let target = Self.skipTarget(isLive: isLive, currentTime: departure, duration: engine.duration, by: seconds)
+        guard target.isFinite else { return }
+        await engine.seek(to: target, origin: .pictureInPicture, departure: departure)
     }
 
     #if canImport(AVKit) && !os(watchOS)

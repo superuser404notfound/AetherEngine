@@ -276,10 +276,11 @@ Every accepted seek emits `.began` and then exactly one of `.landed(renderedTime
 
 One asymmetry is deliberate: a `.stalled` seek stays alive as recovery intent, so its `.landed` can still arrive minutes later on a source that finally serves the target. No level signal can express that.
 
-Three paths feed the stream:
+Four paths feed the stream:
 
 - **Programmatic seeks** report from their finalize step, so the clock is already at the target when the event fires.
 - **Seeks stashed before the session can take them** (#127/#178) hold the level for the whole stash window. The engine publishes their target on `currentTime` optimistically, and a consumer that broadcasts it needs to know nothing has reached it yet.
+- **Remote command and PiP skips** (AE#1088) go through the programmatic path, with origin `.remoteCommand` or `.pictureInPicture`. `SoftwareNowPlayingPolicy.perform` hands the engine the position it computed the target from, and that becomes the event's `departure`.
 - **Native AVKit scrubs** end their window when the picture reaches the restarted region, watched on `$renderedTime` and capped at 8 s.
 
   They do not end when the coalesced producer restart drains. Draining only means the producer is producing at the new index; the picture arrives a fetch and a decode later ([measured](measurements.md#native-scrub-picture-latency)).

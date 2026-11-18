@@ -40,6 +40,9 @@ protocol SoftwareNowPlayingTransport: AnyObject {
     func pause()
     func togglePlayPause()
     func seek(to seconds: Double) async
+    /// A seek the engine makes on behalf of a remote command. `departure` is the position the target was
+    /// computed from, so the host sees where the skip started (AE#1088).
+    func seekFromRemoteCommand(to seconds: Double, departure: Double) async
     /// A play that arrives from the lock screen, Control Center or a remote. The engine reactivates its
     /// audio session first: the system may have deactivated it during the pause, and a player resumed on
     /// an inactive session stays silent.
@@ -53,6 +56,7 @@ protocol SoftwareNowPlayingTransport: AnyObject {
 
 extension SoftwareNowPlayingTransport {
     func interceptRemoteCommand(_ command: NowPlayingRemoteCommand) -> Bool { false }
+    func seekFromRemoteCommand(to seconds: Double, departure: Double) async { await seek(to: seconds) }
     func playFromRemote() { play() }
     func togglePlayPauseFromRemote() { togglePlayPause() }
     func performTrackCommand(next: Bool) {}
@@ -150,11 +154,13 @@ enum SoftwareNowPlayingPolicy {
         case .nextTrack: transport.performTrackCommand(next: true)
         case .previousTrack: transport.performTrackCommand(next: false)
         case .skip(let seconds):
-            let target = skipTarget(current: transport.currentTime, delta: seconds, duration: transport.duration)
-            Task { @MainActor in await transport.seek(to: target) }
+            let departure = transport.currentTime
+            let target = skipTarget(current: departure, delta: seconds, duration: transport.duration)
+            Task { @MainActor in await transport.seekFromRemoteCommand(to: target, departure: departure) }
         case .changePosition(let position):
+            let departure = transport.currentTime
             let target = skipTarget(current: position, delta: 0, duration: transport.duration)
-            Task { @MainActor in await transport.seek(to: target) }
+            Task { @MainActor in await transport.seekFromRemoteCommand(to: target, departure: departure) }
         }
     }
 
