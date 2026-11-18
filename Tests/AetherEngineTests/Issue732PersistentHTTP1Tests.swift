@@ -87,7 +87,14 @@ final class Issue732PersistentHTTP1Tests: XCTestCase {
             defer { reader.close() }
 
             let stream = await Self.offPool { Self.drain(reader) }
-            XCTAssertEqual(stream.count, 188 * 3, "\(status): segment 0 only, then the ingest ends")
+            if persistent {
+                XCTAssertEqual(stream.count, 188 * 3, "\(status): segment 0 only, then the ingest ends")
+            } else {
+                // The URLSession path fetches segments side by side, so the refusal can end the group
+                // before segment 0 commits (seen once under the full suite's load).
+                XCTAssertTrue([0, 188 * 3].contains(stream.count),
+                              "\(status): at most segment 0, then the ingest ends (got \(stream.count) bytes)")
+            }
             XCTAssertEqual(server.requests.filter { $0.path == "/seg1.ts" }.count, 1,
                            "\(status) must not be re-asked on the ingest's own timer")
             XCTAssertTrue(OriginRequestBudget.shared.refusedRecently(playlistURL, within: 60),
