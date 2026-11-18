@@ -115,6 +115,22 @@ struct KeyframeStillLadderTests {
         #expect(!KeyframeStillLadder.linkIsIdle(s))
     }
 
+    @Test("a served rendition's window reads back to back, every other rung keeps its gap")
+    func windowReadsBackToBack() {
+        var s = idle(); s.secondsSinceLastRung = 0
+        s.minimumSpacingSeconds = KeyframeStillLadder.fineWindowSpacingSeconds
+        #expect(KeyframeStillLadder.linkIsIdle(s))
+        // Back to back still means an idle link before each read.
+        s.originInflight = 1
+        #expect(!KeyframeStillLadder.linkIsIdle(s))
+        s.originInflight = 0; s.forwardBufferSeconds = 10
+        #expect(!KeyframeStillLadder.linkIsIdle(s))
+        s = idle(); s.secondsSinceLastRung = 0
+        #expect(!KeyframeStillLadder.linkIsIdle(s))
+        s.secondsSinceLastRung = KeyframeStillLadder.rungSpacingSeconds
+        #expect(KeyframeStillLadder.linkIsIdle(s))
+    }
+
     @Test("a one-request origin is never read, however idle the link looks (AE#937)")
     func serialOriginNeverRead() {
         var s = idle(); s.originSerial = true

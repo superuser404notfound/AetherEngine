@@ -84,6 +84,9 @@ enum KeyframeStillLadder {
         var secondsSinceOriginRefusal: Double?
         var secondsSinceSessionStart: Double
         var secondsSinceLastRung: Double?
+        /// The gap this rung keeps to the last one. `fineWindowSpacingSeconds` for a served
+        /// rendition's window, `rungSpacingSeconds` for everything else.
+        var minimumSpacingSeconds: Double = KeyframeStillLadder.rungSpacingSeconds
     }
 
     /// Below this the pump may need the link any moment, and a rung read could be the request it waits on.
@@ -94,6 +97,10 @@ enum KeyframeStillLadder {
     static let refusalQuietSeconds: Double = 120
     /// At most one rung read per this many seconds, however idle the link looks.
     static let rungSpacingSeconds: Double = 2
+    /// The window of a served I-frame rendition reads back to back while the link stays idle. At one
+    /// read per 2 s the 61 segments took two minutes, so a scrub soon after a pause found them cold
+    /// (Harsh, 7.69.1: the box stayed empty for about 8 s). Every read still checks the link first.
+    static let fineWindowSpacingSeconds: Double = 0
 
     /// True when one rung read may go out now. It requires the origin to have NOTHING in flight and
     /// nobody queued, not merely a free slot, so on an origin whose limit nobody has learned yet the
@@ -107,7 +114,7 @@ enum KeyframeStillLadder {
         guard s.secondsSinceSessionStart >= startupGraceSeconds else { return false }
         guard s.originInflight == 0, s.originWaiting == 0, !s.originPaced else { return false }
         if let refusal = s.secondsSinceOriginRefusal, refusal < refusalQuietSeconds { return false }
-        if let last = s.secondsSinceLastRung, last < rungSpacingSeconds { return false }
+        if let last = s.secondsSinceLastRung, last < s.minimumSpacingSeconds { return false }
         return true
     }
 

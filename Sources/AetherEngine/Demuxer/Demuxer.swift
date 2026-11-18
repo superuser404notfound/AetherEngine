@@ -455,6 +455,11 @@ public final class Demuxer: @unchecked Sendable {
     /// file costs a page-cache hit, so a second copy of it in the temporary directory buys nothing.
     var readsSourceDirectly: Bool { avioProvider == nil }
 
+    /// Forwarded to the network reader (`AVIOReader.setRangeSizeCap`); a no-op for other providers.
+    func capSourceRangeSize(_ bytes: Int?) {
+        (avioProvider as? AVIOReader)?.setRangeSizeCap(bytes)
+    }
+
     /// Timestamp of last unplanned reconnect (drop/stall, not a seek).
     /// Live producer correlates with backward source-PTS reset to detect
     /// Jellyfin transcode respawn. See `AVIOReader.lastUnplannedReconnectAt`.

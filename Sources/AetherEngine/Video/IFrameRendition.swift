@@ -5,7 +5,12 @@ import Foundation
 protocol IFrameSegmentSource: AnyObject, Sendable {
     var format: IFrameRenditionFormat { get }
     func initSegment() -> Data?
-    func fragment(at index: Int) -> Data?
+    /// `isAbandoned` is true once the client that asked has hung up; such a request reads nothing.
+    func fragment(at index: Int, isAbandoned: @escaping () -> Bool) -> Data?
+}
+
+extension IFrameSegmentSource {
+    func fragment(at index: Int) -> Data? { fragment(at: index, isAbandoned: { false }) }
 }
 
 /// What the I-frame rendition carries, and so what the master declares for it.
@@ -24,7 +29,8 @@ enum IFrameRenditionFormat: Equatable, Sendable {
 }
 
 /// AE#682: answers `iframe_init.mp4` and `iframe{N}.mp4`. One request at a time: there is one side
-/// demuxer, and AVKit asks for up to five keyframes at once.
+/// demuxer, and AVKit asks for up to five keyframes at once. Who goes next is `IFrameRequestGate`'s
+/// call: the newest request first, the ladder's prefetch only when no request waits.
 final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
     struct Entry {
         let startPts: Int64
@@ -42,11 +48,13 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
     private let interruptReads: () -> Void
     private let closeReader: () -> Void
 
-    private let queue = DispatchQueue(label: "aether.iframe-rendition")
+    private let gate = IFrameRequestGate()
     private let stateLock = NSLock()
     private var isShutDown = false
     private var capturedInit: Data?
     private var failureLog = IFrameLogThrottle()
+    private var abandonedLog = IFrameLogThrottle()
+    private var abandonedSkips = 0
 
     init(entries: [Entry],
          cache: IFramePayloadCache,
@@ -68,23 +76,26 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
         self.closeReader = closeReader
     }
 
+    /// Calls waiting for their turn on the side reader, for tests.
+    var waitingTurns: Int { gate.waitingCount }
+
     private var shutDown: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return isShutDown
     }
 
     func initSegment() -> Data? {
-        queue.sync {
+        gate.withTurn(.request) {
             guard !shutDown else { return nil }
             if capturedInit == nil { _ = buildLocked(at: 0) }
             return capturedInit
         }
     }
 
-    func fragment(at index: Int) -> Data? {
-        queue.sync {
+    func fragment(at index: Int, isAbandoned: @escaping () -> Bool) -> Data? {
+        gate.withTurn(.request) {
             guard !shutDown else { return nil }
-            return buildLocked(at: index)
+            return buildLocked(at: index, isAbandoned: isAbandoned)
         }
     }
 
@@ -93,7 +104,7 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
     /// the wrong picture over the right time. `isStale` is asked before the source is touched, so a
     /// queue of superseded requests costs no reads.
     func keyframePayload(at index: Int, isStale: () -> Bool = { false }) -> Data? {
-        queue.sync {
+        gate.withTurn(.request) {
             guard !shutDown, entries.indices.contains(index) else { return nil }
             if let cached = cache.payload(for: index) { return cached }
             guard !isStale() else { return nil }
@@ -105,7 +116,7 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
     /// the fragment, which for a JPEG rendition is the decode, tone map and encode a request would
     /// otherwise wait for. Never stands a neighbour in: a miss is nil, and the ladder counts it.
     func prefetch(at index: Int, buildsFragment: Bool) -> Data? {
-        queue.sync {
+        gate.withTurn(.prefetch) {
             guard !shutDown, entries.indices.contains(index) else { return nil }
             guard let payload = cache.payload(for: index) ?? readLocked(at: index) else { return nil }
             if buildsFragment, !shutDown { _ = buildLocked(at: index) }
@@ -113,7 +124,7 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
         }
     }
 
-    /// A keyframe already read, without the queue: a scrub must not wait behind a read in flight.
+    /// A keyframe already read, without waiting for a turn: a scrub must not wait behind a read in flight.
     func cachedKeyframePayload(at index: Int) -> Data? {
         guard !shutDown, entries.indices.contains(index) else { return nil }
         return cache.payload(for: index)
@@ -138,11 +149,21 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
         return read
     }
 
-    private func buildLocked(at index: Int) -> Data? {
+    private func buildLocked(at index: Int, isAbandoned: () -> Bool = { false }) -> Data? {
         guard entries.indices.contains(index) else { return nil }
         let entry = entries[index]
         var payload = cache.payload(for: index)
         if payload == nil {
+            // AVKit gave up on it while it waited its turn; the read would only delay the next one.
+            if isAbandoned() {
+                abandonedSkips += 1
+                if let suppressed = abandonedLog.shouldEmit(now: Date()) {
+                    EngineLog.emit("[IFrameRendition] skipped idx=\(index), its request was abandoned "
+                                   + "(\(abandonedSkips) so far, \(suppressed) since the last line)",
+                                   category: .session)
+                }
+                return nil
+            }
             if let read = readLocked(at: index) {
                 payload = read
             } else if shutDown {
@@ -178,11 +199,52 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
         isShutDown = true
         stateLock.unlock()
         if first { interruptReads() }
-        queue.sync {
+        gate.withTurn(.request) {
             guard first else { return }
             closeReader()
             cache.removeAll()
         }
+    }
+}
+
+/// One turn at a time on the rendition's side reader. A free gate goes to the newest waiting
+/// request: when a scrub moves on, the frame under the finger is the one to answer, not the ones it
+/// passed on the way. The ladder's prefetch goes only when no request waits, so a request waits for
+/// at most the one read already in flight.
+final class IFrameRequestGate: @unchecked Sendable {
+    enum Priority { case prefetch, request }
+
+    private let condition = NSCondition()
+    private var busy = false
+    private var nextTicket: UInt64 = 0
+    private var waiting: [UInt64: Priority] = [:]
+
+    /// Callers waiting for a turn, for tests.
+    var waitingCount: Int {
+        condition.lock(); defer { condition.unlock() }
+        return waiting.count
+    }
+
+    func withTurn<T>(_ priority: Priority, _ body: () -> T) -> T {
+        condition.lock()
+        let ticket = nextTicket
+        nextTicket += 1
+        waiting[ticket] = priority
+        while busy || chosenLocked() != ticket { condition.wait() }
+        waiting[ticket] = nil
+        busy = true
+        condition.unlock()
+        defer {
+            condition.lock()
+            busy = false
+            condition.broadcast()
+            condition.unlock()
+        }
+        return body()
+    }
+
+    private func chosenLocked() -> UInt64? {
+        waiting.filter { $0.value == .request }.keys.max() ?? waiting.keys.max()
     }
 }
 

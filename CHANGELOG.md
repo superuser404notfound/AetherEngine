@@ -12,6 +12,15 @@ the public-API contract.
 
 ### Fixed
 
+- **AVKit's scrub thumbnails are ready sooner after a pause.** The I-frame rendition's read-ahead took one
+  keyframe every 2 s, so its window of 30 segments either side of the playhead took two minutes to fill, and a
+  scrub soon after a pause found the box empty for several seconds. The window now reads back to back while the
+  link stays idle. When the scrubber opens, AVKit asks for dozens of stills spread over the whole title; the
+  newest request now goes first, so the still under the finger no longer waits behind them, and a request AVKit gave up
+  on reads nothing. Each read also asks for a Range sized to the keyframes it has seen (256 KB for a 1080p
+  episode instead of 1 MB). Against a 60 ms, 80 Mbit origin, the finger's still came after 150 ms instead of
+  1.25 s, and the burst took 5 s instead of 13 s (AE#682, thanks Harsh).
+
 - **A menu marker on a bitmap track holds after subtitles-off.** On a file with only bitmap subtitle tracks,
   `clearSubtitle()` dropped the engine's list of rendition stores while the loopback server kept serving the
   old ones. A `markerOnly` selection made after it silenced nothing, so every subtitle segment AVKit asked for

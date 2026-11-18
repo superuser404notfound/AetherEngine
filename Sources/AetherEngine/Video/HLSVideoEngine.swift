@@ -313,6 +313,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var stillLadderStartedAt: DispatchTime?
     private var stillLadderLastRungAt: DispatchTime?
     private var stillLadderComplete = false
+    /// The playhead of the latest engine tick, for the reads a finished window rung chains on.
+    private var stillLadderPlayhead: Double?
     private let stillLadderQueue = DispatchQueue(label: "aether.still-ladder", qos: .utility)
     nonisolated static let compositorPreviewFileLimit = 12
     /// AE#682: the server withheld the JPEG I-frame playlist because AVPlayer never asked for a media
@@ -2707,6 +2709,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         stillLadderLock.lock()
         stillLadderStartedAt = .now()
         stillLadderLastRungAt = nil
+        stillLadderPlayhead = nil
         stillLadderCached.removeAll()
         stillLadderFailures.removeAll()
         stillLadderComplete = false
@@ -3409,6 +3412,25 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// One 1 Hz tick from the engine: reads the next rung when the link is idle. Never blocks; the
     /// read runs on the ladder's own queue, one at a time.
     func stillLadderTick(playheadPlaylistSeconds playhead: Double, forwardBufferSeconds: Double) {
+        guard playhead.isFinite else { return }
+        stillLadderLock.lock()
+        stillLadderPlayhead = playhead
+        stillLadderLock.unlock()
+        stillLadderStep(playhead: playhead, forwardBufferSeconds: forwardBufferSeconds)
+    }
+
+    /// A window rung that landed asks for the next one at once instead of waiting for the tick, on
+    /// the newest playhead and a fresh buffer reading. The link check still runs before each read.
+    private func chainStillLadderRung() {
+        stillLadderLock.lock()
+        let playhead = stillLadderPlayhead
+        stillLadderLock.unlock()
+        guard let playhead else { return }
+        stillLadderStep(playhead: playhead,
+                        forwardBufferSeconds: contiguousForwardReadAheadSeconds(playlistSeconds: playhead))
+    }
+
+    private func stillLadderStep(playhead: Double, forwardBufferSeconds: Double) {
         guard !isLiveSession, playhead.isFinite else { return }
         let now = DispatchTime.now()
         stillLadderLock.lock()
@@ -3428,20 +3450,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let segmentCache = cache
         restartLock.unlock()
         guard eligible, let last = plan.last else { return }
-
-        let origin = OriginRequestBudget.shared.snapshot(for: sourceURL)
-        let link = KeyframeStillLadder.LinkState(
-            restartInFlight: restartInFlight,
-            seeking: sideReaderLinkGate?.state.seeking ?? false,
-            forwardBufferSeconds: forwardBufferSeconds,
-            originInflight: origin?.inflight ?? 0,
-            originWaiting: origin?.waiting ?? 0,
-            originPaced: origin?.paced ?? false,
-            originSerial: OriginRequestBudget.shared.requiresSerialRequests(sourceURL),
-            secondsSinceOriginRefusal: origin?.secondsSinceLastRefusal,
-            secondsSinceSessionStart: Self.seconds(from: started, to: now),
-            secondsSinceLastRung: sinceLast)
-        guard KeyframeStillLadder.linkIsIdle(link) else { return }
 
         // The rendition reads every I-frame off the source, resident or not, so nothing is skipped
         // for it.
@@ -3464,12 +3472,32 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
             return
         }
+        let center = KeyframeStillLadder.planIndex(atOrBefore: playhead, in: starts) ?? 0
+        let inWindow = window > 0 && abs(index - center) <= window
+
+        let origin = OriginRequestBudget.shared.snapshot(for: sourceURL)
+        let link = KeyframeStillLadder.LinkState(
+            restartInFlight: restartInFlight,
+            seeking: sideReaderLinkGate?.state.seeking ?? false,
+            forwardBufferSeconds: forwardBufferSeconds,
+            originInflight: origin?.inflight ?? 0,
+            originWaiting: origin?.waiting ?? 0,
+            originPaced: origin?.paced ?? false,
+            originSerial: OriginRequestBudget.shared.requiresSerialRequests(sourceURL),
+            secondsSinceOriginRefusal: origin?.secondsSinceLastRefusal,
+            secondsSinceSessionStart: Self.seconds(from: started, to: now),
+            secondsSinceLastRung: sinceLast,
+            minimumSpacingSeconds: inWindow ? KeyframeStillLadder.fineWindowSpacingSeconds
+                : KeyframeStillLadder.rungSpacingSeconds)
+        guard KeyframeStillLadder.linkIsIdle(link) else { return }
+
         guard let source = makeStillLadderSource(plan: plan) else { return }
         // The JPEG fragment cache holds 128, so only the window around the playhead is built ahead.
-        let center = KeyframeStillLadder.planIndex(atOrBefore: playhead, in: starts) ?? 0
-        let buildsFragment = buildsJPEG && abs(index - center) <= window
+        let buildsFragment = buildsJPEG && inWindow
 
         stillLadderLock.lock()
+        // A chained step and the engine tick can both get here; only one of them reads.
+        guard !stillLadderReadInFlight else { stillLadderLock.unlock(); return }
         stillLadderReadInFlight = true
         stillLadderComplete = false
         stillLadderLastRungAt = now
@@ -3493,6 +3521,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                            + " in \(String(format: "%.0f", ms))ms (\(count) cached)",
                            category: .session,
                            level: payload == nil || count == 1 || count % 25 == 0 ? .info : .verbose)
+            // A miss waits for the tick, so a failing origin is not asked again in a tight loop.
+            if payload != nil, inWindow { self.chainStillLadderRung() }
         }
     }
 

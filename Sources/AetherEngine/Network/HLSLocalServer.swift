@@ -135,7 +135,8 @@ protocol HLSSegmentProvider: AnyObject {
     /// What the rendition carries; nil reads as `.keyframes`.
     var iFrameRenditionFormat: IFrameRenditionFormat? { get }
     func iFrameInitSegment() -> Data?
-    func iFrameSegment(at index: Int) -> Data?
+    /// `isAbandoned` turns true once the client closed the connection that asked.
+    func iFrameSegment(at index: Int, isAbandoned: @escaping () -> Bool) -> Data?
 
     /// Atomic snapshot at the top of each playlist build. discontinuitySequence = EXT-X-DISCONTINUITY-tagged segments that slid out of the window (RFC 8216 §6.2.2 requires incrementing it; omission slips AVPlayer's discontinuity tracking one window per boundary). firstVisible in the same snapshot: a separate lock acquisition let a concurrent slide produce MEDIA-SEQUENCE newer than the count.
     func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int)
@@ -224,7 +225,8 @@ extension HLSSegmentProvider {
     var iFrameRenditionServed: Bool { false }
     var iFrameRenditionFormat: IFrameRenditionFormat? { nil }
     func iFrameInitSegment() -> Data? { nil }
-    func iFrameSegment(at index: Int) -> Data? { nil }
+    func iFrameSegment(at index: Int, isAbandoned: @escaping () -> Bool) -> Data? { nil }
+    func iFrameSegment(at index: Int) -> Data? { iFrameSegment(at: index, isAbandoned: { false }) }
     var liveTargetSegmentDuration: Double? { nil }
     var liveRejoinStart: (segmentIndex: Int, secondsIntoSegment: Double)? { nil }
     func noteServedLiveRejoinPlacement(timeOffset: Double, firstVisible: Int) {}
@@ -1284,7 +1286,8 @@ final class HLSLocalServer: @unchecked Sendable {
 
         case let p where p.hasPrefix("/iframe") && p.hasSuffix(".mp4"):
             guard let index = Self.parseIFramePath(p),
-                  let data = provider?.iFrameSegment(at: index), !data.isEmpty else {
+                  let data = provider?.iFrameSegment(at: index, isAbandoned: { Self.peerHasClosed(fd) }),
+                  !data.isEmpty else {
                 return send404(fd: fd, path: normalizedPath, reason: "no I-frame for \(normalizedPath)")
             }
             return send200(fd: fd, path: normalizedPath, data: data, contentType: "video/mp4")
@@ -1952,6 +1955,17 @@ final class HLSLocalServer: @unchecked Sendable {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { entry in videoPrefixes.contains { entry.hasPrefix($0) } }
         return video.isEmpty ? codecs : video.joined(separator: ",")
+    }
+
+    /// True once the client closed its end. AVKit moves on while a request waits for the side reader,
+    /// and a request nobody reads any more should not cost a source read. Peeks, so a pipelined next
+    /// request on the same connection stays where it is.
+    static func peerHasClosed(_ fd: Int32) -> Bool {
+        var byte: UInt8 = 0
+        let n = recv(fd, &byte, 1, Int32(MSG_PEEK | MSG_DONTWAIT))
+        if n == 0 { return true }
+        if n < 0 { return errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR }
+        return false
     }
 
     /// "/iframe{N}.mp4" -> N. nil for the init, for a negative or non-numeric index, and for any
