@@ -3010,6 +3010,9 @@ public final class AetherEngine: ObservableObject {
     /// cursors/pending persist across deselect/reselect (no re-recognition of covered regions)
     /// and reset only on load/stop.
     var subtitleOCRArmedOrdinal: Int?
+    /// AE#1052: the store the armed worker counts as filling, held so a cancel after a new load
+    /// releases the old session's store and not whatever now sits at that ordinal.
+    var subtitleOCRArmedStore: NativeSubtitleCueStore?
     var subtitleOCRWorkerTask: Task<Void, Never>?
     var subtitleOCRBatchInFlight = false
     var subtitleOCRSidecarFillTask: Task<Void, Never>?

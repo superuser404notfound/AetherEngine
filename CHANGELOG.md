@@ -52,6 +52,12 @@ the public-API contract.
   rendition used to serve text again the moment the host's next call came in, while AVKit's own select of the
   new track was still on its way. A segment AVKit asked for in that gap went to the full 3 s wait on a store
   nothing fills. The old marker now stays empty until the new select has landed (AE#1052, thanks @axeslasher).
+- **A bitmap subtitle rendition that nothing fills no longer holds a request for 3 s.** Only the OCR worker or
+  a sidecar fill puts text into a bitmap rendition. Without either running, each segment request used to wait
+  3 s (30 s for the whole-program file) for text that never came, on the connection AVPlayer also loads video
+  on. Measured with aetherctl on a PGS-only MKV, a segment took 3.07 s before and 2 ms after. It happened when
+  a user picked a bitmap track in AVKit's menu before the host reacted, or when a select named a bitmap track
+  the overlay does not show (AE#1052).
 - **The VOD HLS ingest no longer re-asks a refusing origin three times in 1.5 s.** A 429, 503 or 509 on a
   segment used to be retried in place after 0.5 and 1 s, outside the refusal books. On a panel that allows one
   stream per account that is the churn it answers with a longer refusal or a block. The refusal now goes on

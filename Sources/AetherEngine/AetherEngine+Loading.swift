@@ -1350,7 +1350,7 @@ extension AetherEngine {
             // bitmap decode + OCR must never run; the worker reads the packet store instead.
             for (i, entry) in bitmapEntries.enumerated() {
                 let ordinal = session.nativeSubtitleCueStoresForSession.count
-                session.nativeSubtitleCueStoresForSession.append(NativeSubtitleCueStore())
+                session.nativeSubtitleCueStoresForSession.append(NativeSubtitleCueStore(fillsOnDemand: true))
                 session.nativeSubtitleLanguagesForSession.append(entry.language)
                 session.nativeSubtitleRenditionInfosForSession.append(bitmapInfos[i])
                 session.nativeSubtitleSourceStreamIndicesForSession.append(nil)

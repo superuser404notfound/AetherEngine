@@ -3614,6 +3614,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 EngineLog.emit("[HLSVideoEngine] AE#984: whole-program subtitle .vtt ord=\(ordinal) requested before "
                                + "its sidecar is decoded; answering 404 so AVPlayer asks again", category: .hlsServer)
                 return nil
+            case .waitForReader where !store.waitsForFill:
+                noteServedWithoutFill(store: store, ordinal: ordinal)
             case .waitForReader:
                 let deadline = Date().addingTimeInterval(30.0)
                 while store.wholeProgramServe == .waitForReader, Date() < deadline {
@@ -3652,7 +3654,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         // cover THIS window (read head within the horizon, or still warming up), and only briefly.
         let horizonSeconds = 30.0
         let deadline = Date().addingTimeInterval(3.0)
-        while !store.isFinished,
+        let waits = store.waitsForFill
+        if !waits { noteServedWithoutFill(store: store, ordinal: ordinal) }
+        while waits, !store.isFinished,
               store.readMaxCueEnd() < end,
               end <= store.readMaxCueEnd() + horizonSeconds || store.readMaxCueEnd() <= 0,
               Date() < deadline {
@@ -3663,6 +3667,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         // Absolute media-timeline cue times + MPEGTS:0 identity map. Flip to segment-relative here (one line:
         // relativeToStart: true) if on-device PiP shows subtitles shifted by the segment start. See WebVTTBuilder.segment.
         return WebVTTBuilder.segment(cues: cues, segmentStart: start)
+    }
+
+    /// AE#1052: once per store, the reason its segments come back at once and empty.
+    private func noteServedWithoutFill(store: NativeSubtitleCueStore, ordinal: Int) {
+        guard store.noteServedWithoutFill() else { return }
+        EngineLog.emit("[HLSVideoEngine] AE#1052 subtitle rendition ord=\(ordinal) is a bitmap track no OCR "
+                       + "worker fills; its segments are served at once, without the readiness wait",
+                       category: .hlsServer)
     }
 
     /// Sodalite#32 Phase 2: see `stripASSMarkupInVTT`.
