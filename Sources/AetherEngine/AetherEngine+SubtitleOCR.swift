@@ -12,6 +12,8 @@ extension AetherEngine {
         cancelSubtitleOCRWorker()
         guard let store = nativeStore(atOrdinal: ordinal) else { return }
         subtitleOCRArmedOrdinal = ordinal
+        subtitleOCRArmedStore = store
+        store.fillStarted()
         let language = ordinal < nativeSubtitleTrackTable.count
             ? nativeSubtitleTrackTable[ordinal].language : nil
         EngineLog.emit("[SubtitleOCR] worker armed: ordinal=\(ordinal) stream=\(streamIndex)", category: .engine)
@@ -49,6 +51,8 @@ extension AetherEngine {
             subtitleOCRPendingStates.removeValue(forKey: ordinal)
         }
         subtitleOCRBatchInFlight = false
+        subtitleOCRArmedStore?.fillEnded()
+        subtitleOCRArmedStore = nil
         subtitleOCRArmedOrdinal = nil
         subtitleOCRWorkerTask?.cancel()
         subtitleOCRWorkerTask = nil
@@ -250,7 +254,9 @@ extension AetherEngine {
         let language = nativeSubtitleTrackTable[ordinal].language
         subtitleOCRSidecarFillTask?.cancel()
         EngineLog.emit("[SubtitleOCR] sidecar fill starting: track=\(id) packets=\(source.packets.count)", category: .engine)
+        store.fillStarted()
         subtitleOCRSidecarFillTask = BlockingWork.detached(priority: .utility) {
+            defer { store.fillEnded() }
             await source.forEachDecodedBatch(isCancelled: { Task.isCancelled }) { batch in
                 await SubtitleImageOCR.appendRecognized(cues: batch, language: language, to: store)
             }

@@ -27,7 +27,32 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
     /// with different positions share the store.
     private var maxCueEndSeconds: Double = 0
 
-    init() {}
+    /// AE#1052: a bitmap rendition has no tap or reader behind it. Only the OCR worker or a sidecar
+    /// fill puts cues in, and only while one of them runs on this store.
+    let fillsOnDemand: Bool
+    private var runningFills = 0
+
+    init(fillsOnDemand: Bool = false) { self.fillsOnDemand = fillsOnDemand }
+
+    func fillStarted() { lock.lock(); runningFills += 1; lock.unlock() }
+    func fillEnded() { lock.lock(); runningFills = max(0, runningFills - 1); lock.unlock() }
+
+    /// Whether a request for this store is worth holding for cues. A bitmap store nothing fills would
+    /// hold every request for the whole readiness wait and hand back nothing anyway; on tvOS that held
+    /// the loopback connection AVPlayer also loads video on, and a seek never landed.
+    var waitsForFill: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !fillsOnDemand || runningFills > 0
+    }
+
+    /// Set once the first request found nothing filling the store, so the log says it once.
+    func noteServedWithoutFill() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if notedWithoutFill { return false }
+        notedWithoutFill = true
+        return true
+    }
+    private var notedWithoutFill = false
 
     private static func key(start: Double, end: Double, text: String) -> String {
         let start = SourceTimestampBounds.clampedSeconds(start), end = SourceTimestampBounds.clampedSeconds(end)
