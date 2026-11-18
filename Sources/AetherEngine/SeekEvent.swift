@@ -33,6 +33,12 @@ public struct SeekEvent: Sendable, Equatable {
         case programmatic
         case nativeScrub
         case deferred
+        /// A `.skip` or `.changePosition` from the system (Control Center, the lock screen, the iPhone
+        /// Remote, AirPods) that the engine carried out itself, because it owns Now Playing and
+        /// `nowPlayingCommandInterceptor` left the command to it (AE#1088).
+        case remoteCommand
+        /// A skip button in the Picture in Picture window of the software route (AE#1088).
+        case pictureInPicture
     }
 
     /// Why a seek never reached a host.
@@ -67,12 +73,19 @@ public struct SeekEvent: Sendable, Equatable {
     public let outcome: Outcome
     /// Seek destination on the `currentTime` axis.
     public let target: Double
+    /// Where the playhead stood when the seek was asked for, on the same axis as `target` (AE#1088).
+    /// A remote skip carries the position its target was computed from, and a seek replayed from the
+    /// load stash keeps the position from before the stash, not the optimistic clock it published.
+    /// Nil for `.nativeScrub`, whose starting point AVKit does not report, and for the engine's own
+    /// live rejoin.
+    public let departure: Double?
 
-    public init(id: UInt64, origin: Origin, outcome: Outcome, target: Double) {
+    public init(id: UInt64, origin: Origin, outcome: Outcome, target: Double, departure: Double? = nil) {
         self.id = id
         self.origin = origin
         self.outcome = outcome
         self.target = target
+        self.departure = departure
     }
 
     /// True for the three outcomes that end a seek's in-flight window. A `.stalled` seek is finished as
@@ -95,7 +108,8 @@ extension SeekEvent: CustomStringConvertible {
         case .superseded: outcomeText = "superseded"
         case .rejected(let reason): outcomeText = "rejected(\(reason.rawValue))"
         }
-        return "seek#\(id) \(origin.rawValue) \(outcomeText) target=\(String(format: "%.2f", target))"
+        let from = departure.map { " from=\(String(format: "%.2f", $0))" } ?? ""
+        return "seek#\(id) \(origin.rawValue) \(outcomeText) target=\(String(format: "%.2f", target))\(from)"
     }
 }
 

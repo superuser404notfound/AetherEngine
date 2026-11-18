@@ -234,6 +234,11 @@ extension AetherEngine: SharedNowPlayingClient {
         nowPlayingCommandInterceptor?(command) ?? false
     }
 
+    func seekFromRemoteCommand(to seconds: Double, departure: Double) async {
+        guard seconds.isFinite else { return }
+        await seek(to: seconds, origin: .remoteCommand, departure: departure)
+    }
+
     func performTrackCommand(next: Bool) {
         (next ? nowPlayingNextTrackHandler : nowPlayingPreviousTrackHandler)?()
     }

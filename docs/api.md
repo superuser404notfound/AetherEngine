@@ -1102,13 +1102,19 @@ Prefer `$playbackPhase` over stitching `state` + `isBuffering` + `isSeeking` tog
 
 `seekEvents` publishes `.began`, `.landed(renderedTime:)`, `.stalled`, `.superseded` and `.rejected(SeekEvent.Rejection)`. Each carries its `target`, an `id` that spans the seek, and a `SeekEvent.Origin`:
 
-- `.programmatic`
+- `.programmatic`: a `seek(to:)` from the host, or the engine's own live rejoin.
 - `.nativeScrub`
 - `.deferred`: a seek the session could not take yet. This is where the engine publishes an optimistic `currentTime` for a position nothing has reached.
+- `.remoteCommand`: a skip or a position change from the system (Control Center, the lock screen, the iPhone Remote, AirPods) that the engine carried out itself. That happens on a route where the engine owns Now Playing and `nowPlayingCommandInterceptor` did not take the command. A command the host handles, or one AVKit answers on a route the engine does not own, never shows up here.
+- `.pictureInPicture`: a skip button in the software route's PiP window (`softwarePiPSource`). On the native route AVKit seeks the player itself, and the engine sees no seek.
 
 Use it where the moment `$isSeeking` turns false matters. A plain Boolean cannot say whether a seek landed, gave up, or was superseded, and a `.stalled` seek can still land later under the same id.
 
-The value is a struct: `id`, `origin`, `target` and `outcome` (a `SeekEvent.Outcome`, the cases named above), plus `isTerminal`, true for every outcome except `.began`.
+The value is a struct: `id`, `origin`, `target`, `departure` and `outcome` (a `SeekEvent.Outcome`, the cases named above), plus `isTerminal`, true for every outcome except `.began`.
+
+`departure` is where the playhead stood when the seek was asked for, on the same axis as `target`. Every event of one seek carries the same value. A remote skip reports the position its target was computed from. A seek replayed from the load stash keeps the position from before the stash, not the target the stash published on the clock. It is nil for `.nativeScrub` and for the engine's own live rejoin.
+
+Telling a skip back from other seeks takes the `.began` alone: `target < departure`. A host that reacts to every skip back (subtitles for the line you missed, say) reads both fields there, whatever button sent it (AE#1088).
 
 - `id` rises per engine instance.
 - Every `.began` ends in exactly one `.landed`, `.stalled` or `.superseded` under its id.
@@ -1118,7 +1124,7 @@ The value is a struct: `id`, `origin`, `target` and `outcome` (a `SeekEvent.Outc
 - `.liveWithoutDVR`: a live source with no DVR window to land in.
 - `.sourceNotSeekable`: a forward-only source.
 
-Two seeks publish no rejection. A non-finite target (NaN, infinity) is dropped with a log line and no event. A seek during `.loading` is not rejected: the latest one is stashed and replayed when the session settles, with origin `.deferred` (#178).
+Two seeks publish no rejection. A non-finite target (NaN, infinity) is dropped with a log line and no event. A seek during `.loading` is not rejected: the latest one is stashed and replayed when the session settles, with origin `.deferred` (#178). The replay then carries the origin of the seek that was stashed, so a remote skip during a load reads `.deferred` first and `.remoteCommand` once it runs.
 
 #### Clock hold
 
@@ -1875,7 +1881,7 @@ The engine can own the system Now-Playing card (lock screen, Control Center, the
 | `setNowPlayingInfo(_:)` | The item's identity (title, artist, album, artwork) for whichever route `load()` picks, on every platform. Elapsed, rate and duration come from the host; do not stage them. Pass an empty dictionary to clear. |
 | `setVideoNowPlayingInfo(_:)`, `setAudioNowPlayingInfo(_:)` | The same, for the video or the audio routes only. The video identity is cleared by `stop()`, the audio one is not. |
 | `setNowPlayingTrackCommands(next:previous:)` | Next and previous track handlers (a playlist or an album queue). nil for a direction that does not exist right now. While either is set the card shows track buttons instead of the skip pair. |
-| `nowPlayingCommandInterceptor` | Optional. Sees every remote command first (a `NowPlayingRemoteCommand`: play, pause, toggle, skip, change position, next, previous); return true when the host handled it. Use it for commands whose meaning depends on host state, such as play after the end of an item. |
+| `nowPlayingCommandInterceptor` | Optional. Sees every remote command first (a `NowPlayingRemoteCommand`: play, pause, toggle, skip, change position, next, previous); return true when the host handled it. Use it for commands whose meaning depends on host state, such as play after the end of an item. A skip or position change it leaves to the engine shows up in `seekEvents` with origin `.remoteCommand`, so a host that only wants to know about remote skips does not need to intercept them. |
 | `claimNowPlaying()` | Hands the shared surface to this engine when several engines publish there. See [Several engines in one process](#several-engines-in-one-process). |
 | `videoNowPlayingSession`, `audioNowPlayingSession` | The `MPNowPlayingSession` of the native video host and of the AVPlayer audio host. Declared on iOS, tvOS and visionOS only: a macOS host does not see these two members. nil on the software and FFmpeg hosts, and with no host. |
 | `setExternalMetadata(_:)` | AVKit's on-screen info pane on the video path. Also the base identity of a card the engine publishes on the shared center. Safe before `load()`; replayed at host creation. |

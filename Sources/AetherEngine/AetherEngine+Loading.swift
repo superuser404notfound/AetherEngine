@@ -318,7 +318,8 @@ extension AetherEngine {
                             category: .engine)
                     }
                     Task { @MainActor in
-                        await self.seek(to: pending.seconds, origin: pending.origin, exact: pending.exact)
+                        await self.seek(to: pending.seconds, origin: pending.origin, exact: pending.exact,
+                                        departure: pending.departure)
                         if pending.origin == .liveRejoin { self.acceptCurrentItemForPublishing() }
                     }
                 }

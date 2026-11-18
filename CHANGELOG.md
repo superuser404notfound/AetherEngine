@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`seekEvents` says when a seek came from a remote command, and where it started.** A skip from Control
+  Center, the iPhone Remote or AirPods that the engine carries out itself now has origin `.remoteCommand`
+  instead of `.programmatic`, and a skip button in the software route's PiP window has `.pictureInPicture`.
+  Every event also carries `departure`, the playhead position the seek left from, so a host can spot a skip
+  back from any source without intercepting commands and copying the engine's clamp. A seek replayed from the
+  load stash keeps its original departure. An exhaustive `switch` over `SeekEvent.Origin` needs the two new
+  cases (AE#1088, thanks @secunit404).
+
 ### Fixed
 
 - **AVKit's scrub thumbnails are ready sooner after a pause.** The I-frame rendition's read-ahead took one
