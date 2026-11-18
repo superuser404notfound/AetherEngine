@@ -27,6 +27,13 @@ the public-API contract.
 
 ### Fixed
 
+- **An AES-128 live channel with HEVC in MPEG-TS and no `CODECS` now gets its picture.** The live carriage
+  probe gave up on any encrypted first segment, because it could not read the PMT behind the encryption. A
+  channel like that (common on Xtream/XUI panels) stayed on AVPlayer with sound and no video, although the
+  ingest decrypts these segments. The probe now fetches the 16-byte key, decrypts only the head of the first
+  segment and reads the PMT from that, so the session moves to the ingest. SAMPLE-AES and encrypted
+  `EXT-X-BYTERANGE` segments still stay unread. Pinned by `Issue1089EncryptedCarriageProbeTests` (AE#1089,
+  thanks @stehanOSX).
 - **AVKit's scrub thumbnails are ready sooner after a pause.** The I-frame rendition's read-ahead took one
   keyframe every 2 s, so its window of 30 segments either side of the playhead took two minutes to fill, and a
   scrub soon after a pause found the box empty for several seconds. The window now reads back to back while the

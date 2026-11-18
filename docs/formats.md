@@ -131,6 +131,8 @@ A remote HLS playlist plays on AVPlayer straight from the origin by default (the
 
 **How the HEVC-in-MPEG-TS check runs** (#168). The engine reads the playlist and the head of one segment while AVPlayer starts, so the reroute does not wait for a grace window to run out. A media playlist URL with no master is covered too (#293). Only a codec that the HLS Authoring Spec allows in fMP4 alone triggers that read, so an H.264 channel spends no extra request on it.
 
+**Encrypted segments in that check** (AE#1089). An AES-128 clear-key segment hides its PMT, so the engine first fetches the 16-byte key, then decrypts only the head of the segment and reads the PMT from that. This costs one small extra request. A wrong key gives bytes without TS sync, and that never triggers a reroute. SAMPLE-AES segments and encrypted sub-range segments (`EXT-X-BYTERANGE`) are not read, so this check leaves them alone.
+
 **Refused by the origin** (#363). HTTP 401 and 403 reach the item as `NSURLError` -1013 / -1102. The engine then hands the session to the ingest instead of failing the load. The ingest fetches differently from AVPlayer:
 
 - it sends the configured headers on every request,

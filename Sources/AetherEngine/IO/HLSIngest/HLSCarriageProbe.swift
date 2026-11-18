@@ -39,8 +39,16 @@ enum HLSCarriageProbe {
     enum PlaylistEvidence: Equatable {
         /// Answered from the playlists alone; no segment was fetched.
         case settled(MPEGTransportStreamCodecProbe.Verdict)
-        /// Only this segment's PMT separates the carriages here.
-        case needsSegmentHead(URL)
+        /// Only this segment's PMT separates the carriages here. `key` is set when the segment is
+        /// AES-128 clear-key: its head is decrypted before the PMT is read (AE#1089).
+        case needsSegmentHead(URL, key: SegmentKey?)
+    }
+
+    /// AE#1089: the EXT-X-KEY context of the segment whose PMT is read, resolved against the playlist
+    /// that named it. `iv` is the tag's IV or the segment's media sequence number (RFC 8216 5.2).
+    struct SegmentKey: Equatable {
+        let url: URL
+        let iv: Data
     }
 
     /// AE#296: the playlist stage. Costs one playlist fetch for a media playlist, two for a master, and
@@ -79,17 +87,32 @@ enum HLSCarriageProbe {
     ///
     /// `credentialOrigin` is the playlist the host gave `httpHeaders` for; the segment is a URI that
     /// playlist named, so credentials only follow it to the same origin (audit NET-7).
+    ///
+    /// AE#1089: with a `key`, the 16-byte key is fetched first (one small request, the same one the
+    /// ingest makes) and only the head is decrypted. A wrong key yields bytes without TS sync, which
+    /// reads as `otherCarriage` and never reroutes.
     static func classifyDeferredSegmentHead(
         url: URL,
+        key: SegmentKey? = nil,
         httpHeaders: [String: String],
         credentialOrigin: URL,
         session: URLSession? = nil
     ) async -> MPEGTransportStreamCodecProbe.Verdict {
+        let session = session ?? sharedSession
         do {
+            var decryption: (key: Data, iv: Data)?
+            if let key {
+                decryption = (
+                    try await fetchKey(key.url, httpHeaders: httpHeaders, credentialOrigin: credentialOrigin,
+                                       session: session),
+                    key.iv
+                )
+            }
             return try await classifySegmentHead(
                 url: url,
                 httpHeaders: RedirectHeaderPolicy.scoped(httpHeaders, grantedFor: credentialOrigin, sentTo: url),
-                session: session ?? sharedSession
+                session: session,
+                decryption: decryption
             )
         } catch {
             EngineLog.emit(
@@ -115,9 +138,10 @@ enum HLSCarriageProbe {
         ) {
         case .settled(let verdict):
             return verdict
-        case .needsSegmentHead(let segmentURL):
+        case .needsSegmentHead(let segmentURL, let key):
             return await classifyDeferredSegmentHead(
-                url: segmentURL, httpHeaders: httpHeaders, credentialOrigin: playlistURL, session: session
+                url: segmentURL, key: key, httpHeaders: httpHeaders, credentialOrigin: playlistURL,
+                session: session
             )
         }
     }
@@ -130,8 +154,14 @@ enum HLSCarriageProbe {
         url: URL,
         httpHeaders: [String: String],
         session: URLSession,
+        decryption: (key: Data, iv: Data)? = nil,
         diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context
     ) async throws -> MPEGTransportStreamCodecProbe.Verdict {
+        // A head shorter than one AES block has no plaintext yet, which is no evidence either way.
+        func readable(_ data: Data) -> Data {
+            guard let decryption else { return data }
+            return HLSSegmentDecryptor.decryptAES128CBCHead(data, key: decryption.key, iv: decryption.iv) ?? Data()
+        }
         var request = SourceNetworkDiagnostics.request(makeRequest(url, httpHeaders: httpHeaders), context: diagnosticContext)
         request.setValue("bytes=0-\(maximumSegmentHeadBytes - 1)", forHTTPHeaderField: "Range")
         let trace = SourceNetworkDiagnostics.Trace(role: .hlsSegment, context: SourceNetworkDiagnostics.context(for: request))
@@ -156,7 +186,7 @@ enum HLSCarriageProbe {
             for try await byte in bytes {
                 data.append(byte)
                 guard data.count >= nextVerdictAt else { continue }
-                let verdict = MPEGTransportStreamCodecProbe.classify(data)
+                let verdict = MPEGTransportStreamCodecProbe.classify(readable(data))
                 if verdict != .inconclusive { return verdict }
                 guard data.count < maximumSegmentHeadBytes else { break }
                 nextVerdictAt = min(maximumSegmentHeadBytes, data.count + segmentHeadChunkBytes)
@@ -164,7 +194,7 @@ enum HLSCarriageProbe {
             guard !data.isEmpty else {
                 throw HLSIngestError.unsupportedSegmentFormat
             }
-            return MPEGTransportStreamCodecProbe.classify(data)
+            return MPEGTransportStreamCodecProbe.classify(readable(data))
         } catch {
             terminalError = error
             throw error
@@ -209,14 +239,47 @@ enum HLSCarriageProbe {
         if advertisesFragmentedMP4OnlyVideo, !media.hasUnsupportedEncryption, !media.segments.isEmpty {
             return .settled(.hevcInMPEGTS)
         }
-        // An encrypted segment hides its PMT, and an absence of evidence never reroutes.
         guard let first = media.segments.first,
-              first.crypt == nil,
               !media.hasUnsupportedEncryption,
               let segmentURL = HLSPlaylistParser.resolve(uri: first.uri, against: mediaURL) else {
             return .settled(.inconclusive)
         }
-        return .needsSegmentHead(segmentURL)
+        guard let crypt = first.crypt else { return .needsSegmentHead(segmentURL, key: nil) }
+        // AE#1089: an AES-128 segment's PMT is readable once its head is decrypted, which is what the
+        // ingest does with the whole segment. A sub-range segment is encrypted from its own offset, and
+        // the head read starts at the resource's first byte, so that one stays unjudged.
+        guard first.byteRange == nil,
+              let keyURL = HLSPlaylistParser.resolve(uri: crypt.keyURI, against: mediaURL) else {
+            return .settled(.inconclusive)
+        }
+        return .needsSegmentHead(segmentURL, key: SegmentKey(url: keyURL, iv: crypt.iv))
+    }
+
+    /// Bounded like the ingest's own key fetch, with credentials scoped the way the segment's are.
+    private static func fetchKey(
+        _ url: URL,
+        httpHeaders: [String: String],
+        credentialOrigin: URL,
+        session: URLSession
+    ) async throws -> Data {
+        let request = makeRequest(
+            url, httpHeaders: RedirectHeaderPolicy.scoped(httpHeaders, grantedFor: credentialOrigin, sentTo: url))
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await BoundedFetch.data(
+                for: request, session: session, limit: BoundedFetch.keyLimit, role: .hlsKey)
+        } catch is BoundedFetch.Exceeded {
+            throw HLSIngestError.segmentDecryptFailed(reason: "key exceeds \(BoundedFetch.keyLimit) bytes")
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200..<300).contains(status) else {
+            throw HLSIngestError.playlistUnreachable(status: status)
+        }
+        guard data.count == 16 else {
+            throw HLSIngestError.segmentDecryptFailed(reason: "key length \(data.count) != 16")
+        }
+        return data
     }
 
     private static func fetchPlaylist(

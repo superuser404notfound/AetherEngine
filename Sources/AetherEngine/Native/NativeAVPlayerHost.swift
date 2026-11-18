@@ -2834,7 +2834,7 @@ final class NativeAVPlayerHost {
             switch evidence {
             case .settled(let verdict):
                 self.publishCarriageProbeVerdict(verdict, sid: sid, from: "playlist")
-            case .needsSegmentHead(let segmentURL):
+            case .needsSegmentHead(let segmentURL, let segmentKey):
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(sid) carriage probe: the playlists cannot settle this one, "
                     + "so the segment head waits for readyToPlay rather than compete with the mount (#296)",
@@ -2857,10 +2857,11 @@ final class NativeAVPlayerHost {
                 }
                 let verdict = await SourceNetworkDiagnostics.$context.withValue(diagnosticContext) {
                     await HLSCarriageProbe.classifyDeferredSegmentHead(
-                        url: segmentURL, httpHeaders: httpHeaders, credentialOrigin: url)
+                        url: segmentURL, key: segmentKey, httpHeaders: httpHeaders, credentialOrigin: url)
                 }
                 guard !Task.isCancelled, self.sessionID == sid else { return }
-                self.publishCarriageProbeVerdict(verdict, sid: sid, from: "segment PMT")
+                self.publishCarriageProbeVerdict(
+                    verdict, sid: sid, from: segmentKey == nil ? "segment PMT" : "decrypted segment PMT (#1089)")
             }
         }
     }
