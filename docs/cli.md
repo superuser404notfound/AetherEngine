@@ -743,7 +743,12 @@ aetherctl play --subs eng --seconds 30 \
   --host-calls nativesubs,lanreload@8,nativerender@14,subson@15 file://$PWD/pgs.mkv
 ```
 
-A healthy run arms `[SubtitleOCR] worker armed` once, logs `OCR pre-fill done ... exit=covered`, and reads `selected=English engineActive=4` after the on. The first Vision call in a process can take about a minute while the system compiles its model, so judge a slow pre-fill from a second run. The `VTT` readout fetches the first rendition when none is selected, so its empty segments before the select are the harness asking, not a receiver.
+A healthy run arms `[SubtitleOCR] worker armed` once, logs `OCR pre-fill done ... exit=covered`, and reads `selected=English engineActive=4` after the on. A `pre-fill done ... exit=superseded` right before it is expected: `subson` re-picks the track a tick after `nativerender` and replaces that select.
+
+Two things make this drill read empty without any engine defect:
+
+- **The PGS pictures need readable text.** A fixture with stripes or blank boxes gives OCR nothing, so the rendition stays empty and the engine correctly refuses to select it (`native subtitle select refused: rendition ordinal=0 is empty at the playhead`).
+- **Vision has to compile its model first.** The first text recognition after a fresh `aetherctl` build, or after macOS dropped the cached model, takes about a minute on a Mac (53 s measured, 0.05 s after). Every drill with `nativerender` therefore runs one recognition before the load and prints `OCR warm-up: Vision text recognition ready after N s`. Without it, the readouts at +2 and +4 ticks came long before the pre-fill could finish (AE#1052). The `VTT` readout fetches the first rendition when none is selected, so its empty segments before the select are the harness asking, not a receiver.
 
 ### Sidecar subtitles (`--sidecar`)
 

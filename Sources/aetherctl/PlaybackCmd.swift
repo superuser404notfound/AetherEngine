@@ -6,6 +6,7 @@ import AVFoundation
 import ImageIO
 import UniformTypeIdentifiers
 import AetherEngine
+import Vision
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -761,6 +762,12 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         print("  SURFACE attached: 1280x720 window active for display layer")
     }
     #endif
+
+    // The first text recognition after macOS dropped Vision's compiled model takes about a minute
+    // (52.99 s measured, 0.05 s right after, in a new process too). An OCR drill that starts cold
+    // reads its +2/+4 tick readouts long before the pre-fill can finish and reports an empty
+    // rendition that is only the compile (AE#1052).
+    if hostCalls.contains(where: { $0.hasPrefix("nativerender") }) { warmUpTextRecognition() }
 
     do {
         let probe: SourceProbe?
@@ -1952,4 +1959,18 @@ struct SubtitleReachRequest {
         if let delay { engine.maximumSubtitleDelaySeconds = delay }
         if let advance { engine.maximumSubtitleAdvanceSeconds = advance }
     }
+}
+
+/// One recognition on a blank image, so Vision's model is compiled before the session needs it.
+private func warmUpTextRecognition() {
+    guard let ctx = CGContext(data: nil, width: 64, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return }
+    ctx.setFillColor(gray: 1, alpha: 1)
+    ctx.fill(CGRect(x: 0, y: 0, width: 64, height: 32))
+    guard let image = ctx.makeImage() else { return }
+    let began = Date()
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    try? VNImageRequestHandler(cgImage: image).perform([request])
+    print("  OCR warm-up: Vision text recognition ready after \(String(format: "%.2f", Date().timeIntervalSince(began))) s")
 }
