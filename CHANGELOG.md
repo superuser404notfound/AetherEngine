@@ -22,6 +22,9 @@ the public-API contract.
   was reopened for the whole film and the host never saw a decision. Five reopens in any ten minutes is now
   the ceiling; the next drop ends the session with `.vodSourceFailed` and leaves the next open to the host
   (AE#1085).
+- **Seeking keeps working after an audio switch on the software path.** The rebuild forgot that the
+  source can seek, so `canSeek` stayed false until the next load and a host hid its scrubber. The
+  native path already learned it again from its new session (AE#1086).
 
 ## [7.70.0] - 2026-11-17
 

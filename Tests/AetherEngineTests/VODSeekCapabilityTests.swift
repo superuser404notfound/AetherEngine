@@ -67,5 +67,26 @@ struct VODSeekCapabilityTests {
         #expect(engine.currentTime == 5)
     }
 
+    @Test("An audio switch keeps a seekable source seekable on both decode paths",
+          arguments: [DecodePath.automatic, DecodePath.software])
+    func audioSwitchKeepsSeekability(path: DecodePath) async throws {
+        let origin = try ProbeHTTPTestOrigin(data: TwoAudioTrackFixture.data)
+        let engine = try AetherEngine()
+        defer { engine.stop(); origin.stop() }
+        var options = LoadOptions()
+        options.preferredDecodePath = path
+        options.suppressDisplayCriteria = true
+        try await engine.load(url: URL(string: "http://127.0.0.1:\(origin.port)/two-audio.mkv")!, options: options)
+        try await waitFor { engine.canSeek && engine.currentTime > 0.5 }
+        let other = try #require(engine.audioTracks.first { $0.id != engine.activeAudioTrackIndex })
+        engine.selectAudioTrack(index: other.id)
+        try await waitFor { engine.activeAudioTrackIndex == other.id && engine.isSessionReady && engine.currentTime > 1 }
+        #expect(engine.isSourceSeekable == true)
+        #expect(engine.canSeek)
+        await engine.seek(to: 4)
+        try await waitFor { engine.currentTime > 3.5 }
+        #expect(abs(engine.currentTime - 4) < 1)
+    }
+
 
 }

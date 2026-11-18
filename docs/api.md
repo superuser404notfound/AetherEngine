@@ -1315,6 +1315,7 @@ The ids are synthetic (from 400000 up), because there is no stream index on that
 - **Rapid picks** are merged, so only one rebuild runs at a time. A pick back to the active track costs nothing, and `stop()` or a new `load` drops what is queued.
 - **A pick during a load** waits until that `load` returns, then rebuilds. `audioTracks` is published before the load's display handshake, and a rebuild that replaced the load there lost the HDR route (AE#1061). The host's `load()` now also returns normally instead of throwing `CancellationError`. To skip the extra rebuild, pass the track to `load` as `audioSourceStreamIndex`.
 - **Transport.** Like `reloadAtCurrentPosition()`, it comes back in the session's transport state: a paused session stays paused. A `play()` or `pause()` that arrives while the rebuild waits on I/O decides the final state.
+- **Seeking survives it.** `canSeek` keeps the source's answer on both paths, so a scrubber stays up after the switch.
 - **A live session stays live.** The rebuild keeps `$isLive` and the DVR window as `load` set them, so `startRecording(to:)` works after a switch. A recording running at the switch ends with `.ended(.sessionEnded)`, as at any session end.
 
 It does nothing in these cases. Every refusal is logged, so a picker that does nothing can be explained:
