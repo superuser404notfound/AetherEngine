@@ -636,6 +636,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
             throw HLSIngestError.playlistInvalid(reason: "body exceeds \(limit) bytes")
         }
         guard (200..<300).contains(body.response.statusCode) else {
+            noteRefusalIfMetered(body.response, requested: url)
             throw HLSIngestError.playlistUnreachable(status: body.response.statusCode)
         }
         return body
@@ -673,13 +674,25 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
     /// request that has handed nothing to the FIFO is repeated, so no byte is ever delivered twice.
     static let maxSegmentAttempts = 3
 
-    /// A failure another request may not repeat: a refusal the origin means (4xx other than 408 and 429),
-    /// a body over its limit, a format the ingest cannot carry, or a cancellation.
+    /// The statuses an origin answers when it is metering us rather than failing: 429, 503 and the
+    /// 509 a connection-limited panel gives. The main reader treats them the same way (#377).
+    static let refusalStatuses: Set<Int> = [429, 503, 509]
+
+    /// A failure another request may not repeat: a refusal the origin means (4xx other than 408), a
+    /// metering refusal (`refusalStatuses`), a body over its limit, a format the ingest cannot carry,
+    /// or a cancellation.
+    ///
+    /// AE#1084: a metering refusal is not repeated in place. Asked again after 0.5 and 1 s, a panel
+    /// that allows one stream per account sees three requests in 1.5 s, which is the churn such panels
+    /// answer with a longer refusal or a block. The refusal goes on the origin's books instead
+    /// (`noteRefusalIfMetered`) and the failure ends the ingest, so the engine's revive arm reads it as
+    /// metering and waits on its own ladder (3 to 45 s) before the next ask.
     static func isTransientSegmentFailure(_ error: Error) -> Bool {
         if error is CancellationError || error is BoundedFetch.Exceeded { return false }
         if let ingest = error as? HLSIngestError {
             guard case .playlistUnreachable(let status) = ingest else { return false }
-            return status == -1 || status == 408 || status == 429 || status >= 500
+            if refusalStatuses.contains(status) { return false }
+            return status == -1 || status == 408 || status >= 500
         }
         if let url = error as? URLError { return url.code != .cancelled }
         if let connection = error as? PersistentHTTP1Connection.ConnectionError {
@@ -709,6 +722,28 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
                 try Task.checkCancellation()
                 attempt += 1
             }
+        }
+    }
+
+    /// The origin whose books this reader's refusals are kept on: the playlist's, where every request
+    /// starts. The engine's revive arm asks about this URL, since its own is `aether-custom://source`.
+    var budgetOriginURL: URL { playlistURL }
+
+    /// AE#1084: a 429/503/509 is charged to the origin that answered, as the main reader charges it
+    /// (#377). When a redirect put the answer on another host, the playlist's origin is stamped as a
+    /// witness, because that is the key the revive arm asks.
+    private func noteRefusalIfMetered(_ response: URLResponse, requested url: URL) {
+        guard let http = response as? HTTPURLResponse,
+              Self.refusalStatuses.contains(http.statusCode) else { return }
+        let refusing = http.url ?? url
+        // An absent or zero Retry-After has to reach the budget as nil, or it arms a quiet period of
+        // nothing instead of the ladder. 15 s is the main reader's ceiling for the same header.
+        let retryAfter = http.value(forHTTPHeaderField: "Retry-After")
+            .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
+            .flatMap { $0 > 0 ? min($0, 15) : nil }
+        OriginRequestBudget.shared.noteRefusal(for: refusing, status: http.statusCode, retryAfter: retryAfter)
+        if OriginRequestBudget.originKey(for: refusing) != OriginRequestBudget.originKey(for: playlistURL) {
+            OriginRequestBudget.shared.noteRefusalWitnessed(for: playlistURL)
         }
     }
 
@@ -818,6 +853,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status) else {
+            noteRefusalIfMetered(response, requested: url)
             throw HLSIngestError.playlistUnreachable(status: status)
         }
         guard let text = String(data: data, encoding: .utf8) else {
@@ -846,6 +882,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status), !data.isEmpty else {
+            noteRefusalIfMetered(response, requested: url)
             throw HLSIngestError.playlistUnreachable(status: status)
         }
         guard let byteRange else { return data }

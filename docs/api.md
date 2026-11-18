@@ -145,6 +145,8 @@ Both kinds mean the origin answered the source request with an HTTP status inste
 - `.sourceRefused` is the origin's verdict on the resource or on itself: a 401/403 refusal (on a connection-capped IPTV panel this most often means "the slot is still held"), a 404, a 5xx.
 - `.sourceRateLimited` is the same answer in the rate-limit shapes (429/503/509). It is split off because the recovery differs: the source is being metered, not lost. The same request is expected to work later, and a handoff to a second player meets the same meter (AE#377).
 
+**The seekable TS ingest does not re-ask a refusing origin at once (AE#1084).** A 429/503/509 on one of its segments is booked on the playlist's origin, as the HTTP reader books it, and ends the ingest. The session then revives it on the same widening wait as a metered HTTP source (3, 8, 20, then 45 s) and publishes `.sourceRateLimited` once that budget is spent. A reset, a stall or another 5xx on a segment is still retried in place, up to three times, 0.5 and 1 s apart.
+
 Both differ from `.sourceOpenFailed`, which is what a corrupt or unreadable source produces.
 
 #### Certificate refusals: `.sourceCertificateRejected`

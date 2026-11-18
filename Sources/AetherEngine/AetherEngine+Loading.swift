@@ -977,6 +977,7 @@ extension AetherEngine {
             preopenedDemuxer: preopenedDemuxer,
             sourceReopenableByURL: !isCustomSource,
             customSourceReopenFactory: ingestReopenFactory,
+            refusalBooksURL: (customReader as? HLSVODIngestReader)?.budgetOriginURL,
             companionAudioReader: companionAudioReader,
             liveSourceAnnouncesDiscontinuities: liveIngest != nil,
             // Caller-bounded probe budget (#68) for the fallback open / live reopen; the happy path reuses preopenedDemuxer.

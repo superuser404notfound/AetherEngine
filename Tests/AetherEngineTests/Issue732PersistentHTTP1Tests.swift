@@ -38,8 +38,8 @@ final class Issue732PersistentHTTP1Tests: XCTestCase {
         XCTAssertTrue(log.allSatisfy { $0.headers["x-fixture"] == "allowed" })
     }
 
-    /// Audit NET-R201: one transient 503 on a VOD segment no longer ends the ingest.
-    func testATransientSegmentRefusalIsRetried() async throws {
+    /// Audit NET-R201: one transient 502 on a VOD segment no longer ends the ingest.
+    func testATransientSegmentFailureIsRetried() async throws {
         let server = try XCTUnwrap(KeepAliveOrigin())
         defer { server.stop() }
         let segments = (0..<3).map { "seg\($0).ts" }
@@ -50,7 +50,7 @@ final class Issue732PersistentHTTP1Tests: XCTestCase {
             guard let index = segments.firstIndex(where: { "/" + $0 == path }) else { return .init(status: 404) }
             if index == 1 {
                 let attempt = refused.withLock { () -> Int in seg1Requests += 1; return seg1Requests }
-                if attempt == 1 { return .init(status: 503) }
+                if attempt == 1 { return .init(status: 502) }
             }
             return .init(body: Self.transportStream(marker: UInt8(index)))
         }
@@ -65,10 +65,47 @@ final class Issue732PersistentHTTP1Tests: XCTestCase {
         XCTAssertEqual(refused.withLock { seg1Requests }, 2)
     }
 
+    /// AE#1084: a 429/503/509 on a segment is asked for once, ends the ingest, and lands on the
+    /// playlist origin's books, on the held connection and on the URLSession path alike. Re-asked
+    /// in place it was three requests in 1.5 s against a panel that allows one stream per account.
+    func testAMeteringRefusalIsNotRepeatedInPlaceAndIsBooked() async throws {
+        for (status, persistent) in [(509, true), (503, false), (429, true)] {
+            let server = try XCTUnwrap(KeepAliveOrigin())
+            defer { server.stop() }
+            let segments = (0..<3).map { "seg\($0).ts" }
+            server.route = { path in
+                if path == "/vod.m3u8" { return .init(body: Self.mediaPlaylist(segments)) }
+                guard let index = segments.firstIndex(where: { "/" + $0 == path }) else { return .init(status: 404) }
+                if index == 1 { return .init(status: status) }
+                return .init(body: Self.transportStream(marker: UInt8(index)))
+            }
+            let playlistURL = server.url("/vod.m3u8")
+            XCTAssertFalse(OriginRequestBudget.shared.refusedRecently(playlistURL, within: 60))
+            let made = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
+                playlistURL: playlistURL, httpHeaders: [:], persistentHTTP1: persistent)
+            let reader = try XCTUnwrap(made)
+            defer { reader.close() }
+
+            let stream = await Self.offPool { Self.drain(reader) }
+            XCTAssertEqual(stream.count, 188 * 3, "\(status): segment 0 only, then the ingest ends")
+            XCTAssertEqual(server.requests.filter { $0.path == "/seg1.ts" }.count, 1,
+                           "\(status) must not be re-asked on the ingest's own timer")
+            XCTAssertTrue(OriginRequestBudget.shared.refusedRecently(playlistURL, within: 60),
+                          "\(status) must reach the books the revive arm reads")
+            XCTAssertEqual(reader.budgetOriginURL, playlistURL)
+        }
+    }
+
     func testSegmentFailureClassification() {
         XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 404)))
-        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 503)))
-        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 429)))
+        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 500)))
+        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 502)))
+        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 504)))
+        XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 408)))
+        // AE#1084: a metering refusal goes to the revive arm's ladder, never back to the origin at once.
+        XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 429)))
+        XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 503)))
+        XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.playlistUnreachable(status: 509)))
         XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(HLSIngestError.unsupportedSegmentFormat))
         XCTAssertFalse(HLSVODIngestReader.isTransientSegmentFailure(CancellationError()))
         XCTAssertTrue(HLSVODIngestReader.isTransientSegmentFailure(URLError(.networkConnectionLost)))

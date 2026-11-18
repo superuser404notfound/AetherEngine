@@ -1197,6 +1197,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         preopenedDemuxer: Demuxer? = nil,
         sourceReopenableByURL: Bool = true,
         customSourceReopenFactory: CustomSourceReopenFactory? = nil,
+        refusalBooksURL: URL? = nil,
         companionAudioReader: IOReader? = nil,
         liveSourceAnnouncesDiscontinuities: Bool = false,
         probesize: Int64? = nil,
@@ -1210,6 +1211,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         sessionCacheFreeReserveBytes: Int = 0
     ) {
         self.sourceURL = url
+        self.refusalBooksURL = refusalBooksURL ?? url
         self.requestHeaders = RequestHeaderStore(sourceHTTPHeaders)
         self.sequentialOrigin = sequentialOrigin
         self.heldSourceConnection = heldSourceConnection
@@ -1346,6 +1348,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// URL sources and host-provided custom readers.
     public typealias CustomSourceReopenFactory = @Sendable () -> (reader: IOReader, formatHint: String?)?
     let customSourceReopenFactory: CustomSourceReopenFactory?
+
+    /// AE#1084: the URL whose `OriginRequestBudget` books say whether this source is metering us.
+    /// `sourceURL` for a URL source; for the VOD TS ingest it is the playlist, because the session's
+    /// own URL is `aether-custom://source` and no refusal is ever kept under that key.
+    let refusalBooksURL: URL
 
     /// AE#996: the live source is segmented ingest (EXT-X-DISCONTINUITY may restart its clock), so a
     /// clock restart to near zero is a seam and not, on its own, a sign of a replayed source.

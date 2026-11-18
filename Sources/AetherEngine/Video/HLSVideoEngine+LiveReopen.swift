@@ -529,7 +529,7 @@ extension HLSVideoEngine {
             return
         }
         let metered = OriginRequestBudget.shared.refusedRecently(
-            sourceURL, within: Self.rateLimitVerdictWindowSeconds)
+            refusalBooksURL, within: Self.rateLimitVerdictWindowSeconds)
 
         let reviveProgress = cache?.totalStoredCount ?? 0
         restartLock.lock()
@@ -552,7 +552,7 @@ extension HLSVideoEngine {
                     + "across \(attempts) attempts); giving up. The source is REFUSING us, "
                     + "not lost: retrying this same request later is expected to work, and handing "
                     + "off to another player will meet the same refusal."
-                    + OriginRequestBudget.shared.refusalShapeNote(for: sourceURL),
+                    + OriginRequestBudget.shared.refusalShapeNote(for: refusalBooksURL),
                     category: .session
                 )
                 surfaceVODSourceFailure(code, "Source is rate limiting this session",

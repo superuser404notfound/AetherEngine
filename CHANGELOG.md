@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The VOD HLS ingest no longer re-asks a refusing origin three times in 1.5 s.** A 429, 503 or 509 on a
+  segment used to be retried in place after 0.5 and 1 s, outside the refusal books. On a panel that allows one
+  stream per account that is the churn it answers with a longer refusal or a block. The refusal now goes on
+  the origin's books and the session waits 3 to 45 s before asking again, like a metered HTTP source. A reset
+  or another 5xx is still retried in place (AE#1084).
 
 ## [7.70.0] - 2026-11-17
 
