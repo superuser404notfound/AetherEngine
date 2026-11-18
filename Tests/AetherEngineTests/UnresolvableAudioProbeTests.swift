@@ -217,6 +217,7 @@ enum SyntheticTS {
 
     static let audioPID: UInt16 = 0x0101
     static let subtitlePID: UInt16 = 0x0102
+    static let dataPID: UInt16 = 0x0103
 
     /// What the PMT declares on the audio PID.
     enum AudioShape { case none, ac4 }
@@ -225,15 +226,25 @@ enum SyntheticTS {
     /// packet, the shape of a sparse track whose first cue lies past the probe.
     enum SubtitleShape { case none, pgs }
 
+    /// What the PMT declares on the data PID. `.sparse` is a private stream with no descriptor (the
+    /// STPP captions of an ATSC 3.0 channel, AE#1087), one PES before the first picture and then one
+    /// every 20 s: `mpegts.c` can only call it `bin_data`, and the content sniff it asks for never
+    /// gets enough of its packets to finish.
+    enum DataShape { case none, sparse }
+
     static func broadcast(accessUnits: Int, audio: AudioShape = .none,
-                          subtitle: SubtitleShape = .none) -> Data {
+                          subtitle: SubtitleShape = .none, data: DataShape = .none) -> Data {
         let au = Data(base64Encoded: h264Base64, options: .ignoreUnknownCharacters) ?? Data()
         var cc: [UInt16: UInt8] = [:]
         var out = Data()
         out.append(psi(pid: 0x0000, cc: &cc, section: patSection()))
-        out.append(psi(pid: pmtPID, cc: &cc, section: pmtSection(audio: audio, subtitle: subtitle)))
+        out.append(psi(pid: pmtPID, cc: &cc, section: pmtSection(audio: audio, subtitle: subtitle, data: data)))
+        let caption = Data(#"<?xml version="1.0" encoding="UTF-8"?><tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="0s" end="2s">.</p></div></body></tt>"#.utf8)
         for i in 0..<accessUnits {
             let pts = Int64(i) * frameTicks
+            if data == .sparse, i % 500 == 0 {
+                out.append(pes(pid: dataPID, streamID: 0xBD, payload: caption, pts: pts, cc: &cc, bounded: true))
+            }
             out.append(pes(pid: videoPID, streamID: 0xE0, payload: au, pts: pts, cc: &cc))
             guard audio != .none else { continue }
             out.append(pes(pid: audioPID, streamID: 0xBD,
@@ -252,7 +263,7 @@ enum SyntheticTS {
         return section(tableID: 0x00, body: body)
     }
 
-    private static func pmtSection(audio: AudioShape, subtitle: SubtitleShape) -> Data {
+    private static func pmtSection(audio: AudioShape, subtitle: SubtitleShape, data: DataShape) -> Data {
         var body = Data([0x00, 0x01])
         body.append(contentsOf: [0xC1, 0x00, 0x00])
         body.append(contentsOf: [UInt8(0xE0 | (videoPID >> 8)), UInt8(videoPID & 0xFF)])
@@ -277,6 +288,9 @@ enum SyntheticTS {
         if subtitle == .pgs {
             body.append(contentsOf: [0x90, UInt8(0xE0 | (subtitlePID >> 8)), UInt8(subtitlePID & 0xFF),
                                      0xF0, 0x00])
+        }
+        if data == .sparse {
+            body.append(contentsOf: [0x06, UInt8(0xE0 | (dataPID >> 8)), UInt8(dataPID & 0xFF), 0xF0, 0x00])
         }
         return section(tableID: 0x02, body: body)
     }
@@ -314,9 +328,14 @@ enum SyntheticTS {
 
     /// PTS and DTS both present: the probe's analyze-duration accounting reads the dts span, so a
     /// stream with presentation timestamps alone never reaches the cap at all.
+    ///
+    /// `bounded` writes the real PES_packet_length. `mpegts.c` hands out a bounded PES as soon as its
+    /// last byte arrives; an unbounded one (length 0, legal for video only) waits for the next PES on
+    /// the same PID, which for a sparse track is the difference between now and 20 s later.
     private static func pes(pid: UInt16, streamID: UInt8, payload: Data, pts: Int64,
-                            cc: inout [UInt16: UInt8]) -> Data {
-        var header = Data([0x00, 0x00, 0x01, streamID, 0x00, 0x00])
+                            cc: inout [UInt16: UInt8], bounded: Bool = false) -> Data {
+        let length = bounded ? 3 + 10 + payload.count : 0
+        var header = Data([0x00, 0x00, 0x01, streamID, UInt8(length >> 8), UInt8(length & 0xFF)])
         header.append(contentsOf: [0x80, 0xC0, 0x0A])
         header.append(contentsOf: timestamp(pts, marker: 0x31))
         header.append(contentsOf: timestamp(pts, marker: 0x11))

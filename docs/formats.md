@@ -793,6 +793,8 @@ AC-4 (ATSC 3.0 / NextGen TV) and MPEG-H 3D Audio have no decoder in the bundled 
 
 **What the engine does.** The demuxer hides such a stream from the probe (one whose codec has no decoder AND whose parameters the container left unset), and restores it right after. The open then costs what it would without the track, and the caller still sees the track in `audioTracks`. A host with its own metadata can do better still and refuse the channel with a real sentence (Jellyfin names a live channel's audio codec in PlaybackInfo without opening a tuner).
 
+An ATSC 3.0 channel often also carries an STPP caption track, which had a probe cost of its own. See [Raw live MPEG-TS and the live join](#raw-live-mpeg-ts-and-the-live-join) (AE#1087).
+
 ### Track language on the native path
 
 AVFoundation reads a track's language from the master playlist, not from the media. So the engine also declares there the audio it muxes into its single variant:
@@ -1695,6 +1697,16 @@ Measured with `aetherctl play --live` against an origin that sends MPEG-2 + AC-3
 - A PMT that first arrives after the release adds its streams during playback, as a PMT version change does.
 
 Measured through `aetherctl play --live` on a live-paced synthetic channel, median of 5: the stream analysis went from 58.7 s (32 MB, three requests, because the reader reconnects at the end of the 30 s fixture and the pass runs on to its 60 s cap) to 2.5 s (1.6 MB, one request), with both tracks. With audio that starts 5 s late it takes 4.9 s, and with a join 3 s into a 10 s GOP 7.6 s, the same as those channels without the silent program.
+
+**A data track the PMT does not name (AE#1087).** The engine keeps such a track out of the stream analysis, so it no longer holds the video back. ATSC 3.0 channels from an HDHomeRun carry their STPP captions this way, as a private stream (stream_type 0x06) with no descriptor.
+
+- The TS demuxer can only call such a track `bin_data`, and libavformat then tries to identify it from its content. Until that ends, every later packet of every stream waits in a queue behind the track's first packet, the video included.
+- The content check ends after 2500 packets of that track, or once the queue holds the probe size (50 MiB). A caption track sends a packet every few seconds, so it is always the 50 MiB, read at the wire rate on a live source. The reported channel spent 13 to 17 s there before the host's watchdog gave up.
+- Whether it happens depends on which comes first after the tune, a caption packet or the first picture. That is why the same channel sometimes opened at once.
+- The engine sets such a track to `AVDISCARD_ALL` for the analysis and restores it after, so its packets never enter the queue. Playback already discarded it.
+- What this gives up is the content check itself. An audio track in such a mux would stay `bin_data` instead of being recognised as DTS or AC-3. FFmpeg names every descriptor-carrying form (AC-3, E-AC-3, DTS, AC-4, Opus, teletext, DVB subtitles), so only a broken mux loses anything.
+
+Measured with `aetherctl play --live` on a synthetic channel shaped like the report (HEVC Main 10 720p59.94, two AC-4 tracks, one caption track whose first packet comes before the first picture), paced at 7.3 Mbit/s. Before, the analysis had not finished after 40 s and 36 MB. After, it took 366 ms and 329 KB, and the session played.
 
 ### Live AC-3 that changes layout
 

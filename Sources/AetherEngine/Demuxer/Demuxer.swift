@@ -1290,6 +1290,7 @@ public final class Demuxer: @unchecked Sendable {
         boundProbeForDeclaredDiscTitle(ctx)
         let parked = parkUnresolvableAudio(ctx)
         let parkedPGS = parkPGSSubtitles(ctx)
+        let parkedData = parkUnnamedDataStreams(ctx)
         let bytesBefore = ctx.pointee.pb?.pointee.bytes_read ?? 0
         let callStart = DispatchTime.now().uptimeNanoseconds
         interrupt.armHeaderWait(ctx, startedAt: callStart)
@@ -1298,6 +1299,7 @@ public final class Demuxer: @unchecked Sendable {
         let callReturn = DispatchTime.now().uptimeNanoseconds
         unparkUnresolvableAudio(ctx, parked)
         unparkPGSSubtitles(ctx, parkedPGS)
+        unparkUnnamedDataStreams(ctx, parkedData)
         probeReport = makeProbeReport(ctx, parkedAudio: parked, bytesBefore: bytesBefore,
                                       callStart: callStart, callReturn: callReturn,
                                       headerWaitReleasedAfter: headerWaitReleasedAfter)
@@ -1484,6 +1486,54 @@ public final class Demuxer: @unchecked Sendable {
     private func unparkPGSSubtitles(_ ctx: UnsafeMutablePointer<AVFormatContext>, _ parked: [Int]) {
         for i in parked where i < Int(ctx.pointee.nb_streams) {
             ctx.pointee.streams[i]?.pointee.codecpar?.pointee.codec_type = AVMEDIA_TYPE_SUBTITLE
+        }
+    }
+
+    /// Whether this stream is one the demuxer could not name, so libavformat sniffs its content
+    /// instead, and playback never reads it. (#1087)
+    ///
+    /// `mpegts.c` gives a private stream (stream_type 0x06) that no descriptor identifies
+    /// `AV_CODEC_ID_BIN_DATA` and a pending content sniff. Until that sniff ends, `ff_read_packet`
+    /// queues every later packet of every stream behind the stream's first packet, and it ends only
+    /// after 2500 packets of that one stream or once the queue holds the probe size in bytes. A
+    /// sparse track (ATSC 3.0 STPP captions, a PES every few seconds) never reaches the first, so the
+    /// video's packets wait for the second: 50 MiB at the wire rate on a live source, 13 to 17 s on
+    /// the reported channel before the host gave up. Whether it bites depends on which comes first
+    /// after the open, the caption PES or the first picture, which is why one open in three played.
+    ///
+    /// Only the unnamed fallback is matched. A data codec the PMT did name (SCTE-35, timed ID3, KLV)
+    /// gets no sniff and holds nothing, and `AV_CODEC_ID_NONE` is a stream still being identified.
+    static func dataNeedsNoProbe(codecID: AVCodecID, codecType: AVMediaType) -> Bool {
+        codecType == AVMEDIA_TYPE_DATA && codecID == AV_CODEC_ID_BIN_DATA
+    }
+
+    /// Keep unnamed data streams out of the probe with `AVDISCARD_ALL`, which `mpegts.c` checks at
+    /// every PES start, so none of their packets enters the queue the sniff would hold. Reclassifying
+    /// them like the audio and PGS parks would not help: the hold is keyed on the pending sniff, not
+    /// on the media type. The previous discard comes back after the probe; playback silences these
+    /// streams through `discardAllStreamsExcept` as before. (#1087)
+    ///
+    /// The cost is the sniff itself: a private stream no descriptor names is never identified from
+    /// its content, so an undescribed audio track in such a mux stays `bin_data` instead of turning
+    /// into, say, DTS. FFmpeg names every descriptor-carrying form (AC-3, E-AC-3, DTS, AC-4, Opus,
+    /// teletext, DVB subtitles), so what is left is a broken mux.
+    private func parkUnnamedDataStreams(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> [(Int, AVDiscard)] {
+        var parked: [(Int, AVDiscard)] = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let stream = ctx.pointee.streams[i], let codecpar = stream.pointee.codecpar,
+                  Self.dataNeedsNoProbe(codecID: codecpar.pointee.codec_id,
+                                        codecType: codecpar.pointee.codec_type)
+            else { continue }
+            parked.append((i, stream.pointee.discard))
+            stream.pointee.discard = AVDISCARD_ALL
+        }
+        return parked
+    }
+
+    private func unparkUnnamedDataStreams(_ ctx: UnsafeMutablePointer<AVFormatContext>,
+                                          _ parked: [(Int, AVDiscard)]) {
+        for (i, discard) in parked where i < Int(ctx.pointee.nb_streams) {
+            ctx.pointee.streams[i]?.pointee.discard = discard
         }
     }
 

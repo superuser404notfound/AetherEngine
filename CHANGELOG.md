@@ -22,6 +22,11 @@ the public-API contract.
   was reopened for the whole film and the host never saw a decision. Five reopens in any ten minutes is now
   the ceiling; the next drop ends the session with `.vodSourceFailed` and leaves the next open to the host
   (AE#1085).
+- **An ATSC 3.0 channel with STPP captions no longer stalls its open on the video.** Even with the AC-4
+  tracks parked, two of three tunes read until the host gave up (13 to 17 s). The caption track has no
+  descriptor, so libavformat tries to identify it from its content and holds every packet behind it,
+  the video's too, until 50 MiB have queued. Such a track now sits out the stream analysis, and the
+  open finishes as soon as the video is known (AE#1087, thanks @sunnierseattle).
 - **Seeking keeps working after an audio switch on the software path.** The rebuild forgot that the
   source can seek, so `canSeek` stayed false until the next load and a host hid its scrubber. The
   native path already learned it again from its new session (AE#1086).
