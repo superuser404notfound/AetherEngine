@@ -90,6 +90,61 @@ struct Issue1052SubtitleMenuMarkerTests {
         #expect(served.servesSilently)
     }
 
+    /// Reporter's follow-up: after a pick, AVKit fetched the previous marker's rendition once more
+    /// before the new select landed, found it loud, and the request sat in the 3 s readiness wait
+    /// on a store nothing fills. The outgoing marker stays silent until the select has landed.
+    @Test("a marker left for another track or Off stays silent until the select lands",
+          .timeLimit(.minutes(3)))
+    func outgoingMarkerStaysSilentUntilSelectLands() throws {
+        let engine = try AetherEngine()
+        let session = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/ae1052-five-pgs.mkv"))
+        let stores = [NativeSubtitleCueStore(), NativeSubtitleCueStore(), NativeSubtitleCueStore()]
+        session.nativeSubtitleCueStoresForSession = stores
+        engine.nativeVideoSession = session
+        defer { engine.nativeVideoSession = nil }
+
+        #expect(engine.silenceNativeRendition(ordinal: 0, displaying: nil).isEmpty)
+        let toOther = engine.silenceNativeRendition(ordinal: 1, displaying: nil)
+        #expect(toOther.count == 1 && toOther[0] === stores[0])
+        #expect(stores[0].servesSilently && stores[1].servesSilently && !stores[2].servesSilently)
+
+        let toOff = engine.silenceNativeRendition(ordinal: nil, displaying: nil)
+        #expect(toOff.count == 2)
+        #expect(stores[0].servesSilently && stores[1].servesSilently && !stores[2].servesSilently)
+        AetherEngine.liftNativeSilence(toOff)
+        #expect(!stores.contains { $0.servesSilently })
+    }
+
+    @Test("a marker that becomes its own display goes loud at once, so the first fetch has cues",
+          .timeLimit(.minutes(3)))
+    func markerBecomingDisplayLiftsAtOnce() throws {
+        let engine = try AetherEngine()
+        let session = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/ae1052-pip.mkv"))
+        let stores = [NativeSubtitleCueStore(), NativeSubtitleCueStore()]
+        session.nativeSubtitleCueStoresForSession = stores
+        engine.nativeVideoSession = session
+        defer { engine.nativeVideoSession = nil }
+
+        _ = engine.silenceNativeRendition(ordinal: 1, displaying: nil)
+        #expect(engine.silenceNativeRendition(ordinal: nil, displaying: 1).isEmpty)
+        #expect(!stores[1].servesSilently)
+    }
+
+    @Test("with no player item, Off lifts the marker at once", .timeLimit(.minutes(3)))
+    func offWithoutItemLiftsAtOnce() throws {
+        let engine = try AetherEngine()
+        let session = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/ae1052-no-item.mkv"))
+        let store = NativeSubtitleCueStore()
+        session.nativeSubtitleCueStoresForSession = [store]
+        engine.nativeVideoSession = session
+        defer { engine.nativeVideoSession = nil }
+
+        engine.setNativeSubtitleSelected(track: 0, markerOnly: true)
+        #expect(store.servesSilently)
+        engine.setNativeSubtitleSelected(track: nil)
+        #expect(!store.servesSilently)
+    }
+
     @Test("a silent store serves no cues and keeps the ones it has")
     func silentStoreKeepsCues() {
         let store = NativeSubtitleCueStore()

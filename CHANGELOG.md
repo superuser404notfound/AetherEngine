@@ -48,6 +48,10 @@ the public-API contract.
   old ones. A `markerOnly` selection made after it silenced nothing, so every subtitle segment AVKit asked for
   waited 3 s for cues no OCR worker was making, and on tvOS a seek never landed. The stores now stay for the
   whole session (AE#1052, thanks @axeslasher).
+- **A marker that moves to another track or to Off stays empty until AVKit has let go of it.** The marker's
+  rendition used to serve text again the moment the host's next call came in, while AVKit's own select of the
+  new track was still on its way. A segment AVKit asked for in that gap went to the full 3 s wait on a store
+  nothing fills. The old marker now stays empty until the new select has landed (AE#1052, thanks @axeslasher).
 - **The VOD HLS ingest no longer re-asks a refusing origin three times in 1.5 s.** A 429, 503 or 509 on a
   segment used to be retried in place after 0.5 and 1 s, outside the refusal books. On a panel that allows one
   stream per account that is the churn it answers with a longer refusal or a block. The refusal now goes on

@@ -1450,6 +1450,7 @@ A host that draws a bitmap track itself inside a stock `AVPlayerViewController` 
 - `setNativeSubtitleRendering(false)` goes back to the marker instead of deselecting.
 - Any plain `setNativeSubtitleSelected(track:)` call, nil included, replaces the marker. The marker survives the engine's own reloads (audio switch, recovery, AirPlay).
 - `clearSubtitle()` leaves the renditions' stores in place, so a marker set after subtitles-off still lands on the rendition AVKit fetches.
+- When the marker moves to another track or to Off, its rendition stays empty until AVKit's select of the new choice has landed. AVKit keeps asking for the old rendition until then, and an empty answer costs nothing, while a rendition waiting for text that never comes holds each request for 3 s. Only a marker that becomes the display itself (`setNativeSubtitleRendering(true)`, or a plain select of the same track) gets its text at once.
 - Scope is the VOD loopback, the same as bitmap renditions in general.
 
 ### Live HLS subtitle renditions (host overlay)

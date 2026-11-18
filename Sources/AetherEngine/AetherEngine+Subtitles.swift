@@ -2724,12 +2724,19 @@ extension AetherEngine {
             cancelNativeSubtitleReaders()
         }
         // AE#1052: set before the select, so the first fetch of a marker is already empty and the
-        // first fetch after it (PiP entry) already has cues.
-        silenceNativeRendition(ordinal: marker ? ordinal : nil)
-        guard let item = currentAVPlayer?.currentItem else { return }
+        // first fetch after it (PiP entry) already has cues. A marker this call leaves for anything
+        // but its own display goes loud only once the select below has landed.
+        let pendingLift = silenceNativeRendition(ordinal: marker ? ordinal : nil,
+                                                 displaying: marker ? nil : ordinal)
+        guard let item = currentAVPlayer?.currentItem else {
+            Self.liftNativeSilence(pendingLift)
+            return
+        }
         // Capture track list; avoid capturing self to keep MainActor re-entrancy to one hop.
         let tracks = nativeSubtitleTracks
         Task { @MainActor in
+            // A newer call took over these stores and decides for itself.
+            defer { if generation == nativeSubtitleSelectGeneration { Self.liftNativeSilence(pendingLift) } }
             // #15: with automatic media-selection criteria on (the default), AVKit can override/not-render an
             // explicit legible selection until a view refresh. Pin manual selection so the explicit choice
             // renders immediately and survives.
@@ -3266,10 +3273,28 @@ extension AetherEngine {
 
     // MARK: - Menu marker (AE#1052)
 
-    /// Only the marker's store answers empty; every other rendition serves as usual.
-    func silenceNativeRendition(ordinal: Int?) {
-        guard let stores = nativeVideoSession?.nativeSubtitleCueStoresForSession else { return }
-        for (index, store) in stores.enumerated() { store.servesSilently = index == ordinal }
+    /// Only the marker's store answers empty; every other rendition serves as usual. A store that
+    /// stops being the marker for anything but its own display (`displaying`) is handed back still
+    /// silent: AVKit fetches the old rendition until the new select lands, and a loud store nothing
+    /// fills holds each of those fetches for the full 3 s readiness wait (AE#1052, reporter's log
+    /// after a pick and Off on a five-PGS file).
+    func silenceNativeRendition(ordinal: Int?, displaying: Int?) -> [NativeSubtitleCueStore] {
+        guard let stores = nativeVideoSession?.nativeSubtitleCueStoresForSession else { return [] }
+        var pendingLift: [NativeSubtitleCueStore] = []
+        for (index, store) in stores.enumerated() {
+            if index == ordinal {
+                store.servesSilently = true
+            } else if store.servesSilently, index != displaying {
+                pendingLift.append(store)
+            } else {
+                store.servesSilently = false
+            }
+        }
+        return pendingLift
+    }
+
+    nonisolated static func liftNativeSilence(_ stores: [NativeSubtitleCueStore]) {
+        for store in stores { store.servesSilently = false }
     }
 
     // MARK: - Remote-HLS bypass legible selection (AE#154)
