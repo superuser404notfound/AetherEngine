@@ -266,7 +266,9 @@ final class Issue293LiveCarriageProbeTests: XCTestCase {
         XCTAssertEqual(verdict, .transportStreamWithoutHEVC)
     }
 
-    func testEncryptedSegmentStaysInconclusive() async throws {
+    func testEncryptedSegmentWithoutItsKeyStaysInconclusive() async throws {
+        // AE#1089 reads the PMT behind AES-128 once the key is in hand; without it there is nothing to
+        // read, and the segment is never fetched. The positive cases live in Issue1089 tests.
         let media = try XCTUnwrap(URL(string: "https://live.test/aes.m3u8"))
         Issue293URLProtocol.bodyByURL[media.absoluteString] = Data("""
         #EXTM3U
@@ -285,7 +287,7 @@ final class Issue293LiveCarriageProbeTests: XCTestCase {
             session: session
         )
 
-        XCTAssertEqual(verdict, .inconclusive, "a PMT behind AES-128 cannot be read, and absence never fires")
+        XCTAssertEqual(verdict, .inconclusive, "no key, no readable PMT, and absence never fires")
         XCTAssertNil(Issue293URLProtocol.headersByURL["https://live.test/aes0.ts"])
     }
 

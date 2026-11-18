@@ -383,13 +383,13 @@ On-demand MPEG-DASH (AE#859): one static Period, each representation a single `S
 | `HLSLiveIngestReader.swift` | Public forward-only `IOReader` that ingests a live HLS upstream (resolver, playlist poller, segment fetcher, companion audio-rendition reader). |
 | `HLSPlaylist.swift` | Line-based parser for a subset of RFC 8216 (master / media playlists). |
 | `HLSPlaylistTracker.swift` | Pure segment cursor: duration-capped edge join, window-slide rejoin, stall budget. |
-| `HLSSegmentDecryptor.swift` | AES-128-CBC clear-key segment decryption (key fetch and memo, PKCS7). |
+| `HLSSegmentDecryptor.swift` | AES-128-CBC clear-key segment decryption (key fetch and memo, PKCS7), plus head-only decryption for the carriage probe (AE#1089). |
 | `PackedAudioSegments.swift` | Packed-audio rendition support: `LiveSegmentFormat` classification and ID3 PRIV timestamp parser (raw ADTS segments). |
 | `ByteFIFO.swift` | Bounded blocking byte queue between the fetch loop and the demux thread. Empty writes do nothing, invalid read lengths return an error, and only a finished, drained queue returns EOF. |
 | `HLSIngestError.swift` | Typed terminal errors (encrypted, fMP4, unreachable, invalid, stalled). |
 | `LiveIngestSourceInfo.swift` | Internal seam: upstream segment cadence (shapes TARGETDURATION and blocking-reload eligibility) and `DualSourceMergeOrder` for the dual-source DTS merge. |
 | `HLSVODIngestReader.swift` | Ingest reader for an immutable ENDLIST playlist. Seeks restart the source at the segment before the requested playlist time, on an elapsed-media-time axis (the EXTINF sum) rather than the container's PTS. |
-| `HLSCarriageProbe.swift` | Reads a live source's video carriage from its playlist and the first segment's PMT, so the #168 verdict is available while the native mount is still in its watchdog grace, instead of seconds after (#293, #296). |
+| `HLSCarriageProbe.swift` | Reads a live source's video carriage from its playlist and the first segment's PMT, so the #168 verdict is available while the native mount is still in its watchdog grace, instead of seconds after (#293, #296). An AES-128 segment's head is decrypted for that read (AE#1089). |
 | `LiveArrivalCadenceMeter.swift` | Measures how often a live upstream really delivers new segments (interval between batches plus the currently open gap), the signal LL-HLS shaping trusts instead of a self-reported TARGETDURATION. Closed intervals are reported separately, because the seal may not be taken from a gap that the first-serve gate itself is holding open (AE#447). |
 | `BoundedPlaylistFetch.swift` | Reads a playlist body with its size cap enforced while it arrives (audit NET-10). |
 | `PersistentHTTP1Transport.swift` | AE#732: the HLS VOD ingest's transport under `heldSourceConnection`, one persistent HTTP/1.1 keep-alive connection. |

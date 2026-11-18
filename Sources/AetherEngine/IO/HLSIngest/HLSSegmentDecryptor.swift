@@ -6,6 +6,19 @@ enum HLSSegmentDecryptor {
 
     /// Returns nil on malformed key/IV length or CommonCrypto failure; caller treats as terminal (host falls back to server-muxed route).
     static func decryptAES128CBC(_ ciphertext: Data, key: Data, iv: Data) -> Data? {
+        cbc(ciphertext, key: key, iv: iv, options: CCOptions(kCCOptionPKCS7Padding))
+    }
+
+    /// AE#1089: the plaintext of a segment's first whole blocks, for a reader that only needs its head.
+    /// CBC block n depends on ciphertext blocks n-1 and n alone, so a prefix decrypts to exactly the
+    /// prefix of the full plaintext. No padding is stripped, because the padding sits at the segment's
+    /// end and a head never reaches it. A trailing partial block is left out.
+    static func decryptAES128CBCHead(_ ciphertext: Data, key: Data, iv: Data) -> Data? {
+        let whole = ciphertext.count - ciphertext.count % kCCBlockSizeAES128
+        return cbc(ciphertext.prefix(whole), key: key, iv: iv, options: 0)
+    }
+
+    private static func cbc(_ ciphertext: Data, key: Data, iv: Data, options: CCOptions) -> Data? {
         guard key.count == kCCKeySizeAES128, iv.count == kCCBlockSizeAES128 else { return nil }
         guard !ciphertext.isEmpty, ciphertext.count % kCCBlockSizeAES128 == 0 else { return nil }
 
@@ -19,7 +32,7 @@ enum HLSSegmentDecryptor {
                         CCCrypt(
                             CCOperation(kCCDecrypt),
                             CCAlgorithm(kCCAlgorithmAES),
-                            CCOptions(kCCOptionPKCS7Padding),
+                            options,
                             keyBuf.baseAddress, kCCKeySizeAES128,
                             ivBuf.baseAddress,
                             inBuf.baseAddress, ciphertext.count,

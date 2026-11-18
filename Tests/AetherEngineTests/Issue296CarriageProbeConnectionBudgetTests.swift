@@ -186,7 +186,7 @@ final class Issue296CarriageProbeConnectionBudgetTests: XCTestCase {
 
         XCTAssertEqual(
             evidence,
-            .needsSegmentHead(try XCTUnwrap(URL(string: "https://cap.test/direct0.ts")))
+            .needsSegmentHead(try XCTUnwrap(URL(string: "https://cap.test/direct0.ts")), key: nil)
         )
         XCTAssertNil(
             Issue296URLProtocol.headersByURL["https://cap.test/direct0.ts"],
@@ -215,11 +215,13 @@ final class Issue296CarriageProbeConnectionBudgetTests: XCTestCase {
 
         XCTAssertEqual(
             evidence,
-            .needsSegmentHead(try XCTUnwrap(URL(string: "https://cap.test/v10.ts")))
+            .needsSegmentHead(try XCTUnwrap(URL(string: "https://cap.test/v10.ts")), key: nil)
         )
     }
 
-    func testEncryptedSegmentWithoutCodecEvidenceStaysInconclusive() async throws {
+    func testEncryptedSegmentWithoutCodecEvidenceDefersWithItsKey() async throws {
+        // AE#1089: the PMT behind AES-128 is read once decrypted, so the segment stage gets the key
+        // context instead of the source being settled as unjudged.
         let media = try XCTUnwrap(URL(string: "https://cap.test/aes-nocodecs.m3u8"))
         Issue296URLProtocol.bodyByURL[media.absoluteString] = Data("""
         #EXTM3U
@@ -238,7 +240,14 @@ final class Issue296CarriageProbeConnectionBudgetTests: XCTestCase {
             session: session
         )
 
-        XCTAssertEqual(evidence, .settled(.inconclusive), "an unreadable PMT is not evidence of anything")
+        XCTAssertEqual(
+            evidence,
+            .needsSegmentHead(
+                try XCTUnwrap(URL(string: "https://cap.test/aes0.ts")),
+                key: HLSCarriageProbe.SegmentKey(
+                    url: try XCTUnwrap(URL(string: "https://cap.test/key.bin")), iv: Data(count: 16))
+            )
+        )
     }
 
     func testUnreachablePlaylistSettlesInconclusive() async throws {
