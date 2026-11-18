@@ -6473,6 +6473,49 @@ public final class AetherEngine: ObservableObject {
                                       panelPresentedHDRAtLoad: panelHDRAfterHandshake,
                                       sessionIsPlaying: Self.loadPerformsAutostart(options))
             } else {
+                // Sodalite#245: the forced Profile 5 route is fixed inside loadNative, before the producer
+                // could see the source's HDR10+, so a load that may yield it asks the head of the stream.
+                // Same contract as the interlace sample: VOD + seekable, and a rewind that stalls leaves
+                // the answer at "no", which is today's route.
+                var forcedDVYieldsToHDR10Plus = false
+                if probeOpened, probe.videoStreamIndex >= 0,
+                   ForcedDolbyVisionHDR10Plus.scansHead(
+                       forceDolbyVisionOnNonDVDisplay: options.forceDolbyVisionOnNonDVDisplay,
+                       preferHDR10Plus: options.preferHDR10PlusOverForcedDolbyVision,
+                       displayTakesDolbyVision: sessionDisplayCaps.supportsDolbyVision,
+                       dolbyVisionHandling: options.dolbyVisionHandling,
+                       codecID: detectedCodecID,
+                       dvProfile: detectedDVProfileNum,
+                       dvBLCompatID: detectedDVBLCompatIDNum,
+                       isLive: options.isLive,
+                       isSourceSeekable: probe.isSourceSeekable) {
+                    let videoIdx = probe.videoStreamIndex
+                    let found = await BlockingWork.detached(priority: .userInitiated) { [probe] in
+                        let found = ForcedDolbyVisionHDR10Plus.headCarriesHDR10Plus(
+                            demuxer: probe, streamIndex: videoIdx)
+                        guard probe.seekBounded(to: 0, timeout: Self.probeRewindSeekTimeout) else {
+                            EngineLog.emit(
+                                "[AetherEngine] Sodalite#245 HDR10+ head scan could not rewind the source "
+                                + "within \(Int(Self.probeRewindSeekTimeout)) s; keeping the forced route",
+                                category: .engine)
+                            return false
+                        }
+                        return found
+                    }.value
+                    if loadGeneration != gen {
+                        probe.markClosed()
+                        BlockingWork.detached { [probe] in probe.close() }
+                        try checkLoadCurrent(gen)
+                    }
+                    EngineLog.emit(
+                        "[AetherEngine] Sodalite#245 HDR10+ head scan: "
+                        + (found ? "found, the forced Dolby Vision route yields" : "none, forced route stands"),
+                        category: .engine)
+                    if found { sourceCarriesHDR10PlusMetadata = true }
+                    forcedDVYieldsToHDR10Plus = ForcedDolbyVisionHDR10Plus.yieldsToHDR10Plus(
+                        preferHDR10Plus: options.preferHDR10PlusOverForcedDolbyVision,
+                        sourceCarriesHDR10Plus: found)
+                }
                 // Native path: pass the probe Demuxer to loadNative so HLSVideoEngine.start() skips
                 // avformat_open_input + find_stream_info (~1-3 s saved on slow CDN). The cue prewarm
                 // seek inside start() invalidates any stale read position. Pass nil if probe failed.
@@ -6483,6 +6526,7 @@ public final class AetherEngine: ObservableObject {
                     audioSourceStreamIndex: selectedAudio,
                     keepDvh1TagWithoutDV: options.keepDvh1TagWithoutDV,
                     forceDolbyVisionOnNonDVDisplay: options.forceDolbyVisionOnNonDVDisplay,
+                    forcedDolbyVisionYieldsToHDR10Plus: forcedDVYieldsToHDR10Plus,
                     dolbyVisionHandling: options.dolbyVisionHandling,
                     dolbyVisionRPUProfile: detectedDVRPUProfile,
                     measuredFrameRate: measuredFrameRate,

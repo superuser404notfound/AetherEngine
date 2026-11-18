@@ -19,6 +19,11 @@ the public-API contract.
   back from any source without intercepting commands and copying the engine's clamp. A seek replayed from the
   load stash keeps its original departure. An exhaustive `switch` over `SeekEvent.Origin` needs the two new
   cases (AE#1088, thanks @secunit404).
+- **`LoadOptions.preferHDR10PlusOverForcedDolbyVision` keeps a file's HDR10+ on the forced Dolby Vision
+  route.** With `forceDolbyVisionOnNonDVDisplay` on, a Profile 8.1 or 7 file that also carried HDR10+ reached
+  an HDR10+ TV as composed HDR10, and its HDR10+ was lost. With the new option, the load reads the head of the
+  video stream first, and a file with HDR10+ keeps the default route. A file without it still takes the forced
+  route. Off by default, because tvOS cannot tell whether the TV takes HDR10+ (Sodalite#245, thanks @Tchet33).
 
 ### Fixed
 

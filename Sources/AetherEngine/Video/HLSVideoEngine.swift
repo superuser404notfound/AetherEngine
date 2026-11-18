@@ -56,6 +56,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// route, and only while `effectiveDvMode` is false.
     let forceDolbyVisionOnNonDVDisplay: Bool
 
+    /// Sodalite#245: the load found HDR10+ in a source the forced route would take, and the host prefers
+    /// it (`LoadOptions.preferHDR10PlusOverForcedDolbyVision`). The forced route then stands down and the
+    /// source keeps the native Profile 8.1 route, whose base layer carries that HDR10+ to the panel.
+    let forcedDolbyVisionYieldsToHDR10Plus: Bool
+
     /// From `LoadOptions.dolbyVisionHandling`; default `.automatic`. `.baseLayerOnly` sends a Dolby
     /// Vision source with a presentable base layer down the plain hvc1 / av01 route on every display
     /// (`VideoRoutingPolicy.presentsDolbyVisionBaseLayer`), ahead of every DV branch including AE#455.
@@ -1174,6 +1179,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         displaySupportsHDR: Bool = true,
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
+        forcedDolbyVisionYieldsToHDR10Plus: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
         dolbyVisionRPUProfile: Int? = nil,
         measuredFrameRate: AVRational? = nil,
@@ -1242,6 +1248,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.displaySupportsHDR = displaySupportsHDR
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
+        self.forcedDolbyVisionYieldsToHDR10Plus = forcedDolbyVisionYieldsToHDR10Plus
         self.dolbyVisionHandling = dolbyVisionHandling
         self.dolbyVisionRPUProfile = dolbyVisionRPUProfile
         self.measuredFrameRate = measuredFrameRate
