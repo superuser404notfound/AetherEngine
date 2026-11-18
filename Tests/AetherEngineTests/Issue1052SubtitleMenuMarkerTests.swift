@@ -69,6 +69,27 @@ struct Issue1052SubtitleMenuMarkerTests {
         #expect(carryover.nativeReapplyOrdinal == 1)
     }
 
+    /// The tvOS stall: a bitmap-only file arms no pump tap, and subtitles-off used to empty the
+    /// session's store list while the provider kept serving the old stores. The marker then silenced
+    /// nothing, and every .vtt after a seek waited 3 s on a store no OCR worker fills.
+    @Test("a marker after subtitles-off still silences the store the server reads",
+          .timeLimit(.minutes(3)))
+    func markerAfterClearSilencesServedStore() throws {
+        let engine = try AetherEngine()
+        let session = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/ae1052-pgs-only.mkv"))
+        let served = NativeSubtitleCueStore()
+        session.nativeSubtitleCueStoresForSession = [served]
+        engine.nativeVideoSession = session
+        defer { engine.nativeVideoSession = nil }
+        #expect(!session.subtitleTapActive)
+
+        engine.clearSubtitle()
+        #expect(engine.nativeStore(atOrdinal: 0) === served)
+
+        engine.setNativeSubtitleSelected(track: 0, markerOnly: true)
+        #expect(served.servesSilently)
+    }
+
     @Test("a silent store serves no cues and keeps the ones it has")
     func silentStoreKeepsCues() {
         let store = NativeSubtitleCueStore()

@@ -2106,7 +2106,7 @@ extension AetherEngine {
         }
     }
 
-    /// Disable primary subtitles, clear cues, cancel sidecar task + side demuxer, cancel multi-decode reader, clear native mov_text stores (#55, all-tracks). `nativeSubtitleTracks` is NOT cleared: the host needs the list to re-select after an audio/subtitle switch; only `stop()` / `load()` reset it.
+    /// Disable primary subtitles, clear cues, cancel sidecar task + side demuxer, cancel multi-decode reader. The native rendition stores keep their cues (the provider serves them for the whole session, AE#1052), and `nativeSubtitleTracks` is NOT cleared: the host needs the list to re-select after an audio/subtitle switch; only `stop()` / `load()` reset it.
     public func clearSubtitle() {
         externalSubtitleIntentGeneration &+= 1
         hostExplicitSubtitleAction = true
@@ -2153,15 +2153,10 @@ extension AetherEngine {
         sidecarASSHeader = nil
         isLoadingSubtitles = false
         cancelNativeSubtitleReaders()
-        // Sodalite#32 Phase 2: with the pump tap active the stores are the session's cue source of
-        // truth (the tap's decoder dedup would never refill a cleared store), so subtitles-off keeps
-        // them; only the reader-driven path tears them down.
-        if nativeVideoSession?.subtitleTapActive != true {
-            nativeVideoSession?.nativeSubtitleCueStoresForSession.forEach { $0.clear() }
-            nativeVideoSession?.nativeSubtitleCueStoresForSession = []
-            nativeVideoSession?.nativeSubtitleLanguagesForSession = []
-            nativeSubtitleRenditionAvailable = false
-        }
+        // The native stores stay. The provider got them at init and serves them for the whole
+        // session, so dropping the session's list here (as the reader-only path once did) only cut
+        // the engine off from them: a later marker silenced nothing and the OCR worker found no
+        // store, while the server went on answering from the old ones (AE#1052, tvOS seek stall).
     }
 
     func cancelSidecarTask(channel: SubtitleChannel = .primary, preservingActiveBitmap: Bool = false) {

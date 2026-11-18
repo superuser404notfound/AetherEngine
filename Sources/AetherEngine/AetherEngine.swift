@@ -1855,7 +1855,8 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// True once the NativeSubtitleCueStore has at least one cue for the native mov_text track (#55).
-    /// Use to gate the AVMediaSelection picker (PiP/AirPlay). Cleared by clearSubtitle and stopInternal.
+    /// Use to gate the AVMediaSelection picker (PiP/AirPlay). Reset by stopInternal; subtitles-off keeps it,
+    /// because the stores keep their cues (AE#1052).
     @Published public internal(set) var nativeSubtitleRenditionAvailable: Bool = false
 
     /// True when the SERVED playlist is the master, false when the media playlist is served. Mirrors the

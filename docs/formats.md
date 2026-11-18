@@ -1446,6 +1446,7 @@ A host that draws a bitmap track itself inside a stock `AVPlayerViewController` 
 - `setNativeSubtitleRendering(true)` (PiP, AirPlay, external display) turns the marker into a full rendition: OCR arms, and the engine deselects and reselects so AVKit refetches the segments under the playhead with text. Measured on an iPhone with iOS 27, the first OCR cue showed up right after the reselect.
 - `setNativeSubtitleRendering(false)` goes back to the marker instead of deselecting.
 - Any plain `setNativeSubtitleSelected(track:)` call, nil included, replaces the marker. The marker survives the engine's own reloads (audio switch, recovery, AirPlay).
+- `clearSubtitle()` leaves the renditions' stores in place, so a marker set after subtitles-off still lands on the rendition AVKit fetches.
 - Scope is the VOD loopback, the same as bitmap renditions in general.
 
 ### Live HLS subtitle renditions (host overlay)

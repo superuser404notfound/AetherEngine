@@ -12,6 +12,11 @@ the public-API contract.
 
 ### Fixed
 
+- **A menu marker on a bitmap track holds after subtitles-off.** On a file with only bitmap subtitle tracks,
+  `clearSubtitle()` dropped the engine's list of rendition stores while the loopback server kept serving the
+  old ones. A `markerOnly` selection made after it silenced nothing, so every subtitle segment AVKit asked for
+  waited 3 s for cues no OCR worker was making, and on tvOS a seek never landed. The stores now stay for the
+  whole session (AE#1052, thanks @axeslasher).
 - **The VOD HLS ingest no longer re-asks a refusing origin three times in 1.5 s.** A 429, 503 or 509 on a
   segment used to be retried in place after 0.5 and 1 s, outside the refusal books. On a panel that allows one
   stream per account that is the churn it answers with a longer refusal or a block. The refusal now goes on
