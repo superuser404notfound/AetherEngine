@@ -72,6 +72,8 @@ In the table, the channel bridge is the default audio handling (decode, then re-
 - `TrueHD Atmos rendering requested but not built in (TrueHDObjectAudio trait off)`
 - `DV P7 dual-layer route: not taken (built without the DualLayerDolbyVision trait)`
 
+One part of `DTSXObjectAudio` does not depend on the trait. The height decoder is FFmpegBuild's patch to libavcodec, which every build links. With the trait off the engine never turns it on, but the code still ships. To leave it out of the binary too, build FFmpegBuild with `--without-dtsx-heights` and point SwiftPM at that build ([FFmpegBuild README](https://github.com/superuser404notfound/FFmpegBuild#building-without-the-dtsx-height-patch)). With the trait on against such a build, the session log says `no x_heights option` and DTS:X keeps the channel bridge.
+
 To hide a setting your build cannot honour, ask `AetherEngine.OptionalComponent`, for example `AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn`.
 
 **Patents.** These components may be subject to third-party patent licensing. Integrators who enable them are responsible for their own licensing.
