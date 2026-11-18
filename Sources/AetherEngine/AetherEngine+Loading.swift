@@ -2634,8 +2634,9 @@ extension AetherEngine {
         }
         // Preserve codec so the decoder label can be reconstructed without re-probing.
         let preservedVideoCodec = lastDetectedVideoCodec
-        // stopInternal forgets the source's seekability. loadNative learns it again from its session; the
-        // software path reopens the same source without probing it, so it carries the answer across.
+        // stopInternal forgets the source's seekability. loadNative reads it back from its new session, but
+        // loadSoftware never publishes it (the first load takes it from the probe), so the rebuild carries the
+        // answer over. Same source, same byte reader, so the answer has not changed.
         let preservedSourceSeekable = isSourceSeekable
         let preservedRequiresDeinterlaceWarmup =
             restoredDeinterlaceWarmupDecision ?? lastRequiresDeinterlaceWarmup
