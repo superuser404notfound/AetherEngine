@@ -27,6 +27,13 @@ private final class Recorder: @unchecked Sendable {
     var waits: Int { lock.lock(); defer { lock.unlock() }; return _waits }
 }
 
+private final class TurnLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _order: [Int] = []
+    func note(_ id: Int) { lock.lock(); _order.append(id); lock.unlock() }
+    var order: [Int] { lock.lock(); defer { lock.unlock() }; return _order }
+}
+
 @Suite(.offCooperativePool)
 struct IFrameRenditionTests {
     private func make(_ rec: Recorder, count: Int = 5) -> (IFrameRendition, URL) {
@@ -262,6 +269,111 @@ struct IFrameRenditionTests {
         r.shutdown()
         #expect(r.keyframePayload(at: 0) == nil)
         #expect(r.keyframePayload(at: 7) == nil)
+    }
+
+    /// Waits until `count` callers queue for a turn, so a test can line them up in a known order.
+    private func waitForWaiters(_ count: Int, _ waiting: () -> Int) -> Bool {
+        let deadline = Date().addingTimeInterval(60)
+        while waiting() < count {
+            if Date() > deadline { return false }
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        return true
+    }
+
+    @Test("a free gate goes to the newest request, and a prefetch only when no request waits")
+    func gateServesNewestRequestFirst() {
+        let gate = IFrameRequestGate()
+        let log = TurnLog()
+        let note = log.note
+        let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            gate.withTurn(.request) { held.signal(); release.wait(); note(0) }
+            done.signal()
+        }
+        held.wait()
+        for (expected, (priority, id)) in [(IFrameRequestGate.Priority.request, 1), (.request, 2),
+                                           (.prefetch, 3), (.request, 4)].enumerated() {
+            Thread.detachNewThread { gate.withTurn(priority) { note(id) }; done.signal() }
+            #expect(waitForWaiters(expected + 1) { gate.waitingCount })
+        }
+        release.signal()
+        for _ in 0..<5 { #expect(done.wait(timeout: .now() + 120) == .success) }
+        #expect(log.order == [0, 4, 2, 1, 3])
+    }
+
+    @Test("a prefetch queued behind a read waits for the request that came after it")
+    func prefetchYieldsToRequests() {
+        let rec = Recorder()
+        let (r, dir) = make(rec); defer { r.shutdown(); try? FileManager.default.removeItem(at: dir) }
+        let parked = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        rec.duringRead = { entry in
+            guard entry.startPts == 0 else { return }
+            parked.signal(); release.wait()
+        }
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { _ = r.fragment(at: 0); done.signal() }
+        parked.wait()
+        Thread.detachNewThread { _ = r.prefetch(at: 3, buildsFragment: false); done.signal() }
+        #expect(waitForWaiters(1) { r.waitingTurns })
+        Thread.detachNewThread { _ = r.fragment(at: 4); done.signal() }
+        #expect(waitForWaiters(2) { r.waitingTurns })
+        release.signal()
+        for _ in 0..<3 { #expect(done.wait(timeout: .now() + 120) == .success) }
+        #expect(rec.reads == [0, 4000, 3000])
+    }
+
+    @Test("a request whose client hung up reads nothing, and nothing stands in for it")
+    func abandonedRequestReadsNothing() {
+        let rec = Recorder()
+        let (r, dir) = make(rec); defer { r.shutdown(); try? FileManager.default.removeItem(at: dir) }
+        #expect(r.fragment(at: 2, isAbandoned: { true }) == nil)
+        #expect(rec.reads.isEmpty)
+        _ = r.fragment(at: 1)
+        // A cached one costs nothing, so it is still answered.
+        #expect(r.fragment(at: 1, isAbandoned: { true }) == Data("key1000@1:4.0".utf8))
+        #expect(r.fragment(at: 3, isAbandoned: { true }) == nil)
+        #expect(rec.reads == [1000])
+    }
+
+    @Test("a hung-up client reads as closed, an open or pipelined one does not")
+    func peerClosedDetection() {
+        var fds: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        defer { close(fds[0]) }
+        #expect(!HLSLocalServer.peerHasClosed(fds[0]))
+        var byte: UInt8 = 7
+        #expect(send(fds[1], &byte, 1, 0) == 1)
+        #expect(!HLSLocalServer.peerHasClosed(fds[0]))
+        // The peek left the next request where it was.
+        #expect(!HLSLocalServer.peerHasClosed(fds[0]))
+        var drained: UInt8 = 0
+        #expect(recv(fds[0], &drained, 1, 0) == 1)
+        close(fds[1])
+        #expect(HLSLocalServer.peerHasClosed(fds[0]))
+    }
+
+    @Test("the side reader's range follows its largest keyframe, in 64 KB steps")
+    func sideReaderRangeCap() {
+        #expect(IFrameSideReader.rangeCap(largestKeyframe: 30 * 1024) == 128 * 1024)
+        #expect(IFrameSideReader.rangeCap(largestKeyframe: 96 * 1024) == 256 * 1024)
+        #expect(IFrameSideReader.rangeCap(largestKeyframe: 1_500_000) == 3_080_192)
+    }
+
+    @Test("a range cap stays between the AVIO buffer and the chunk size, and lifts again")
+    func readerRangeCapBounds() {
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:9/x.mkv")!, chunkSize: 1024 * 1024,
+                                prefetchEnabled: false)
+        #expect(reader.seekableRangeSize == 1024 * 1024)
+        reader.setRangeSizeCap(128 * 1024)
+        #expect(reader.seekableRangeSize == 256 * 1024)
+        reader.setRangeSizeCap(512 * 1024)
+        #expect(reader.seekableRangeSize == 512 * 1024)
+        reader.setRangeSizeCap(3_000_000)
+        #expect(reader.seekableRangeSize == 1024 * 1024)
+        reader.setRangeSizeCap(nil)
+        #expect(reader.seekableRangeSize == 1024 * 1024)
     }
 
     @Test("the failure line is written once per window and counts what it swallowed")

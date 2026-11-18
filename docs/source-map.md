@@ -523,7 +523,7 @@ Notes:
 | File | What it does |
 | --- | --- |
 | `HLSVideoEngine.swift` | Native path: session orchestrator (start/stop, producer construction and restart, shift handling). |
-| `KeyframeStillLadder.swift` | Native VOD: which keyframe the sparse scrub-still ladder reads next (one a minute, then every 30 s, nearest the playhead first; with an I-frame rendition served, every segment within 30 of the playhead's before that) and whether the origin is idle enough to read it (nothing in flight or queued, no recent refusal, 30 s buffered). Lets `scrubPreviewFrame` answer beyond the resident window on a one-connection plan. |
+| `KeyframeStillLadder.swift` | Native VOD: which keyframe the sparse scrub-still ladder reads next (one a minute, then every 30 s, nearest the playhead first; with an I-frame rendition served, every segment within 30 of the playhead's before that, read back to back) and whether the origin is idle enough to read it (nothing in flight or queued, no recent refusal, 30 s buffered). Lets `scrubPreviewFrame` answer beyond the resident window on a one-connection plan. |
 | `HLSVideoEngine+AudioRoute.swift` | Native path: audio cascade of stream-copy, then `AudioBridge` (E-AC-3 above stereo by default, FLAC with `.lossless`, or the object-audio bed through `SpatialAudioBridge`), then video-only. |
 | `HLSVideoEngine+SegmentPlanning.swift` | Native path: keyframe / uniform segment plans, extradata and AAC fixups. |
 | `HLSVideoEngine+LiveReopen.swift` | Native path: live source-loss recovery (capped-backoff reopen on the same timeline), and the VOD backpressure-wedge re-anchor plus consumer re-engage nudge. The nudge re-reads the rendered position at nudge time, so the zero-tolerance seek never lands behind the on-screen frame (#115). |
@@ -603,7 +603,7 @@ Notes:
 | `VideoPacketTap.swift` | Copies source video packets before the Profile 7 conversion strips the EL, with the time the served stream shows them. |
 | `VideoPacketHistory.swift` | Bounded on-disk history of tapped packets, so the EL route can follow AVPlayer to any cached position. |
 | `CompositorPreviewBuilder.swift` | Turns a resident segment into a video-only fMP4 a second AVPlayer shows, the only way DV P5 / 10.0 scrub previews get their colour. |
-| `IFrameRendition.swift` | AE#682: the I-frame rendition the segment provider serves for AVKit's scrubber, and its format. `prefetch(at:buildsFragment:)` is the still ladder's way in. |
+| `IFrameRendition.swift` | AE#682: the I-frame rendition the segment provider serves for AVKit's scrubber, and its format. `prefetch(at:buildsFragment:)` is the still ladder's way in. `IFrameRequestGate` picks the next read: the newest request, a prefetch only when none waits. |
 | `IFrameRenditionEligibility.swift` | AE#682: whether a session serves the I-frame rendition, all or nothing. |
 | `IFrameSideReader.swift` | AE#682: reads a plan segment's opening keyframe on a demuxer of its own. |
 | `IFrameFragmentBuilder.swift` | AE#682: wraps one keyframe into one fMP4 fragment on the main rendition's timeline. |

@@ -3446,7 +3446,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     var iFrameRenditionServed: Bool { iFrameSource != nil }
     var iFrameRenditionFormat: IFrameRenditionFormat? { iFrameSource?.format }
     func iFrameInitSegment() -> Data? { iFrameSource?.initSegment() }
-    func iFrameSegment(at index: Int) -> Data? { iFrameSource?.fragment(at: index) }
+    func iFrameSegment(at index: Int, isAbandoned: @escaping () -> Bool) -> Data? {
+        iFrameSource?.fragment(at: index, isAbandoned: isAbandoned)
+    }
 
     var masterCodecs: String? { codecsString }
     var masterSupplementalCodecs: String? { supplementalCodecsString }

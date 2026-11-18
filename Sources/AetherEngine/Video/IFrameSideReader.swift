@@ -20,11 +20,21 @@ final class IFrameSideReader: @unchecked Sendable {
     private var interrupted = false
     private var cleanedUp = false
     private var consecutiveFailures = 0
+    private var largestPayload = 0
     private var blockedUntil = Date.distantPast
 
     /// A keyframe sits at the seek target or right behind it; this bounds a source that claims an
     /// index entry no keyframe backs.
     private static let maxPacketsPerRead = 256
+
+    /// The Range to ask for once keyframes of up to `largestKeyframe` bytes were read: twice that
+    /// plus 64 KB for the cluster around it, in 64 KB steps. The reader keeps it between the AVIO
+    /// buffer and its chunk size. Until the first keyframe there is no cap, so a 4K remux whose
+    /// keyframes run past a megabyte is not split into small fetches on its first read.
+    static func rangeCap(largestKeyframe: Int) -> Int {
+        let step = 64 * 1024
+        return ((largestKeyframe * 2 + step) + step - 1) / step * step
+    }
 
     /// How long the reader refuses to touch the source after a failed open or read. Requests are
     /// served one at a time and AVKit sends five at once, so without this a stalled connection
@@ -108,7 +118,10 @@ final class IFrameSideReader: @unchecked Sendable {
         }
         isOpen = true
         videoIndex = index
+        let largest = largestPayload
         lock.unlock()
+        // A reopened demuxer keeps what the last one learned about the keyframes.
+        if largest > 0 { dem.capSourceRangeSize(Self.rangeCap(largestKeyframe: largest)) }
         let ms = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000
         EngineLog.emit("[IFrameSideReader] opened in \(String(format: "%.0f", ms))ms", category: .session)
         return dem
@@ -152,7 +165,13 @@ final class IFrameSideReader: @unchecked Sendable {
                 _ = DoviRpuConverter.convertPacketToProfile81(packet, framing: nalFraming)
             }
             guard let bytes = packet.pointee.data, packet.pointee.size > 0 else { return nil }
-            return Data(bytes: bytes, count: Int(packet.pointee.size))
+            let size = Int(packet.pointee.size)
+            lock.lock()
+            let grew = size > largestPayload
+            if grew { largestPayload = size }
+            lock.unlock()
+            if grew { dem.capSourceRangeSize(Self.rangeCap(largestKeyframe: size)) }
+            return Data(bytes: bytes, count: size)
         }
         return nil
     }

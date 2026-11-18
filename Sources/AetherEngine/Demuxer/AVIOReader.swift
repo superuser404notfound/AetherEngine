@@ -543,6 +543,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// at 5+ ops/sec without meaningful latency benefit. Still-extraction passes a
     /// smaller value for random-access single-keyframe fetches.
     private let chunkSize: Int
+    private let rangeCapLock = NSLock()
+    private var rangeCap: Int?
     /// When false the reader serves discrete Range chunks (random access: the next read almost always
     /// seeks elsewhere, so nothing is read ahead). When true it keeps the persistent sliding window.
     private let prefetchEnabled: Bool
@@ -2321,7 +2323,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 bufferLock.unlock()
             } else {
                 let rangeSize = probeRangeGrowth?.size(at: position, remainingInput: probeControl?.remainingInputBytes)
-                    ?? chunkSize
+                    ?? seekableRangeSize
                 let fetchSize: Int
                 if fileSize > 0 {
                     fetchSize = min(rangeSize, Int(fileSize - position))
@@ -4850,6 +4852,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             EngineLog.emit("[AVIOReader] HEAD probe failed: \(error.localizedDescription)", category: .demux, level: .verbose)
             return -1
         }
+    }
+
+    /// Caps the Range a seekable read asks for, below `chunkSize`; nil lifts it. The I-frame side
+    /// reader sets it from the keyframes it has seen: 1 MB for a 30 KB keyframe was 90% of each
+    /// read's time on an 80 Mbit link.
+    func setRangeSizeCap(_ bytes: Int?) {
+        rangeCapLock.lock(); rangeCap = bytes; rangeCapLock.unlock()
+    }
+
+    /// Never below the AVIO buffer: `readSeekable` fills a whole buffer per call, so a smaller range
+    /// only adds a second fetch to the same read.
+    var seekableRangeSize: Int {
+        rangeCapLock.lock(); defer { rangeCapLock.unlock() }
+        guard let rangeCap else { return chunkSize }
+        return min(chunkSize, max(Int(Self.avioBufferSize), rangeCap))
     }
 
     private func fetchChunk(from offset: Int64, size: Int) -> Data? {
