@@ -17,6 +17,11 @@ the public-API contract.
   stream per account that is the churn it answers with a longer refusal or a block. The refusal now goes on
   the origin's books and the session waits 3 to 45 s before asking again, like a metered HTTP source. A reset
   or another 5xx is still retried in place (AE#1084).
+- **A VOD source that keeps dropping is no longer reopened without end.** Since 7.70.0 the count of reopens
+  after a read error restarted whenever a segment had arrived in between, so a source cut every few seconds
+  was reopened for the whole film and the host never saw a decision. Five reopens in any ten minutes is now
+  the ceiling; the next drop ends the session with `.vodSourceFailed` and leaves the next open to the host
+  (AE#1085).
 
 ## [7.70.0] - 2026-11-17
 

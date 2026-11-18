@@ -971,7 +971,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// scrub/wedge arms covered the rest; a tail request within the forward-wait window of the dead
     /// producer's front reached neither (rrgomes: seg719 miss x11 into -12889), so the exit gets
     /// its own event-driven arm. Same gate shape as #99.
-    var readErrorReviveGate = ReviveBudget(maxAttempts: 2, reset: .onProgress)
+    ///
+    /// AE#1085: the progress reset alone let a source that is cut every few seconds, and delivers a
+    /// segment in between, be reopened for the length of a film without the host ever deciding.
+    /// The ceiling allows five revives in any ten minutes: a film over a flaky link that heals each
+    /// outage stays far below it, and a session cut more often than every two minutes is handed to
+    /// the host, which may know the origin allows one connection and has its own reconnect policy.
+    var readErrorReviveGate = ReviveBudget(maxAttempts: 2, reset: .onProgress,
+                                           ceiling: readErrorReviveCeiling)
+    static let readErrorReviveCeiling = ReviveBudget.Ceiling(maxRevives: 5, windowSeconds: 600)
     /// #377: a separate, larger budget for read errors caused by an origin REFUSING us rather than
     /// failing. Separate because the two must not spend each other: two attempts is right for a
     /// source that may be gone, and wrong for one that is merely refusing for a while, where each

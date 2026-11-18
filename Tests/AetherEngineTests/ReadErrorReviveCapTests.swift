@@ -72,6 +72,72 @@ struct ReadErrorReviveCapTests {
         #expect(!s3, ".never ignores progress")
     }
 
+    @Test("AE#1085: progress between deaths does not lift the session ceiling", .timeLimit(.minutes(3)))
+    func ceilingBoundsRevivesThatEachFollowProgress() {
+        let ceiling = ReviveBudget.Ceiling(maxRevives: 5, windowSeconds: 600)
+        var gate = ReviveBudget(maxAttempts: 2, reset: .onProgress, ceiling: ceiling)
+        let start = DispatchTime.now().uptimeNanoseconds
+        func at(_ seconds: UInt64) -> DispatchTime { DispatchTime(uptimeNanoseconds: start + seconds * 1_000_000_000) }
+
+        // A source cut every 10 s that stores one segment in between.
+        var admitted: [Bool] = []
+        for death in 0..<6 {
+            admitted.append(gate.admit(progress: death + 1, now: at(UInt64(death) * 10)))
+        }
+        #expect(admitted == [true, true, true, true, true, false],
+                "the sixth revive inside ten minutes is the host's call, progress or not")
+        #expect(gate.refusedByCeiling)
+        #expect(gate.attempts == 1, "the consecutive count did reset, so the ceiling is what refused")
+    }
+
+    @Test("AE#1085: revives older than the window no longer count", .timeLimit(.minutes(3)))
+    func ceilingSlides() {
+        let ceiling = ReviveBudget.Ceiling(maxRevives: 2, windowSeconds: 600)
+        var gate = ReviveBudget(maxAttempts: 2, reset: .onProgress, ceiling: ceiling)
+        let start = DispatchTime.now().uptimeNanoseconds
+        func at(_ seconds: UInt64) -> DispatchTime { DispatchTime(uptimeNanoseconds: start + seconds * 1_000_000_000) }
+
+        let first = gate.admit(progress: 10, now: at(0))
+        let second = gate.admit(progress: 20, now: at(300))
+        let third = gate.admit(progress: 30, now: at(599))
+        let fourth = gate.admit(progress: 40, now: at(601))
+        #expect(first && second)
+        #expect(!third, "two revives already in the window")
+        #expect(fourth, "the first revive left the window at 600 s")
+        #expect(!gate.refusedByCeiling)
+        #expect(gate.revivesInWindow == 2)
+    }
+
+    @Test("AE#1085: the count still refuses first when deaths come without progress", .timeLimit(.minutes(3)))
+    func countRefusalIsNotReportedAsCeiling() {
+        var gate = ReviveBudget(maxAttempts: 2, reset: .onProgress,
+                                ceiling: .init(maxRevives: 5, windowSeconds: 600))
+        _ = gate.admit(progress: 1)
+        _ = gate.admit(progress: 1)
+        let third = gate.admit(progress: 1)
+        #expect(!third)
+        #expect(!gate.refusedByCeiling)
+    }
+
+    @Test("AE#1085: the session's read-error gate carries the ceiling, and hitting it surfaces the failure",
+          .timeLimit(.minutes(3)))
+    func engineGateCeilingSurfacesFailure() {
+        let engine = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/witness.mkv"),
+                                    dvModeAvailable: false)
+        #expect(engine.readErrorReviveGate.ceiling == HLSVideoEngine.readErrorReviveCeiling)
+        #expect(HLSVideoEngine.readErrorReviveCeiling == .init(maxRevives: 5, windowSeconds: 600))
+
+        engine.readErrorReviveGate = ReviveBudget(maxAttempts: 2, reset: .onProgress,
+                                                  ceiling: .init(maxRevives: 0, windowSeconds: 600))
+        let failed = Flag()
+        engine.onVODSourceFailed = { code, _, _ in failed.set(code) }
+
+        engine.handleVODReadErrorExit(-104)
+
+        #expect(failed.code == -104)
+        #expect(engine.readErrorReviveGate.refusedByCeiling)
+    }
+
     @Test("HLS-201: the segment cache counts every stored segment and never goes back")
     func cacheTotalStoredCountIsMonotonic() throws {
         let cache = SegmentCache(forwardWindow: 10, backwardWindow: 10)

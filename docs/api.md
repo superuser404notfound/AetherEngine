@@ -149,6 +149,15 @@ Both kinds mean the origin answered the source request with an HTTP status inste
 
 Both differ from `.sourceOpenFailed`, which is what a corrupt or unreadable source produces.
 
+#### A source that keeps dropping: `.vodSourceFailed`
+
+A VOD source that drops the connection mid-session (a reset, a short read, a close without a status) is reopened by the engine at the playhead. Each reopen reads as `.stalled(reconnecting: true)` while it runs. Two limits decide when the engine stops and publishes `.vodSourceFailed` instead:
+
+- **Two drops in a row without new media.** Once the session stored a segment after a reopen, the next drop counts as a new outage, so a long film that heals every outage keeps playing.
+- **Five reopens in any ten minutes, progress or not (AE#1085).** A source that is cut every few seconds and delivers a little in between used to be reopened for the whole film. On a panel that allows one connection per account, that churn is what gets an address blocked. The sixth drop inside the window now ends the session, so the host's own reconnect policy decides whether and when to open the source again.
+
+Refusals (above) and refused credentials (see [Rotating a credential without a rebuild](#rotating-a-credential-without-a-rebuild)) have budgets of their own and do not count here.
+
 #### Certificate refusals: `.sourceCertificateRejected`
 
 The transport was refused over certificate trust, so there was never a response to carry a status.

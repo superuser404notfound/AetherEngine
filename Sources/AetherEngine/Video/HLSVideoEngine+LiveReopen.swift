@@ -538,6 +538,8 @@ extension HLSVideoEngine {
         let cap = metered ? 0 : readErrorReviveGate.maxAttempts
         let spent = metered ? rateLimitReviveGate.elapsedSeconds() : 0
         let budget = rateLimitReviveGate.budgetSeconds
+        let ceilingHit = !metered && readErrorReviveGate.refusedByCeiling
+        let ceiling = readErrorReviveGate.ceiling
         if admitted { mainDemuxerSuspectDead = true }
         restartLock.unlock()
         guard admitted else {
@@ -557,6 +559,16 @@ extension HLSVideoEngine {
                 )
                 surfaceVODSourceFailure(code, "Source is rate limiting this session",
                                         kind: .sourceRateLimited)
+                return
+            }
+            if ceilingHit, let ceiling {
+                EngineLog.emit(
+                    "[HLSVideoEngine] AE#1085 VOD readError revive ceiling reached "
+                    + "(\(ceiling.maxRevives) revives already in the last \(Int(ceiling.windowSeconds))s); "
+                    + "giving up so the host decides whether to reopen this source",
+                    category: .session
+                )
+                surfaceVODSourceFailure(code, "Source read failed")
                 return
             }
             EngineLog.emit(
