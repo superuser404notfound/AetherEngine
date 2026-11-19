@@ -611,7 +611,7 @@ Notes:
 | `IFrameJPEGBuilder.swift` | AE#682: one keyframe as a Motion JPEG fragment, for sources whose own keyframes AVKit will not show. |
 | `IFramePayloadCache.swift` | AE#682: byte-capped on-disk cache of keyframe payloads read for the rendition. |
 | `FrameUpscaler.swift` | The per-frame upscale stage (#846): optional VT super resolution, then MetalFX, with overrun fallback. `UpscaleBenchmarkStage` builds the same stage for the benchmark. |
-| `PipelinedFrameStage.swift` | AE#957: runs a per-frame GPU stage with two frames in flight, delivered in decode order; `settle()` delivers them after a decoder flush. Also runs the software decoder's 10-bit AV1 conversion. `EncodedGPUWork` is one frame's uncommitted command buffer. |
+| `PipelinedFrameStage.swift` | AE#957: runs a per-frame GPU stage with two frames in flight, delivered in decode order; `settle()` delivers them after a decoder flush; `.drop` frees a frame's slot without delivering it. Also runs the software decoder's 10-bit AV1 conversion. `EncodedGPUWork` is one frame's uncommitted command buffer. |
 | `FrameToneMapper.swift` | #957: the per-frame picture processing stage: a frame chain with the tone map, rebuilt for a frame's own metadata, with the overrun and HDR10+ switch-off. |
 | `BT2390ToneCurve.swift` | AE#957: the BT.2390 tone curve from a source peak to a target peak on PQ values (the CPU reference), the PQ conversions, which source value sets the peak (`ToneMapSourcePeak`), and the curve's shader parameters. |
 | `FrameChainOutput.swift` | AE#957: `FrameChainColorVolume`, the colour volume a frame chain stage declares for its output, and the attachments a chain's output buffer carries (the source's, minus its geometry, with the declared HDR10 metadata). |

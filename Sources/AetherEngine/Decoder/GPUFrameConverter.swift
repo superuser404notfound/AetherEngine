@@ -20,8 +20,8 @@ import AetherLibswscale
 /// - `encode` returns the frame's work without committing it. The playback decoder hands it to a
 ///   `PipelinedFrameStage`, so up to `slotCount` frames are on the GPU while dav1d decodes the next, and
 ///   calls `finished` when the work completed. Waiting for each frame on the decoder's thread held a 1080p
-///   10-bit AV1 episode at about 23 of its 24 frames a second on an Apple TV 4K (A15), so the clock paused
-///   to rebuffer every few seconds (see measurements.md).
+///   10-bit AV1 episode at about 23 of its 24 frames a second on an Apple TV 4K (A15) in a host's Debug
+///   build, so the clock paused to rebuffer every few seconds (see measurements.md).
 /// - `convert` commits and waits, for the callers that read the frame right after `decode` returns (the
 ///   probe, the still extractor, the tests).
 final class GPUFrameConverter: @unchecked Sendable {
@@ -332,8 +332,9 @@ final class GPUFrameConverter: @unchecked Sendable {
     }
 
     /// `frame` into `pixelBuffer` on the CPU, without grain, for a frame whose GPU work failed after the
-    /// decoder moved on. `format` is the decoder's output format (`OutputFormat.swscaleFormat`).
-    func convertOnCPU(_ frame: UnsafeMutablePointer<AVFrame>, into pixelBuffer: CVPixelBuffer, format: AVPixelFormat) {
+    /// decoder moved on. `format` is the decoder's output format (`OutputFormat.swscaleFormat`). False
+    /// when no `sws_scale` context could be made, so the buffer was not written.
+    func convertOnCPU(_ frame: UnsafeMutablePointer<AVFrame>, into pixelBuffer: CVPixelBuffer, format: AVPixelFormat) -> Bool {
         fallback.convert(frame, into: pixelBuffer, format: format)
     }
 
@@ -411,13 +412,14 @@ final class GPUFrameConverter: @unchecked Sendable {
         private let lock = NSLock()
         private var context: UnsafeMutablePointer<SwsContext>?
 
-        func convert(_ frame: UnsafeMutablePointer<AVFrame>, into pixelBuffer: CVPixelBuffer, format: AVPixelFormat) {
+        func convert(_ frame: UnsafeMutablePointer<AVFrame>, into pixelBuffer: CVPixelBuffer, format: AVPixelFormat) -> Bool {
             lock.lock(); defer { lock.unlock() }
             let width = frame.pointee.width, height = frame.pointee.height
             context = sws_getCachedContext(context, width, height, AVPixelFormat(rawValue: frame.pointee.format),
                                            width, height, format, Int32(SWS_BILINEAR.rawValue), nil, nil, nil)
-            guard let context else { return }
+            guard let context else { return false }
             SoftwareVideoDecoder.scale(frame, into: pixelBuffer, with: context)
+            return true
         }
 
         deinit { if context != nil { sws_freeContext(context) } }

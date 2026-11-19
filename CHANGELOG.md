@@ -29,21 +29,22 @@ the public-API contract.
 
 - **10-bit AV1 on the software path no longer stalls every few seconds where the GPU conversion was the
   limit.** The decoder's thread encoded each frame's P010 conversion and film grain, then waited for the GPU
-  before it took the next frame. On an Apple TV 4K (A15) that held a 1080p 23.976 fps episode at 22 to 23
-  frames a second, with dav1d mostly idle; the audio lead drained and the clock paused to rebuffer every 4.5
-  to 8 s. In playback the conversion now runs in a `PipelinedFrameStage` inside the decoder: up to two
-  frames on the GPU while dav1d decodes the next, each with buffers of its own and a reference to its
-  picture until the GPU read it, delivered in decode order. A flush retires the frames still on the GPU with
-  the feed epoch, and flush, drain and close wait for them, so the host's order is unchanged. The probe, the
-  still extractor and the tests keep the conversion that waits. A `[GPUFrameConverter] last 240 frames` line
-  gives the encode, GPU and decoder-thread time per frame. Pinned by
-  `GPUFrameConversionOverlapsTheDecodeTests` and the media check in `AV1FilmGrainGPUTests`.
+  before it took the next frame. On an Apple TV 4K (A15), in a host's Debug build, that held a 1080p 23.976
+  fps episode at 22 to 23 frames a second, with dav1d mostly idle; the audio lead drained and the clock paused
+  to rebuffer every 4.5 to 8 s. In playback the conversion now runs in a `PipelinedFrameStage` inside the
+  decoder: up to two frames on the GPU while dav1d decodes the next, each with buffers of its own and a
+  reference to its picture until the GPU read it, delivered in decode order. A flush retires the frames still
+  on the GPU with the feed epoch, and flush, drain and close wait for them, so the host's order is unchanged.
+  The probe, the still extractor and the tests keep the conversion that waits. A frame neither the GPU nor
+  `sws_scale` converted is dropped rather than shown unwritten (`PipelinedFrameStage.Begun.drop`). A
+  `[GPUFrameConverter] last 240 frames` line gives the encode, GPU and decoder-thread time per frame. Pinned
+  by `GPUFrameConversionOverlapsTheDecodeTests` and the media check in `AV1FilmGrainGPUTests`.
 - **10-bit AV1 with film grain keeps up in a host's Debug build.** The film grain tables are built on the
-  decoder's thread for every frame. Written with `Array` and `for ... in`, they took 41 ms a frame
-  unoptimised (an M1 and an Apple TV 4K alike), the whole frame interval at 23.976 fps, so a Debug build
-  stalled where a Release build did not. Their loops now run with `while` over raw pointers: 3 ms
-  unoptimised, under 1 ms optimised, with the same output. Pinned by
-  `AV1FilmGrainTablesMatchTheReferenceArithmeticTests`.
+  decoder's thread for every frame. Written with `Array` and `for ... in`, they took 40.8 ms a frame
+  unoptimised on an M1, and the encode around them 40 to 44 ms on an Apple TV 4K (A15): the whole frame
+  interval at 23.976 fps, so a Debug build stalled where a Release build did not. Their loops now run with
+  `while` over raw pointers: 1.45 ms unoptimised on the M1, under 1 ms optimised, with the same output.
+  Pinned by `AV1FilmGrainTablesMatchTheReferenceArithmeticTests`.
 - **An AES-128 live channel with HEVC in MPEG-TS and no `CODECS` now gets its picture.** The live carriage
   probe gave up on any encrypted first segment, because it could not read the PMT behind the encryption. A
   channel like that (common on Xtream/XUI panels) stayed on AVPlayer with sound and no video, although the

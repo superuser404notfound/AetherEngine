@@ -73,20 +73,6 @@ struct PipelinedFrameStageDeliversInOrderTests {
 
     private static func pts(_ n: Int64) -> CMTime { CMTime(value: n, timescale: 24) }
 
-    /// Starts `body` on a thread of its own and returns a flag that turns true when it returned.
-    private static func onThread(_ body: @escaping @Sendable () -> Void) -> Flag {
-        let flag = Flag()
-        Thread { body(); flag.set() }.start()
-        return flag
-    }
-
-    private final class Flag: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = false
-        func set() { lock.lock(); value = true; lock.unlock() }
-        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
-    }
-
     /// A pass-through frame behind a GPU frame waits for it: frames leave in the order they came in.
     @Test func issue957APassThroughFrameWaitsForTheGPUFrameAheadOfIt() async throws {
         let gate = Gate()
@@ -96,7 +82,7 @@ struct PipelinedFrameStageDeliversInOrderTests {
                                            begin: { _, pts, _ in
             pts.value == 1 ? gate.work(waitingFor: 1, output: upscaled.value) : .passThrough
         })
-        let submitted = Self.onThread {
+        let submitted = runOnOwnThread {
             pipeline.submit(original.value, pts: Self.pts(1), hdr10Plus: nil)
             pipeline.submit(original.value, pts: Self.pts(2), hdr10Plus: nil)
         }
@@ -130,7 +116,7 @@ struct PipelinedFrameStageDeliversInOrderTests {
                                            begin: { _, pts, _ in gate.work(waitingFor: UInt64(pts.value), output: Self.frame()) })
         #expect(pipeline.depth == PipelinedFrameStage.defaultDepth && pipeline.depth == 2)
         let input = UncheckedSendable(Self.frame())
-        let third = Self.onThread {
+        let third = runOnOwnThread {
             for n in 1...3 { pipeline.submit(input.value, pts: Self.pts(Int64(n)), hdr10Plus: nil) }
         }
         try await waitFor { pipeline.inFlight == 2 }
@@ -157,12 +143,12 @@ struct PipelinedFrameStageDeliversInOrderTests {
                                            deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
                                            begin: { _, pts, _ in gate.work(waitingFor: 1, output: Self.frame()) })
         let input = UncheckedSendable(Self.frame())
-        let submitted = Self.onThread {
+        let submitted = runOnOwnThread {
             pipeline.submit(input.value, pts: Self.pts(1), hdr10Plus: nil)
             pipeline.submit(input.value, pts: Self.pts(2), hdr10Plus: nil)
         }
         try await waitFor { submitted.isSet }
-        let settled = Self.onThread { pipeline.settle() }
+        let settled = runOnOwnThread { pipeline.settle() }
         let early3 = try await waitFor(upTo: .milliseconds(200)) { settled.isSet }
         #expect(!early3)
         gate.release(1)
@@ -176,7 +162,7 @@ struct PipelinedFrameStageDeliversInOrderTests {
         let gate = Gate()
         let delivered = Delivered()
         let generations = Generations()
-        let begun = Flag()
+        let begun = TestFlag()
         let pipeline = PipelinedFrameStage(stamp: { generations.decoded },
                                            isCurrent: { generations.live == $0 },
                                            deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
@@ -191,7 +177,7 @@ struct PipelinedFrameStageDeliversInOrderTests {
 
         let stale = Generations()
         stale.live = 1
-        let begunStale = Flag()
+        let begunStale = TestFlag()
         let late = PipelinedFrameStage(stamp: { stale.decoded }, isCurrent: { stale.live == $0 },
                                        deliver: { _, pts, _ in delivered.add(pts, upscaled: true) },
                                        begin: { _, _, _ in begunStale.set(); return .passThrough })
@@ -219,7 +205,7 @@ struct PipelinedFrameStageDeliversInOrderTests {
                                            begin: { _, pts, _ in
             pts.value == 1 ? .later { resume.set($0) } : .passThrough
         })
-        let submitted = Self.onThread {
+        let submitted = runOnOwnThread {
             pipeline.submit(original.value, pts: Self.pts(1), hdr10Plus: nil)
             pipeline.submit(original.value, pts: Self.pts(2), hdr10Plus: nil)
         }
@@ -254,5 +240,40 @@ struct PipelinedFrameStageDeliversInOrderTests {
         pipeline.submit(original.value, pts: Self.pts(1), hdr10Plus: nil)
         try await waitFor { delivered.pts.count == 1 }
         #expect(delivered.upscaled == [false])
+    }
+    /// A frame the stage cannot produce (`.drop`, the software decoder's conversion that no route wrote)
+    /// is not delivered, frees its slot, and the frames around it keep their order.
+    @Test func aDroppedFrameFreesItsSlotAndIsNotDelivered() async throws {
+        let delivered = Delivered()
+        let pipeline = PipelinedFrameStage(depth: 1, deliver: { _, pts, _ in delivered.add(pts, upscaled: false) },
+                                           begin: { _, pts, _ in pts.value == 2 ? .drop : .passThrough })
+        // With one slot, the third frame could not be submitted if the dropped one kept its slot.
+        let submitted = runOnOwnThread {
+            for n in 1...3 { pipeline.submit(Self.frame(), pts: Self.pts(Int64(n)), hdr10Plus: nil) }
+        }
+        try await waitFor { submitted.isSet }
+        try await waitFor { delivered.pts.count == 2 }
+        #expect(delivered.pts == [1, 3])
+        #expect(pipeline.inFlight == 0)
+    }
+
+    /// A `.later` step can drop its frame when it answers, after the frames behind it were submitted.
+    @Test func aLaterStepCanDropItsFrame() async throws {
+        let delivered = Delivered()
+        let resume = ResumeBox()
+        let pipeline = PipelinedFrameStage(deliver: { _, pts, _ in delivered.add(pts, upscaled: false) },
+                                           begin: { _, pts, _ in
+            pts.value == 1 ? .later { resume.set($0) } : .passThrough
+        })
+        let submitted = runOnOwnThread {
+            pipeline.submit(Self.frame(), pts: Self.pts(1), hdr10Plus: nil)
+            pipeline.submit(Self.frame(), pts: Self.pts(2), hdr10Plus: nil)
+        }
+        try await waitFor { submitted.isSet }
+        #expect(pipeline.inFlight == 2 && delivered.pts.isEmpty)
+        resume.call(.drop)
+        try await waitFor { delivered.pts.count == 1 }
+        #expect(delivered.pts == [2])
+        try await waitFor { pipeline.inFlight == 0 }
     }
 }

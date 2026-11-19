@@ -287,7 +287,7 @@ final class FrameUpscaler: @unchecked Sendable {
         }
         let output: CVPixelBuffer?
         switch begun {
-        case .passThrough, .later: output = nil
+        case .passThrough, .later, .drop: output = nil
         case let .ready(buffer): output = buffer
         case let .gpu(work, complete):
             work.commandBuffer.commit()

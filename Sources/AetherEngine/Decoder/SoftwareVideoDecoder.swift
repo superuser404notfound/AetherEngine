@@ -81,8 +81,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// use. Every frame of this decoder goes through it then, a CPU-converted one included, so they stay in
     /// order. Written in `open` and `close`; read under `lock`.
     private var conversionPipeline: PipelinedFrameStage?
-    /// The conversion `emitInner` hands the pipeline's `begin` (decode thread, under `lock`).
+    /// The conversion `emitInner` hands the pipeline's `begin` (decode thread, under `lock`), and when
+    /// `submit` was called, so the time a frame waits for a free slot counts in its held time.
     private var pendingConversion: PendingConversion?
+    private var submitStarted: UInt64 = 0
     /// The frame handler and the feed epoch as the pipeline's delivery queue reads them. Guarded by
     /// `deliveryLock`, never by `lock`: the decode thread holds `lock` while it waits for a free slot in
     /// the pipeline, and only a delivery frees one.
@@ -352,7 +354,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 stamp: { [weak self] in self?.currentDeliveryEpoch ?? 0 },
                 isCurrent: { [weak self] epoch in self?.currentDeliveryEpoch == epoch },
                 deliver: { [weak self] buffer, pts, hdr10Plus in
-                    self?.currentDeliveryHandler?(buffer, pts, hdr10Plus)
+                    // Read first, so the decoder is not kept alive across the host's handler.
+                    let handler = self?.currentDeliveryHandler
+                    handler?(buffer, pts, hdr10Plus)
                 },
                 begin: { [weak self] _, _, _ in self?.beginPendingConversion() ?? .passThrough })
         }
@@ -642,6 +646,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if let conversionPipeline {
             // Every frame goes through the pipeline, so a converted one and the next stay in order. `submit`
             // waits here while the pipeline is full, then calls `beginPendingConversion`.
+            submitStarted = DispatchTime.now().uptimeNanoseconds
             conversionPipeline.submit(pixelBuffer, pts: cmPTS, hdr10Plus: hdr10PlusData)
             pendingConversion = nil
         } else {
@@ -652,6 +657,11 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// The pipeline's `begin` for the frame `emitInner` is submitting: on the decode thread, under `lock`,
     /// with a slot free. Encoded here rather than before `submit`, so the converter's buffers it writes
     /// belong to a frame the pipeline already delivered. The frame's picture is held until the GPU read it.
+    ///
+    /// The pixel buffer is only a picture once something wrote it, so a frame that neither the GPU nor
+    /// `sws_scale` converted is dropped, as `convertFrameToPixelBuffer` returning nil drops it. Only a
+    /// `.later` step can say so after the GPU work completed, which is why the work is committed here
+    /// rather than handed back as `.gpu`.
     private func beginPendingConversion() -> PipelinedFrameStage.Begun {
         guard let pending = pendingConversion else { return .passThrough }
         pendingConversion = nil
@@ -659,17 +669,21 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         guard let held = HeldFrame(cloning: pending.frame),
               let encoded = pending.converter.encode(pending.frame, into: pixelBuffer) else {
             // Nothing reached the GPU: converted on the CPU here, as a failed `convert` leaves a frame.
-            _ = scaleLocked(pending.frame, into: pixelBuffer, format: pending.format)
-            return .passThrough
+            return scaleLocked(pending.frame, into: pixelBuffer, format: pending.format) ? .passThrough : .drop
         }
+        // Waiting for the free slot, then encoding: the time the frame held the decoder's thread.
+        let heldMs = Double(DispatchTime.now().uptimeNanoseconds - submitStarted) / 1_000_000
         let converter = pending.converter, format = pending.format
         let buffer = UncheckedSendable(pixelBuffer)
-        return .gpu(encoded.work) { heldMs in
-            if !converter.finished(encoded, heldMs: heldMs) {
-                converter.convertOnCPU(held.frame, into: buffer.value, format: format)
+        return .later { resume in
+            let commandBuffer = encoded.work.commandBuffer
+            commandBuffer.addCompletedHandler { _ in
+                let converted = converter.finished(encoded, heldMs: heldMs)
+                    || converter.convertOnCPU(held.frame, into: buffer.value, format: format)
+                withExtendedLifetime(held) {}
+                resume(converted ? .ready(buffer.value) : .drop)
             }
-            withExtendedLifetime(held) {}
-            return nil
+            commandBuffer.commit()
         }
     }
 
@@ -759,6 +773,13 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
 
     func close() {
+        close(settling: true)
+    }
+
+    /// `settling: false` from `deinit`: the last reference can go on the pipeline's delivery queue (a
+    /// delivery finishing as the host lets go), and waiting there for the delivery in progress would
+    /// only time out. Frames still on the GPU then complete into no handler.
+    private func close(settling: Bool) {
         lock.lock()
         // Frames still on the GPU complete into no handler; each holds its picture until then.
         let pipeline = conversionPipeline
@@ -790,11 +811,11 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         onFrame = nil
         onCacheTiming = nil
         lock.unlock()
-        pipeline?.settle()
+        if settling { pipeline?.settle() }
     }
 
     deinit {
-        close()
+        close(settling: false)
     }
 
     // MARK: - Decoder-owned pixel buffer pool

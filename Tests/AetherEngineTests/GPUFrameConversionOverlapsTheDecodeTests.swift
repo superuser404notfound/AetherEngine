@@ -9,7 +9,7 @@ import AetherLibavutil
 /// The playback decoder's 10-bit AV1 conversion overlaps the decode (`overlapsGPUConversion`): up to
 /// `GPUFrameConverter.slotCount` frames are on the GPU at once, each with buffers of its own, and they
 /// leave in the order they were decoded. Waiting for each frame on the decoder's thread held a 1080p
-/// episode below 24 fps on an Apple TV 4K (A15). Synthetic pictures against the dav1d 1.5.4 digests of
+/// episode below 24 fps on an Apple TV 4K (A15) in a host's Debug build. Synthetic pictures against the dav1d 1.5.4 digests of
 /// `AV1FilmGrainGPUReferenceTests`, so it runs wherever Metal does; the media check in `AV1FilmGrainGPUTests`
 /// runs the same route on a real clip.
 @Suite("GPU frame conversion overlaps the decode", .serialized, .timeLimit(.minutes(3)),
@@ -95,7 +95,7 @@ struct GPUFrameConversionOverlapsTheDecodeTests {
                 }
             })
         let buffers = UncheckedSendable(try (0..<frames).map { _ in try Reference.makePixelBuffer() })
-        let submitted = Self.onThread {
+        let submitted = runOnOwnThread {
             for n in 0..<frames {
                 pipeline.submit(buffers.value[n], pts: CMTime(value: Int64(n), timescale: 24), hdr10Plus: nil)
             }
@@ -134,19 +134,5 @@ struct GPUFrameConversionOverlapsTheDecodeTests {
         var count: Int { lock.lock(); defer { lock.unlock() }; return items.count }
         var pts: [Int64] { lock.lock(); defer { lock.unlock() }; return items.map(\.pts) }
         var buffers: [CVPixelBuffer] { lock.lock(); defer { lock.unlock() }; return items.map(\.pb) }
-    }
-
-    /// Starts `body` on a thread of its own and returns a flag that turns true when it returned.
-    private static func onThread(_ body: @escaping @Sendable () -> Void) -> Flag {
-        let flag = Flag()
-        Thread { body(); flag.set() }.start()
-        return flag
-    }
-
-    private final class Flag: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = false
-        func set() { lock.lock(); value = true; lock.unlock() }
-        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 }
