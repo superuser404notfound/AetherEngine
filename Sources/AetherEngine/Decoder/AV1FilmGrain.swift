@@ -39,6 +39,12 @@ import AetherLibavutil
 /// seconds on an M5 Pro), on the same cores the decode needs; on a fanless Apple TV that
 /// share is heat it does not have to make. The tables below are about 30 KB and well under a
 /// millisecond of work.
+///
+/// They are built once per frame on the decoder's thread, so the loops run over raw pointers with
+/// `while`: in a debug build (the package unoptimised, as a host's Debug configuration compiles it)
+/// every `Array` subscript and every `for ... in` step is a call, and the same arithmetic took 41 ms a
+/// frame on an M1 and on an Apple TV 4K (A15), the whole frame interval at 23.976 fps. Written this way
+/// the tables take about 3 ms unoptimised and under 1 ms optimised (see measurements.md).
 struct AV1FilmGrainTables {
 
     /// `GRAIN_WIDTH` x `GRAIN_HEIGHT`: the luma template.
@@ -163,18 +169,7 @@ struct AV1FilmGrainTables {
         if aom.num_uv_points.1 > 0 { Self.fillScaling(&tables, table: 2, points: crPoints) }
         scaling = tables
 
-        // The seed of block row r, then one 8-bit draw per block across the row. dav1d draws the row
-        // above again from its own seed for the overlap, which is this same table one row up.
-        var table = [UInt8](repeating: 0, count: blockRows * blockCols)
-        for row in 0..<blockRows {
-            var rowSeed = seed
-            rowSeed ^= UInt32(((row * 37 + 178) & 0xFF) << 8)
-            rowSeed ^= UInt32((row * 173 + 105) & 0xFF)
-            for col in 0..<blockCols {
-                table[row * blockCols + col] = UInt8(Self.random(8, &rowSeed))
-            }
-        }
-        offsets = table
+        offsets = Self.blockOffsets(seed: seed, blockCols: blockCols, blockRows: blockRows)
     }
 
     // MARK: - dav1d's arithmetic
@@ -196,31 +191,94 @@ struct AV1FilmGrainTables {
     private static let grainMin = -(128 << (bitDepth - 8))
     private static let grainMax = (128 << (bitDepth - 8)) - 1
 
-    /// `generate_grain_y_c`.
+    /// The offset of each 32x32 block: the seed of block row r, then one 8-bit draw per block across the
+    /// row. dav1d draws the row above again from its own seed for the overlap, which is this same table one
+    /// row up.
+    static func blockOffsets(seed: UInt32, blockCols: Int, blockRows: Int) -> [UInt8] {
+        var table = [UInt8](repeating: 0, count: blockRows * blockCols)
+        let frameSeed = Int(seed)
+        table.withUnsafeMutableBufferPointer { tp in
+            guard let t = tp.baseAddress else { return }
+            var row = 0
+            while row < blockRows {
+                var state = frameSeed ^ (((row * 37 + 178) & 0xFF) << 8) ^ ((row * 173 + 105) & 0xFF)
+                var col = 0
+                while col < blockCols {
+                    // `random(8, &state)`, written out (see `lumaTemplate`).
+                    let bit = (state ^ (state >> 1) ^ (state >> 3) ^ (state >> 12)) & 1
+                    state = (state >> 1) | (bit << 15)
+                    t[row * blockCols + col] = UInt8(truncatingIfNeeded: state >> 8)
+                    col += 1
+                }
+                row += 1
+            }
+        }
+        return table
+    }
+
+    /// The neighbours the auto-regressive filter weighs, as offsets into a template `width` wide, in
+    /// coefficient order: rows `-lag...0`, columns `-lag...lag`, up to the sample itself.
+    static func neighbours(lag: Int, width: Int) -> [Int] {
+        var out: [Int] = []
+        var dy = -lag
+        while dy <= 0 {
+            var dx = -lag
+            while dx <= lag {
+                if dy == 0 && dx == 0 { return out }
+                out.append(dy * width + dx)
+                dx += 1
+            }
+            dy += 1
+        }
+        return out
+    }
+
+    /// `AV1GaussianSequence.values` widened once, so the per-sample reads need no conversion.
+    private static let gaussian: [Int] = AV1GaussianSequence.values.map { Int($0) }
+
+    /// `generate_grain_y_c`. `random(11, &state)` and `round2` are written out in the loops: unoptimised,
+    /// a call per sample was most of the cost (see the type's comment).
     static func lumaTemplate(seed: UInt32, shift: Int, lag: Int, coeffs: [Int8], arShift: Int) -> [Int] {
         let w = lumaWidth, h = lumaHeight
         var buf = [Int](repeating: 0, count: w * h)
-        var state = seed
-        let gaussian = AV1GaussianSequence.values
-        buf.withUnsafeMutableBufferPointer { b in
-            for i in 0..<(w * h) {
-                b[i] = round2(Int(gaussian[random(11, &state)]), shift)
+        let offsets = neighbours(lag: lag, width: w)
+        let count = offsets.count
+        let weights = coeffs.prefix(count).map { Int($0) } + [0]
+        let rounding = (1 << shift) >> 1, arRounding = (1 << arShift) >> 1
+        let lo = grainMin, hi = grainMax
+        var state = Int(seed)
+        gaussian.withUnsafeBufferPointer { gp in
+        offsets.withUnsafeBufferPointer { op in
+        weights.withUnsafeBufferPointer { wp in
+        buf.withUnsafeMutableBufferPointer { bp in
+            let g = gp.baseAddress!, c = wp.baseAddress!, b = bp.baseAddress!
+            var i = 0
+            while i < w * h {
+                let bit = (state ^ (state >> 1) ^ (state >> 3) ^ (state >> 12)) & 1
+                state = (state >> 1) | (bit << 15)
+                b[i] = (g[(state >> 5) & 0x7FF] + rounding) >> shift
+                i += 1
             }
-            for y in 3..<h {
-                for x in 3..<(w - 3) {
+            guard count > 0, let off = op.baseAddress else { return }
+            var y = 3
+            while y < h {
+                var x = 3
+                while x < w - 3 {
+                    let at = y * w + x
                     var sum = 0
                     var k = 0
-                    rows: for dy in -lag...0 {
-                        for dx in -lag...lag {
-                            if dx == 0 && dy == 0 { break rows }
-                            sum += Int(coeffs[k]) * b[(y + dy) * w + x + dx]
-                            k += 1
-                        }
+                    while k < count {
+                        sum += c[k] * b[at + off[k]]
+                        k += 1
                     }
-                    b[y * w + x] = min(max(b[y * w + x] + round2(sum, arShift), grainMin), grainMax)
+                    var v = b[at] + ((sum + arRounding) >> arShift)
+                    if v < lo { v = lo } else if v > hi { v = hi }
+                    b[at] = v
+                    x += 1
                 }
+                y += 1
             }
-        }
+        }}}}
         return buf
     }
 
@@ -230,35 +288,50 @@ struct AV1FilmGrainTables {
                                luma: [Int], addsLuma: Bool) -> [Int] {
         let w = chromaWidth, h = chromaHeight, lw = lumaWidth
         var buf = [Int](repeating: 0, count: w * h)
-        var state = seed
-        let gaussian = AV1GaussianSequence.values
-        buf.withUnsafeMutableBufferPointer { b in
-            for i in 0..<(w * h) {
-                b[i] = round2(Int(gaussian[random(11, &state)]), shift)
+        let offsets = neighbours(lag: lag, width: w)
+        let count = offsets.count
+        let weights = coeffs.prefix(count + 1).map { Int($0) } + [0]
+        let lumaWeight = addsLuma ? weights[count] : 0
+        let rounding = (1 << shift) >> 1, arRounding = (1 << arShift) >> 1
+        let lo = grainMin, hi = grainMax
+        var state = Int(seed)
+        gaussian.withUnsafeBufferPointer { gp in
+        offsets.withUnsafeBufferPointer { op in
+        weights.withUnsafeBufferPointer { wp in
+        luma.withUnsafeBufferPointer { lp in
+        buf.withUnsafeMutableBufferPointer { bp in
+            let g = gp.baseAddress!, c = wp.baseAddress!, l = lp.baseAddress!, b = bp.baseAddress!
+            var i = 0
+            while i < w * h {
+                let bit = (state ^ (state >> 1) ^ (state >> 3) ^ (state >> 12)) & 1
+                state = (state >> 1) | (bit << 15)
+                b[i] = (g[(state >> 5) & 0x7FF] + rounding) >> shift
+                i += 1
             }
-            for y in 3..<h {
-                for x in 3..<(w - 3) {
+            let off = op.baseAddress
+            var y = 3
+            while y < h {
+                var x = 3
+                while x < w - 3 {
+                    let at = y * w + x
                     var sum = 0
                     var k = 0
-                    rows: for dy in -lag...0 {
-                        for dx in -lag...lag {
-                            if dx == 0 && dy == 0 {
-                                guard addsLuma else { break rows }
-                                let lx = ((x - 3) << 1) + 3
-                                let ly = ((y - 3) << 1) + 3
-                                let l = luma[ly * lw + lx] + luma[ly * lw + lx + 1]
-                                    + luma[(ly + 1) * lw + lx] + luma[(ly + 1) * lw + lx + 1]
-                                sum += round2(l, 2) * Int(coeffs[k])
-                                break rows
-                            }
-                            sum += Int(coeffs[k]) * b[(y + dy) * w + x + dx]
-                            k += 1
-                        }
+                    while k < count {
+                        sum += c[k] * b[at + off![k]]
+                        k += 1
                     }
-                    b[y * w + x] = min(max(b[y * w + x] + round2(sum, arShift), grainMin), grainMax)
+                    if addsLuma {
+                        let la = (((y - 3) << 1) + 3) * lw + ((x - 3) << 1) + 3
+                        sum += ((l[la] + l[la + 1] + l[la + lw] + l[la + lw + 1] + 2) >> 2) * lumaWeight
+                    }
+                    var v = b[at] + ((sum + arRounding) >> arShift)
+                    if v < lo { v = lo } else if v > hi { v = hi }
+                    b[at] = v
+                    x += 1
                 }
+                y += 1
             }
-        }
+        }}}}}
         return buf
     }
 

@@ -38,6 +38,12 @@ the public-API contract.
   still extractor and the tests keep the conversion that waits. A `[GPUFrameConverter] last 240 frames` line
   gives the encode, GPU and decoder-thread time per frame. Pinned by
   `GPUFrameConversionOverlapsTheDecodeTests` and the media check in `AV1FilmGrainGPUTests`.
+- **10-bit AV1 with film grain keeps up in a host's Debug build.** The film grain tables are built on the
+  decoder's thread for every frame. Written with `Array` and `for ... in`, they took 41 ms a frame
+  unoptimised (an M1 and an Apple TV 4K alike), the whole frame interval at 23.976 fps, so a Debug build
+  stalled where a Release build did not. Their loops now run with `while` over raw pointers: 3 ms
+  unoptimised, under 1 ms optimised, with the same output. Pinned by
+  `AV1FilmGrainTablesMatchTheReferenceArithmeticTests`.
 - **An AES-128 live channel with HEVC in MPEG-TS and no `CODECS` now gets its picture.** The live carriage
   probe gave up on any encrypted first segment, because it could not read the PMT behind the encryption. A
   channel like that (common on Xtream/XUI panels) stayed on AVPlayer with sound and no video, although the
