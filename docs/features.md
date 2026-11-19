@@ -163,6 +163,8 @@ How to use all of this: [guide.md › Live TV and DVR](guide.md#live-tv-and-dvr)
 - Static and off the main actor: no engine instance, no audio session, no layer.
 - It never queues for the origin. The bytes live only in memory until they are adopted and are dropped under memory pressure. The HTTP headers are part of the cache key.
 
+**Resume after a stop.** With `LoadOptions.retainsSessionCacheAfterStop` a stopped session's segments stay on disk, and the next load of the same source plays them from there instead of fetching them again. One kept session per process, deleted by any other load. See [api.md › Keeping the segment cache across a stop](api.md#keeping-the-segment-cache-across-a-stop).
+
 ## Picture in Picture
 
 PiP works on both playback paths. The host builds the controller; the engine keeps the pipeline alive and gets subtitles into the window.

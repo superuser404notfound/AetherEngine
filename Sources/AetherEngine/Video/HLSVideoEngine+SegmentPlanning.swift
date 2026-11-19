@@ -6,7 +6,7 @@ extension HLSVideoEngine {
 
     // MARK: - Segment plan model
 
-    struct Segment {
+    struct Segment: Equatable {
         let startPts: Int64
         let endPts: Int64
         let startSeconds: Double

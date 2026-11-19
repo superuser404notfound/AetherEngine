@@ -694,8 +694,18 @@ A misspelt call is not an error: it prints `HOSTCALL unknown '<call>'` and the r
 | `subsoff@N`, `subson@N` | The viewer turning subtitles off and back on while the picture is away. Defaults t=12 and t=18. `subson` re-picks the `--subs` track; `subson@N:<lang>` picks a different one (the track-switch case). |
 | `subsatload` | Picks the `--subs` track the moment `load` returns, before the first frame, like a host restoring a remembered track. The default pick at t=5 is a mid-session start, which the prefetch and the drain handle differently (#1021). `CUE` lines end in `at=<clock>`, so the lead a cue arrived with is readable. |
 | `lanreload@N` | Fires `reloadAtCurrentPosition()` (AE#955). Default t=10. |
+| `stopreopen@N`, `stopreopen@N:off` | Stop at t=N (default 20), then load the same URL at the stopped position, with `retainsSessionCacheAfterStop` on, or off for the control arm (AE#1095). See below. |
 
 **`pausestart`.** This is the shape of a host that holds a fresh load paused. On a software session the healthy reading is: the `[SWHost] #104` lines show the first frame presented at a stopped clock, and `startup 8/8 presenting` arrives while paused. The defect reading is eight ticks of `enq=+0 status=unknown r4d=n`: a black picture under a paused clock.
+
+**`stopreopen`.** The viewer who leaves to the detail page and presses Resume. The first session plays N seconds without telemetry, then `stop()`, two seconds of nothing, and a `load()` of the same URL at the stopped position. The telemetry after that describes the reopened session. Three lines carry the result: `stopped at <s>, retained <n> MiB`, `load returned after <ms>` and `clock moving after <ms>`, the last one being the wait a viewer feels. Run both arms against an origin with a delay and a rate limit, or loopback hides the difference:
+
+```bash
+aetherctl play --seconds 20 --host-calls stopreopen@25     http://127.0.0.1:8871/movie.mkv
+aetherctl play --seconds 20 --host-calls stopreopen@25:off http://127.0.0.1:8871/movie.mkv
+```
+
+Also run it on a source whose timestamps do not start at zero (`-output_ts_offset 600`): `cur=` has to continue from the stopped position there, not jump by the offset.
 
 **`reloadnext`.** The same URL is loaded again at t=4 on the still-playing engine, with no `stop()` in between, so the native host is reused. Every published `state` prints as `STATE <state> t=<s>`. The second load must go `loading`, `playing` with no `paused` between them. The defect behind this drill: the reused host still carried the outgoing item's `.playing` status, and every host raised its transport over the next episode.
 

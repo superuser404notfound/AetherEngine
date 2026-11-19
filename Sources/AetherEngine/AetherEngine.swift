@@ -4958,6 +4958,14 @@ public final class AetherEngine: ObservableObject {
         // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
         claimSoftwarePathTakeover()   // AE#629
         stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
+        // AE#1095: a load ends a parked session unless it is one that may adopt it; that load's
+        // native session matches the rest of the key itself.
+        if case .url(let candidate) = source, options.retainsSessionCacheAfterStop, !options.isLive {
+            ParkedSegmentSessionStore.shared.discard(
+                unlessParkedFor: candidate, reason: "a load of another source")
+        } else {
+            ParkedSegmentSessionStore.shared.discard(reason: "a load without the option")
+        }
         sessionCacheStatusToken &+= 1
         diagnostics.sessionCacheStatus = .inactive
         if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
@@ -9094,6 +9102,13 @@ public final class AetherEngine: ObservableObject {
             diagnostics.sessionCacheStatus = .inactive
         }
         stopDualLayerOutputRoute()
+        // AE#1095: only the host's stop parks, and not a session that ended in an error: a reopen
+        // after a failure must not be handed the segments it may have failed on.
+        if case .error = state {
+            nativeVideoSession?.parksSegmentsAtStop = false
+        } else {
+            nativeVideoSession?.parksSegmentsAtStop = cacheCleanupReason == .sessionStopped
+        }
         nativeVideoSession?.stop(reason: cacheCleanupReason)
         nativeVideoSession = nil
         nativeSubtitleRenditionsServed = false

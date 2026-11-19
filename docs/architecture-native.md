@@ -231,6 +231,14 @@ A restart is the expensive path: it re-seeks the demuxer, which is slow on remot
 - A seek back into the retained span, and the forward march after it, is a pure cache hit with zero producer restarts. Only a seek into never-produced content restarts.
 - Live sessions keep a newest-first suffix up to the native DVR retention budget, so the whole advertised DVR window stays resident. Live has no restart handler that could re-produce a deleted segment.
 
+**A cache that outlives its session (opt-in, AE#1095).** With `retainsSessionCacheAfterStop`, the host's `stop()` moves the sealed segments into a parked directory (`ParkedSegmentSession`, one per process in `ParkedSegmentSessionStore`) instead of deleting them. The next session for the same source adopts the ones below the first gap at its start position and starts its producer at that gap. That is the state a session is in after a restart ahead of a playhead that still plays from the cache, so the provider needs no new rule. Three things travel with the files, because the bytes alone do not describe the segments:
+
+- the `EpochAxisTable` below the gap, plus an opening at the start segment, so the fresh item's first placement publishes the axis the bytes carry (without it a source with a 600 s origin reopened at -557 s);
+- each segment's `VideoReach` and the fold counts;
+- the `SubtitlePacketStore` with its coverage, because the new pump never reads the adopted span.
+
+The key that decides reuse is the URL, the options without the diagnostics label, the session's own derived output configuration (`ParkingOutputConfiguration`) and the segment plan.
+
 **Whole-source prefetch (opt-in).** A forward window larger than that is an explicit host opt-in through `LoadOptions.forwardBufferSegments` (up to 2700 segments, ~3 h, #207). It drops the budget's 2 GiB default cap but keeps the quarter-of-free-space clamp.
 
 The producer parks once the segments it has written ahead of the consumer target fill that budget, and resumes as eviction behind the playhead frees room (`PrefetchDiskBudget`). So an opt-in prefetch follows the disk budget, not the source length.

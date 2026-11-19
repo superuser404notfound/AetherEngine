@@ -60,6 +60,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+CompositorPreview.swift` | `showScrubPreview(atSeconds:in:)` and `ScrubPreviewPlacement`: compositor-drawn scrub previews for DV Profile 5 / AV1 10.0. |
 | `AetherEngine+DualLayerOutputRoute.swift` | Session lifecycle of `DualLayerOutputRoute` (`LoadOptions.dualLayerRoute == .avPlayerOutput`): prepare, start, forward-buffer cap. |
 | `AetherEngine+EnhancementLayerProbe.swift` | `probeDolbyVisionEnhancementLayer` and `DolbyVisionEnhancementLayer`: FEL or MEL from a Profile 7 source's first RPU. |
+| `AetherEngine+RetainedSessionCache.swift` | `discardRetainedSessionCache()` and `retainedSessionCacheBytes`, the host's handle on the kept segment cache (AE#1095). |
 | `AetherEngine+Prewarm.swift` | `prewarmDualLayerDolbyVision()` (compiles the FEL composer's shaders ahead of time) and `prewarm(url:...)`, the source warm (#551). |
 | `AetherEngine+Upscale.swift` | #846: the load's side of the upscale stage. Reads probe, display and device once per load; publishes the stage's status. |
 | `AetherEngine+VideoProcessing.swift` | #957: the load's side of the picture processing (`LoadOptions.videoProcessing`). Reads the probe's stream once per load; publishes the stage's status and latches its disable. |
@@ -569,6 +570,7 @@ Notes:
 | `FragmentSplitter.swift` | Native path: splits the mp4 muxer's avio output into `init.mp4` (ftyp+moov) and per-segment moof+mdat files. |
 | `PacketRingBuffer.swift` | Live path: keyframe-indexed, disk-spooled packet ring behind the software DVR rewind. Append-only chunk files, a 24-byte index record per packet, eviction by time and by the session retention budget, evict-and-retry when the volume or quota is full. |
 | `SessionDirectoryLiveness.swift` | The flock marker a session directory under `aether-segments/` holds while its owner lives, so the stale-session sweep spares a live `SegmentCache` or DVR ring (AE#451, SEG-105). Also the one stale-session sweep (1 h age, held marker spares a live owner) that the software packet spool shares (NAT-201). |
+| `ParkedSegmentSession.swift` | AE#1095: a stopped session's segments kept for the next load of the same source, its match key, and the one-slot process-wide store. |
 | `SegmentCache.swift` | Native path: producer/consumer segment store with backpressure, scrub-aware eviction, and byte-budgeted VOD backward retention (back-seeks without restarts). |
 | `VTCapabilityProbe.swift` | AV1 system-decode probe and per-format `canHardwareDecode` check for H.264 / HEVC profiles (Intel Macs, older chips, #2). Gates codec routing; VP9 / VP8 / MPEG-4 Part 2 / MPEG-2 / VC-1 and interlaced H.264 always route software (see `VideoRoutingPolicy`). |
 | `LiveCadencePolicy.swift` | Turns the observed arrival cadence into the two LL-HLS decisions (served TARGETDURATION, blocking-reload eligibility), re-evaluated on every manifest render instead of trusting a bursty origin's own number. |

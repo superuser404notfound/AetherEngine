@@ -1013,6 +1013,9 @@ extension AetherEngine {
         // AE#1049: no companion-demuxed audio here; its tracks are not the source's streams.
         session.audioTrackChoicesForSession = companionAudioReader == nil ? audioMenuChoicesForSession() : []
         session.servesSegmentsProgressively = loadedOptions.progressiveSegmentDelivery
+        // AE#1095: the session decides itself whether its source can park (VOD over a URL only).
+        session.parkingOptions = loadedOptions.retainsSessionCacheAfterStop
+            ? loadedOptions.normalizedForSessionParking : nil
         // #240: the pump claims the source link through this gate while it is fetching, so the
         // subtitle side readers can stay out of its way. Set before start().
         session.sideReaderLinkGate = sideReaderLinkGate
