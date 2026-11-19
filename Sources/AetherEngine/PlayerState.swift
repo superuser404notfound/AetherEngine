@@ -827,7 +827,7 @@ public struct LoadOptions: Sendable, Equatable {
     public var liveEdgeCushionSeconds: Double? = nil
 
     /// Cut AVPlayer's stall-avoidance wait short at the live join, once it is holding on media it has
-    /// already buffered. Live sessions on the AVPlayer-backed paths only. Default `false` (AE#440).
+    /// already buffered. Live sessions on the AVPlayer-backed paths only. Default `true` (AE#440).
     ///
     /// A live join can present its first frame and then hold it still. AVPlayer decides for itself how
     /// much cushion it wants before letting the rate roll (`AVPlayerWaitingToMinimizeStallsReason`), and
