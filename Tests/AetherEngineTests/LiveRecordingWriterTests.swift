@@ -411,6 +411,77 @@ struct LiveRecordingWriterTests {
         #expect(first[1] == 0, "the earliest packet in the file is the one that becomes zero")
         #expect(first[0] == lead, "the picture still sits the source's 100 ms behind its audio")
     }
+
+    // MARK: - Dolby Vision keeps its record
+
+    /// An HEVC stream carrying the Dolby Vision configuration record the TS demuxer reads from a
+    /// source's DOVI video stream descriptor.
+    private func makeDolbyVisionParameters(profile: UInt8, compatibility: UInt8) -> UnsafeMutablePointer<AVCodecParameters> {
+        let p = avcodec_parameters_alloc()!
+        p.pointee.codec_type = AVMEDIA_TYPE_VIDEO
+        p.pointee.codec_id = AV_CODEC_ID_HEVC
+        p.pointee.width = 3840
+        p.pointee.height = 2160
+        var size = 0
+        let dovi = av_dovi_alloc(&size)!
+        dovi.pointee.dv_version_major = 1
+        dovi.pointee.dv_profile = profile
+        dovi.pointee.dv_level = 6
+        dovi.pointee.rpu_present_flag = 1
+        dovi.pointee.bl_present_flag = 1
+        dovi.pointee.dv_bl_signal_compatibility_id = compatibility
+        _ = av_packet_side_data_add(&p.pointee.coded_side_data, &p.pointee.nb_coded_side_data,
+                                    AV_PKT_DATA_DOVI_CONF, dovi, size, 0)
+        return p
+    }
+
+    /// The record the engine's own probe reads from the written file, the one routing follows.
+    private func dolbyVisionRecord(in url: URL) throws -> (profile: Int, blCompatID: Int)? {
+        var ctx: UnsafeMutablePointer<AVFormatContext>?
+        guard avformat_open_input(&ctx, url.path, nil, nil) >= 0, let context = ctx else {
+            throw RecordingFailure.writeFailed("could not open the written file")
+        }
+        defer { var c: UnsafeMutablePointer<AVFormatContext>? = context; avformat_close_input(&c) }
+        guard context.pointee.nb_streams == 1, let stream = context.pointee.streams[0] else { return nil }
+        return AetherEngine.dvConfig(stream: stream)
+    }
+
+    /// A Dolby Vision channel recorded as HDR10 (8.1), HLG (8.4) or wrong-coloured HDR10 (5): the
+    /// RPUs reached the file, the record did not, because FFmpeg's TS muxer wrote no DOVI descriptor
+    /// before FFmpegBuild wrote the DOVI descriptors.
+    @Test("a Dolby Vision recording keeps its configuration record", arguments: [
+        (UInt8(8), UInt8(1)), (UInt8(8), UInt8(4)), (UInt8(5), UInt8(0)),
+    ])
+    func keepsDolbyVisionRecord(profile: UInt8, compatibility: UInt8) throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let params = makeDolbyVisionParameters(profile: profile, compatibility: compatibility)
+        defer { free(params) }
+
+        let writer = try LiveRecordingWriter(
+            url: url,
+            streams: [RecordingStreamDescriptor(sourceStreamIndex: 0,
+                                                timeBaseNum: 1, timeBaseDen: 90000,
+                                                codecParameters: params, isVideo: true)],
+            ceilingBytes: 1 << 20,
+            onFailure: { _ in }
+        )
+        for i in 0..<10 {
+            // HEVC NAL header: type 19 (IDR_W_RADL) then type 1 (TRAIL_R), layer 0, tid 1.
+            let payload = annexBPayload(1024, nalType: i == 0 ? 0x26 : 0x02)
+            payload.withUnsafeBytes { buf in
+                writer.accept(packetBytes: buf, sourceStreamIndex: 0,
+                              pts: Int64(i) * 3_600, dts: Int64(i) * 3_600,
+                              duration: 3_600, isKeyframe: i == 0)
+            }
+        }
+        writer.finish(reason: .stoppedByHost)
+
+        let record = try dolbyVisionRecord(in: url)
+        #expect(record?.profile == Int(profile))
+        #expect(record?.blCompatID == Int(compatibility))
+    }
 }
 
 private final class RecordingFailureBox: @unchecked Sendable {
