@@ -1122,12 +1122,40 @@ public final class Demuxer: @unchecked Sendable {
         applyProbeBudget(ctx)
         formatContext = ctx
 
+        // A fragmented MP4 whose mfra lists the video's random access
+        // points is indexed lazily, see `FragmentedMP4RandomAccess`. The reader's fragment header
+        // fetch goes on demand first, so reading the mfra cannot start the full fetch.
+        fragmentRandomAccess = nil
+        // The engine's HTTP reader only: a DASH or host reader would turn the tail read into media.
+        if Self.lazyFragmentIndexAvailable, let reader = provider as? AVIOReader, let pb = provider.context,
+           !isLive, provider.isSeekable, !openProfile.avioSequentialOnly, !Self.lazyFragmentIndexDisabled {
+            reader.setFragmentHeadersOnDemand(true)
+            let started = DispatchTime.now()
+            let probe = FragmentedMP4RandomAccess.probe(pb)
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000
+            switch probe {
+            case .usable(let access):
+                fragmentRandomAccess = access
+                EngineLog.emit(
+                    "[Demuxer] fragmented MP4: the mfra lists \(access.times.count) video random access points "
+                    + "over \(String(format: "%.1f", access.startsSeconds.last ?? 0)) s (read in \(String(format: "%.0f", ms)) ms); "
+                    + "indexing lazily, the plan takes its boundaries from them",
+                    category: .demux)
+            case .unusable(let reason):
+                reader.setFragmentHeadersOnDemand(false)
+                EngineLog.emit("[Demuxer] fragmented MP4, indexed in full: \(reason)", category: .demux)
+            case .notFragmented:
+                reader.setFragmentHeadersOnDemand(false)
+            }
+        }
+
         // URL is nil because pb is already set.
         var ctxPtr: UnsafeMutablePointer<AVFormatContext>? = ctx
         var opts: OpaquePointer? = nil
         Self.applyDemuxerOptions(&opts, isLive: isLive,
                                  skipDurationEstimate: openProfile.avioSequentialOnly,
                                  skipAttachments: openProfile.skipsAttachments)
+        if fragmentRandomAccess != nil { av_dict_set(&opts, "lazy_frag_index", "1", 0) }
         let ret = avformat_open_input(&ctxPtr, nil, inputFormat, &opts)
         av_dict_free(&opts)
         guard ret == 0 else {
@@ -1239,6 +1267,9 @@ public final class Demuxer: @unchecked Sendable {
     /// CRA B-frames, NOPTS repair stack stayed load-bearing).
     private static func applyDemuxerOptions(_ opts: inout OpaquePointer?, isLive: Bool = false, skipDurationEstimate: Bool = false, skipAttachments: Bool = false) {
         av_dict_set(&opts, "fflags", "+genpts", 0)
+        // movdec's lazy_frag_index (FFmpegBuild patch) is set by `openWithProvider` only, and only
+        // when the file's mfra gives the plan its keyframes (`FragmentedMP4RandomAccess`): the lazy
+        // index holds only the fragments read so far.
         if skipAttachments {
             // AE#956: matroskadec's skip_attachments (FFmpegBuild patch); other demuxers ignore it.
             av_dict_set(&opts, "skip_attachments", "1", 0)
@@ -2592,6 +2623,43 @@ public final class Demuxer: @unchecked Sendable {
         indexedKeyframeEntries(streamIndex: streamIndex).map(\.pts)
     }
 
+    /// Lazy fragment index: the video keyframes of a lazily indexed fragmented MP4, from
+    /// its mfra, in the form `indexedKeyframeEntries` gives them, so the keyframe-aligned plan is
+    /// the one a full index builds. nil unless the stream is the mfra's track in its time scale and
+    /// the mfra agrees with every keyframe the demuxer has indexed so far (the first fragment, and
+    /// the last one it read for the durations): a tfra time there that is not an indexed keyframe,
+    /// or an indexed keyframe outside the tfra's span, means the two do not describe one axis.
+    /// `pos` is the fragment's `moof` offset, close enough for the peak bit rate it feeds.
+    func lazyFragmentKeyframeEntries(streamIndex: Int32) -> [(pts: Int64, pos: Int64)]? {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let access = fragmentRandomAccess, let ctx = formatContext,
+              streamIndex >= 0, streamIndex < Int32(ctx.pointee.nb_streams),
+              let stream = ctx.pointee.streams[Int(streamIndex)],
+              UInt32(truncatingIfNeeded: stream.pointee.id) == access.trackID,
+              stream.pointee.time_base.num == 1, Int64(stream.pointee.time_base.den) == Int64(access.timescale),
+              access.times.count >= 2 else { return nil }
+        var indexed: [Int64] = []
+        let count = avformat_index_get_entries_count(stream)
+        for i in 0..<count {
+            guard let entry = avformat_index_get_entry(stream, i), entry.pointee.flags & 0x0001 != 0 else { continue }
+            indexed.append(entry.pointee.timestamp)
+        }
+        guard let shift = FragmentedMP4RandomAccess.shiftOntoIndex(times: access.times, indexedKeyframes: indexed) else { return nil }
+        let tb = stream.pointee.time_base
+        let compositionOffset = compositionRepair?.decodeTimestampOffset
+        var result: [(pts: Int64, pos: Int64)] = []
+        result.reserveCapacity(access.times.count)
+        for (raw, moof) in zip(access.times, access.moofOffsets) {
+            let time = raw + shift
+            guard Self.isPlausibleIndexTimestamp(time, timeBase: tb),
+                  let folded = normalizedTimestamp(time, pos: moof, timeBase: tb),
+                  let placed = Self.offsetIndexTimestamp(folded, by: compositionOffset) else { continue }
+            result.append((pts: placed, pos: moof))
+        }
+        return result.count >= 2 ? result : nil
+    }
+
     /// `indexedKeyframes` with each entry's byte position in the source (AE#783), -1 where the index
     /// has none. Matroska stores the position of the Cluster that holds the keyframe.
     func indexedKeyframeEntries(streamIndex: Int32) -> [(pts: Int64, pos: Int64)] {
@@ -3170,6 +3238,30 @@ public final class Demuxer: @unchecked Sendable {
     var dashRandomAccessStartsSeconds: [Double] {
         (avioProvider as? CustomIOReaderBridge)?.dashRandomAccessStartsSeconds ?? []
     }
+
+    /// Fragmented MP4: set when this open indexed the file lazily, see
+    /// `FragmentedMP4RandomAccess`.
+    private(set) var fragmentRandomAccess: FragmentedMP4RandomAccess?
+
+    /// The video random access points of a lazily indexed fragmented MP4, seconds from the
+    /// first. Empty for every other source.
+    var lazyFragmentRandomAccessStartsSeconds: [Double] { fragmentRandomAccess?.startsSeconds ?? [] }
+
+    /// A/B switch: `AETHER_NO_LAZY_FRAGMENTS=1` indexes every fragmented MP4 in full.
+    static let lazyFragmentIndexDisabled = ProcessInfo.processInfo.environment["AETHER_NO_LAZY_FRAGMENTS"] == "1"
+
+    /// Whether the linked libavformat has movdec's `lazy_frag_index` (FFmpegBuild's
+    /// mov-lazy-frag-index patch). An FFmpeg without it ignores the option and walks every
+    /// fragment, which the reader would then serve one on-demand range at a time, so the lazy
+    /// path is taken only where the option exists.
+    static let lazyFragmentIndexAvailable: Bool = {
+        guard let format = av_find_input_format("mov") else { return false }
+        var priv: UnsafePointer<AVClass>? = format.pointee.priv_class
+        guard priv != nil else { return false }
+        return withUnsafeMutablePointer(to: &priv) {
+            av_opt_find(UnsafeMutableRawPointer($0), "lazy_frag_index", nil, 0, AV_OPT_SEARCH_FAKE_OBJ) != nil
+        }
+    }()
 
     /// AE#1075: how far audio can run ahead of video in a DASH source's read order, see
     /// `DASHVirtualLayout.interleaveLeadSeconds`. 0 for every other source.
