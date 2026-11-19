@@ -270,7 +270,9 @@ struct PerFrameBenchmark {
             return sorted.isEmpty ? 0 : sorted[sorted.count / 2] * 1000
         }
         var note = Self.describe(stage.plan)
-        if stage.plan.mlScale != nil { note += String(format: "; ML median %.0f us", median(\.ml)) }
+        if stage.plan.mlScale != nil {
+            note += String(format: "; ML median %.0f us; edge median %.0f us", median(\.ml), median(\.edge))
+        }
         note += String(format: "; GPU median %.0f us", median(\.metalGPU))
         if failures > 0 { note += "; \(failures) frames failed" }
         return PerFrameBenchmarkResult(

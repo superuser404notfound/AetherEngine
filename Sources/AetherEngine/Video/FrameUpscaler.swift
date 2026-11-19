@@ -1497,34 +1497,72 @@ private func rescaleEdges(of output: CVPixelBuffer, from source: CVPixelBuffer) 
         let sStride = CVPixelBufferGetBytesPerRowOfPlane(source, plane)
         let dStride = CVPixelBufferGetBytesPerRowOfPlane(output, plane)
         guard w > 2 * band, h > 2 * band else { continue }
-        let xs = bilinearTaps(count: w, source: sw), ys = bilinearTaps(count: h, source: sh)
-        func write(row y: Int, columns: [Int]) {
-            let ty = ys[y]
-            let r0 = s + ty.i0 * sStride, r1 = s + ty.i1 * sStride, out = d + y * dStride
-            for x in columns {
-                let tx = xs[x]
-                let a0 = tx.i0 * channels, a1 = tx.i1 * channels
-                for c in 0..<channels {
-                    let top = Float(r0[a0 + c]) + (Float(r0[a1 + c]) - Float(r0[a0 + c])) * tx.a
-                    let bottom = Float(r1[a0 + c]) + (Float(r1[a1 + c]) - Float(r1[a0 + c])) * tx.a
-                    out[x * channels + c] = UInt8(top + (bottom - top) * ty.a + 0.5)
-                }
+        let xs = BilinearTaps(count: w, source: sw, step: channels)
+        let ys = BilinearTaps(count: h, source: sh, step: sStride)
+        defer { xs.deallocate(); ys.deallocate() }
+        var y = 0
+        while y < h {
+            let r0 = UnsafePointer(s + ys.i0[y]), r1 = UnsafePointer(s + ys.i1[y]), out = d + y * dStride
+            if y < band || y >= h - band {
+                bilinearSpan(out, r0, r1, ay: ys.a[y], xs, from: 0, to: w, channels: channels)
+            } else {
+                bilinearSpan(out, r0, r1, ay: ys.a[y], xs, from: 0, to: band, channels: channels)
+                bilinearSpan(out, r0, r1, ay: ys.a[y], xs, from: w - band, to: w, channels: channels)
             }
+            y += 1
         }
-        let all = Array(0..<w), sides = Array(0..<band) + Array((w - band)..<w)
-        for y in 0..<band { write(row: y, columns: all) }
-        for y in (h - band)..<h { write(row: y, columns: all) }
-        for y in band..<(h - band) { write(row: y, columns: sides) }
     }
 }
 
-/// Source taps of a bilinear scale from `source` to `count` samples, centres aligned and clamped to the edge.
-private func bilinearTaps(count: Int, source: Int) -> [(i0: Int, i1: Int, a: Float)] {
-    let f = Double(source) / Double(count)
-    return (0..<count).map { i in
-        let p = min(max((Double(i) + 0.5) * f - 0.5, 0), Double(source - 1))
-        let i0 = Int(p)
-        return (i0, min(i0 + 1, source - 1), Float(p - Double(i0)))
+/// Source taps of a bilinear scale from `source` to `count` samples, centres aligned and clamped to the edge,
+/// as offsets of `step` per sample.
+///
+/// Raw pointers and `while` loops here and in `bilinearSpan`, because a host's Debug build compiles the
+/// engine without optimisation. With tuple arrays and range loops the edge band took 18.8 ms per 1080p frame
+/// there on an M1 (0.18 ms optimised), enough to put a 60 fps upscale over budget by itself (AE#1097).
+/// This form takes 2 ms unoptimised and writes the same bytes.
+private struct BilinearTaps {
+    let i0: UnsafeMutablePointer<Int>, i1: UnsafeMutablePointer<Int>, a: UnsafeMutablePointer<Float>
+
+    init(count: Int, source: Int, step: Int) {
+        i0 = .allocate(capacity: count)
+        i1 = .allocate(capacity: count)
+        a = .allocate(capacity: count)
+        let f = Double(source) / Double(count)
+        var i = 0
+        while i < count {
+            let p = min(max((Double(i) + 0.5) * f - 0.5, 0), Double(source - 1))
+            let k = Int(p)
+            i0[i] = k * step
+            i1[i] = min(k + 1, source - 1) * step
+            a[i] = Float(p - Double(k))
+            i += 1
+        }
+    }
+
+    func deallocate() {
+        i0.deallocate()
+        i1.deallocate()
+        a.deallocate()
+    }
+}
+
+/// Output samples `x0..<x1` of one row, between source rows `r0` and `r1` at `ay`.
+private func bilinearSpan(_ out: UnsafeMutablePointer<UInt8>, _ r0: UnsafePointer<UInt8>, _ r1: UnsafePointer<UInt8>,
+                          ay: Float, _ xs: BilinearTaps, from x0: Int, to x1: Int, channels: Int) {
+    var x = x0
+    while x < x1 {
+        let a0 = xs.i0[x], a1 = xs.i1[x], ax = xs.a[x]
+        var c = 0
+        while c < channels {
+            let p00 = Float(r0[a0 + c]), p01 = Float(r0[a1 + c])
+            let p10 = Float(r1[a0 + c]), p11 = Float(r1[a1 + c])
+            let top = p00 + (p01 - p00) * ax
+            let bottom = p10 + (p11 - p10) * ax
+            out[x * channels + c] = UInt8(top + (bottom - top) * ay + 0.5)
+            c += 1
+        }
+        x += 1
     }
 }
 
