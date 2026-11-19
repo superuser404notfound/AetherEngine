@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Added
 
+- **`LoadOptions.retainsSessionCacheAfterStop` keeps a stopped session's segments for a Resume.** `stop()`
+  used to delete the segment cache within a second, so reopening the same title a few minutes later fetched
+  it all again. With the option the segments stay on disk, and the next load of the exact same URL and options
+  plays them from there and fetches only what is missing. One kept session per process, deleted by any other
+  load, by `AetherEngine.discardRetainedSessionCache()` and at process exit. Measured from an origin with
+  150 ms per response: the clock moved 0.7 s after the reopen instead of 3.7 s. `aetherctl play --host-calls
+  stopreopen@N` drives it (AE#1095, thanks @samimt55).
 - **`LoadOptions.liveJoinsAtPlaylistStart` starts a recording in progress from its beginning.** A live HLS
   ingest used to join near the edge even when the playlist listed every segment since the recording began
   (Plex's `offset=0`). With the flag it joins at the oldest listed segment, delivers the usual few seconds at

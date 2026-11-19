@@ -557,6 +557,33 @@ final class SubtitlePacketStore: @unchecked Sendable {
         }
     }
 
+    /// AE#1095: a session that adopts a parked session's segments starts its pump past them, so no
+    /// reader of its own ever reads that span. It takes over what the parked session's readers
+    /// harvested there, coverage included, before any reader of its own starts. Display sets still in
+    /// assembly stay behind: the writer that began them is gone and could never finish them.
+    func adoptContents(of other: SubtitlePacketStore) {
+        guard other !== self else { return }
+        other.lock.lock()
+        let entries = other.entriesByStream
+        let bytes = other.bytesByStream
+        let hashes = other.payloadHashesByRun
+        let touches = other.lastTouchByStream
+        let touchCount = other.touchCounter
+        let appendCount = other.appendCounter
+        let harvested = other.coverage
+        other.lock.unlock()
+        lock.lock(); defer { lock.unlock() }
+        entriesByStream = entries
+        bytesByStream = bytes
+        pendingSetByStream.removeAll()
+        payloadHashesByRun = hashes
+        lastTouchByStream = touches
+        touchCounter = touchCount
+        appendCounter = appendCount
+        coverage = harvested
+        totalBytes = bytes.values.reduce(0, +)
+    }
+
     func clear() {
         lock.lock(); defer { lock.unlock() }
         entriesByStream.removeAll()

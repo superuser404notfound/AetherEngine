@@ -635,7 +635,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         }
         .store(in: &cancellables)
 
-    let options = LoadOptions(
+    var options = LoadOptions(
         suppressDisplayCriteria: true,
         httpHeaders: httpHeaders,
         // AE#493: the Dolby Vision claim a macOS host has to make itself, because there is no per-mode
@@ -695,6 +695,14 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         nativeVideoFrameDiagnostics: nativeVideoFrameDiagnostics,
         nativeVideoFrameRecovery: nativeVideoFrameRecovery
     )
+    // AE#1095: `stopreopen` keeps the stopped session's segments; `stopreopen:off` is the control arm.
+    let stopReopen = hostCalls.first(where: { $0.hasPrefix("stopreopen") }).map { call -> (tick: Double, retains: Bool) in
+        let spec = call.dropFirst("stopreopen".count)
+        let retains = !spec.hasSuffix(":off")
+        let tick = spec.split(separator: ":").first.flatMap { $0.hasPrefix("@") ? Double($0.dropFirst()) : nil } ?? 20
+        return (tick, retains)
+    }
+    if let stopReopen { options.retainsSessionCacheAfterStop = stopReopen.retains }
     // AE#629: the rescue a host used to see only as a route change.
     let escalationSub = engine.softwarePathEscalations.sink { event in
         let failure = event.absorbedFailure
@@ -800,6 +808,32 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             print("  HOSTCALL reload in place")
             _ = try await engine.load(url: url, startPosition: startPosition, options: options)
         }
+        // AE#1095: the viewer who leaves to the detail page and presses Resume. The telemetry below
+        // then describes the reopened session.
+        if let stopReopen {
+            try await Task.sleep(for: .seconds(stopReopen.tick))
+            let position = engine.currentTime
+            engine.stop()
+            if stopReopen.retains {
+                // The park runs in the stop's detached cleanup.
+                for _ in 0..<50 where AetherEngine.retainedSessionCacheBytes == 0 {
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+            }
+            print(String(format: "  HOSTCALL stopreopen: stopped at %.2fs, retained %d MiB",
+                         position, AetherEngine.retainedSessionCacheBytes / (1 << 20)))
+            try await Task.sleep(for: .seconds(2))
+            let reopenStart = Date()
+            _ = try await engine.load(url: url, startPosition: position, options: options)
+            print(String(format: "  HOSTCALL stopreopen: reopened at %.2fs, load returned after %.0f ms",
+                         position, Date().timeIntervalSince(reopenStart) * 1000))
+            // The number a viewer feels: from the reopen to a clock that moves.
+            for _ in 0..<600 where engine.currentTime < position + 0.2 {
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            print(String(format: "  HOSTCALL stopreopen: clock moving after %.0f ms (cur=%.2fs)",
+                         Date().timeIntervalSince(reopenStart) * 1000, engine.currentTime))
+        }
     } catch {
         print("LOAD FAILED: \(error)")
         return 1
@@ -870,10 +904,11 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         case "subsatload":
             break  // read at load time, picks the --subs track before the first tick
         case let call where call.hasPrefix("seekfar") || call.hasPrefix("subsoff")
-            || call.hasPrefix("subson") || call.hasPrefix("nativerender") || call.hasPrefix("lanreload"):
+            || call.hasPrefix("subson") || call.hasPrefix("nativerender") || call.hasPrefix("lanreload")
+            || call.hasPrefix("stopreopen"):
             break  // #433 / Sodalite#156, all in the telemetry loop; `@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,reloadnext,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock,pausereload,playreload,extplayreload,nativesubs,nativerender,subsoff,subson,subsatload,lanreload)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,reloadnext,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock,pausereload,playreload,extplayreload,nativesubs,nativerender,subsoff,subson,subsatload,lanreload,stopreopen)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }

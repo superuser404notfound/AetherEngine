@@ -949,6 +949,79 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// session builds. Set before `start()`.
     var servesSegmentsProgressively = false
 
+    /// AE#1095: the host's load options when it asked for `retainsSessionCacheAfterStop`, already
+    /// stripped of what only labels a load. nil leaves parking out of this session entirely. Set
+    /// before `start()`.
+    var parkingOptions: LoadOptions?
+    /// AE#1095: whether the next `stop(reason:)` parks the segments instead of deleting them. Set by
+    /// the host-facing stop only, so an internal reload, a reroute or a failed session never parks.
+    var parksSegmentsAtStop = false
+    /// A parked session this one matched on its key, until the segment plan decides.
+    private var parkedCandidate: ParkedSegmentSession?
+    /// The slot this session parks into and adopts from. Tests give each session a store of its
+    /// own, so a parallel suite's session start cannot discard what they parked.
+    var parkingStore: ParkedSegmentSessionStore = .shared
+
+    /// AE#1095: what this session derived on top of the host's options that changes the bytes it
+    /// cuts. Two sessions agreeing on this, on the options and on the segment plan produce the same
+    /// segments; anything missing here can only cost a reuse, because a listed field that differs
+    /// discards the parked session.
+    struct ParkingOutputConfiguration: Equatable, Sendable {
+        let dvModeAvailable: Bool
+        let displaySupportsHDR: Bool
+        let keepDvh1TagWithoutDV: Bool
+        let forceDolbyVisionOnNonDVDisplay: Bool
+        let forcedDolbyVisionYieldsToHDR10Plus: Bool
+        let dolbyVisionHandling: DolbyVisionHandling
+        let dolbyVisionRPUProfile: Int?
+        let measuredFrameRate: [Int32]?
+        let matchContentEnabled: Bool
+        let panelIsInHDRMode: Bool
+        let panelPresentsHDR: Bool
+        let audioSourceStreamIndexOverride: Int32?
+        let audioBridgeMode: AudioBridgeMode
+        let objectAudioRendering: ObjectAudioRendering
+        let rendersDTSXObjectAudio: Bool
+        let foldsDolbyVisionFEL: Bool
+        let stereoPresentation: StereoPresentation
+        let stereoOnAnySystem: Bool
+        let audioDelaySeconds: Double
+        let audioShaping: AudioShaping
+        let servesSegmentsProgressively: Bool
+    }
+
+    /// nil when this session cannot park or adopt at all: the option is off, or the source is live,
+    /// custom IO, a sequential origin or carries a companion audio rendition.
+    var parkingKey: ParkedSegmentSession.Key? {
+        guard let options = parkingOptions, !isLiveSession, sourceReopenableByURL, !sequentialOrigin,
+              companionAudioReader == nil else { return nil }
+        return ParkedSegmentSession.Key(
+            url: sourceURL,
+            options: options,
+            output: ParkingOutputConfiguration(
+                dvModeAvailable: dvModeAvailable,
+                displaySupportsHDR: displaySupportsHDR,
+                keepDvh1TagWithoutDV: keepDvh1TagWithoutDV,
+                forceDolbyVisionOnNonDVDisplay: forceDolbyVisionOnNonDVDisplay,
+                forcedDolbyVisionYieldsToHDR10Plus: forcedDolbyVisionYieldsToHDR10Plus,
+                dolbyVisionHandling: dolbyVisionHandling,
+                dolbyVisionRPUProfile: dolbyVisionRPUProfile,
+                measuredFrameRate: measuredFrameRate.map { [$0.num, $0.den] },
+                matchContentEnabled: matchContentEnabled,
+                panelIsInHDRMode: panelIsInHDRMode,
+                panelPresentsHDR: panelPresentsHDRFlag.withLock { $0 },
+                audioSourceStreamIndexOverride: audioSourceStreamIndexOverride,
+                audioBridgeMode: audioBridgeMode,
+                objectAudioRendering: objectAudioRendering,
+                rendersDTSXObjectAudio: rendersDTSXObjectAudio,
+                foldsDolbyVisionFEL: foldsDolbyVisionFEL,
+                stereoPresentation: stereoPresentation,
+                stereoOnAnySystem: stereoOnAnySystem,
+                audioDelaySeconds: audioDelaySeconds,
+                audioShaping: audioShaping,
+                servesSegmentsProgressively: servesSegmentsProgressively))
+    }
+
     /// Serializes restart requests among themselves. Held across waits (unlike `restartLock`);
     /// only other restarts contend on it.
     private let restartGate = NSLock()
@@ -1998,17 +2071,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         demuxerAtInitialProducerStart = false
 
+        // AE#1095: taken before the free space is read. A parked session this one does not match
+        // is deleted here, so its bytes do not shrink the budget; one it does match is counted back
+        // in, because its bytes move into this session's own ledger.
+        if let key = parkingKey {
+            parkedCandidate = parkingStore.take(matching: key)
+        } else {
+            parkingStore.discard(
+                reason: isLiveSession ? "a live session started" : "a session without the option started")
+        }
+
         // volumeAvailableCapacityForImportantUsage is unavailable on tvOS; the plain capacity key
         // exists on every platform and is close enough for the quarter-of-free-space clamp.
         #if os(tvOS)
-        let availableBytes = (try? URL(fileURLWithPath: NSTemporaryDirectory())
+        let measuredAvailableBytes = (try? URL(fileURLWithPath: NSTemporaryDirectory())
             .resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
             .volumeAvailableCapacity.map(Int64.init)
         #else
-        let availableBytes = (try? URL(fileURLWithPath: NSTemporaryDirectory())
+        let measuredAvailableBytes = (try? URL(fileURLWithPath: NSTemporaryDirectory())
             .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage
         #endif
+        let availableBytes = measuredAvailableBytes.map { $0 + Int64(parkedCandidate?.totalBytes ?? 0) }
         let capRelaxed = Self.retentionCapRelaxed(forwardWindowSegments: forwardWindowSegments)
         // Size the custom byte ceiling against capacity left by other running sessions.
         var resolvedBudget: SessionCacheBudgetResolution?
@@ -2201,6 +2285,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 )
             }
         }
+        adoptParkedSegmentsIfPlanMatches(plan: plan, cache: segmentCache)
 
         // Fallback duration from avg_frame_rate for MKVs that drop TrackEntry DefaultDuration
         // (HandBrake/web-rip pipelines). Without it, trun.last.duration=0 and AVPlayer parks on
@@ -3698,6 +3783,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         subtitleTapLock.lock()
         subtitleTapRoutes.removeAll()
         subtitleTapLock.unlock()
+        // AE#1095: read before the plan and the axis are cleared below. A candidate that a failed
+        // prepare never adopted is let go here too.
+        parkedCandidate?.discard(reason: "the session that matched it stopped before adopting")
+        parkedCandidate = nil
+        let parking = reason == .sessionStopped && parksSegmentsAtStop ? parkingSnapshot() : nil
+        parksSegmentsAtStop = false
         // Snapshot resources under the lock, then clear instance state and hand them to a
         // detached cleanup task (#10: SwiftUI releases @State on main; detach avoids a 3 s freeze
         // while the pump exits a parked HTTP byte-range read).
@@ -3784,9 +3875,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
             previewBuilder?.close()
             ladder?.keyframes.shutdown()
             ladder?.builder.close()
-            _ = p?.waitForFinish(timeout: 3.0)
+            let producerFinished = p?.waitForFinish(timeout: 3.0) ?? true
             s?.stop()
             if let c {
+                // A pump still unwinding could store into the cache while it is being emptied, so
+                // only a finished one parks.
+                if let parking, producerFinished { Self.park(cache: c, snapshot: parking) }
                 _ = c.close(reason: reason)
                 cacheStatusCallback?(c.status(
                     route: .loopbackFMP4,
@@ -5679,5 +5773,89 @@ final class PreviewKeyframeBuilder: @unchecked Sendable {
         lock.lock()
         closed = true
         lock.unlock()
+    }
+}
+
+// MARK: - AE#1095 parking
+
+extension HLSVideoEngine {
+    /// What a stop has to read off the session before it clears it, for `park(cache:snapshot:)`.
+    struct ParkingSnapshot: Sendable {
+        let key: ParkedSegmentSession.Key
+        let plan: [Segment]
+        let epochAxis: EpochAxisTable
+        let playlistShiftSeconds: Double
+        let subtitles: SubtitlePacketStore
+        let store: ParkedSegmentSessionStore
+        let storeLook: UInt64
+    }
+
+    func parkingSnapshot() -> ParkingSnapshot? {
+        guard let key = parkingKey else { return nil }
+        restartLock.lock()
+        let plan = segmentPlan
+        restartLock.unlock()
+        guard !plan.isEmpty else { return nil }
+        anchorShiftLock.lock()
+        let axis = epochAxisByIndex
+        anchorShiftLock.unlock()
+        return ParkingSnapshot(key: key, plan: plan, epochAxis: axis,
+                               playlistShiftSeconds: playlistShiftSeconds,
+                               subtitles: subtitlePacketStore, store: parkingStore,
+                               storeLook: parkingStore.lookCount)
+    }
+
+    /// Moves the stopped session's segments into a parked directory and hands them to the store.
+    /// Called from the stop's detached cleanup, after the producer finished and the server stopped.
+    static func park(cache: SegmentCache, snapshot: ParkingSnapshot) {
+        // A volume that ran out of space wants these bytes back now, not at the next load.
+        guard !cache.storageExhausted,
+              let directory = ParkedSegmentSession.makeDirectory(besides: cache.sessionDir) else { return }
+        guard let segments = cache.detachForParking(into: directory.url) else {
+            if directory.markerFD >= 0 { Darwin.close(directory.markerFD) }
+            try? FileManager.default.removeItem(at: directory.url)
+            return
+        }
+        snapshot.store.park(ParkedSegmentSession(
+            key: snapshot.key, plan: snapshot.plan, segments: segments,
+            epochAxis: snapshot.epochAxis, playlistShiftSeconds: snapshot.playlistShiftSeconds,
+            subtitles: snapshot.subtitles, markerFD: directory.markerFD),
+            ifNoLookSince: snapshot.storeLook)
+    }
+
+    /// AE#1095: adopts the parked session the key check handed this one when it was cut on the same
+    /// segment plan, and discards it otherwise. The first producer then starts at the first segment
+    /// the parked session lacks, which is the state a session is in after its producer restarted
+    /// ahead of a playhead that still plays from the cache.
+    func adoptParkedSegmentsIfPlanMatches(plan: [Segment], cache segmentCache: SegmentCache) {
+        guard let parked = parkedCandidate else { return }
+        parkedCandidate = nil
+        guard parked.plan == plan else {
+            parked.discard(reason: "the segment plan differs (\(parked.plan.count) parked against "
+                           + "\(plan.count) segments)")
+            return
+        }
+        let start = initialProducerBaseIndex
+        let frontier = SegmentCache.parkedAdoptionFrontier(
+            start: start,
+            stored: Set(parked.segments.files.keys),
+            folded: Set(parked.segments.foldCounts.keys),
+            planCount: plan.count)
+        let adopted = segmentCache.adoptParked(parked.segments, below: frontier)
+        guard adopted.segments > 0 else {
+            parked.discard(reason: "none of its segments lie below idx=\(frontier)")
+            return
+        }
+        // The epochs that cut the adopted segments say where AVPlayer places them (AE#418); the
+        // producer at the frontier records its own epoch there and drops nothing below it.
+        var axis = parked.epochAxis.keeping(below: frontier)
+        if frontier > start { axis.markAdoptedStart(at: start) }
+        anchorShiftLock.lock()
+        epochAxisByIndex = axis
+        anchorShiftLock.unlock()
+        setPlaylistShiftSeconds(parked.playlistShiftSeconds)
+        subtitlePacketStore.adoptContents(of: parked.subtitles)
+        initialProducerBaseIndex = frontier
+        parked.finishAdoption(segments: adopted.segments, bytes: adopted.bytes, frontier: frontier)
     }
 }

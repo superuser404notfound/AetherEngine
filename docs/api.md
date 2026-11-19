@@ -2372,7 +2372,7 @@ What the values mean:
 
 **Direct `HLSVideoEngine` users** may call `sessionCacheStatus()` off the main thread, and receive lifecycle updates through `onSessionCacheStatusChanged`. `stop(reason:)` records the cleanup reason; the existing zero-argument `stop()` and its callback type remain available.
 
-**Cost and cleanup.** The engine reads its in-memory byte count off the main thread at the existing telemetry rate, without listing files on the UI thread. A successful cleanup removes the whole session UUID directory. A bounded sweep at startup removes abandoned sibling directories that qualify. It never takes over their bytes, and it is no offline or cross-launch cache.
+**Cost and cleanup.** The engine reads its in-memory byte count off the main thread at the existing telemetry rate, without listing files on the UI thread. A successful cleanup removes the whole session UUID directory. A bounded sweep at startup removes abandoned sibling directories that qualify. It never takes over their bytes, and it is no offline or cross-launch cache. The one exception within a process is the opt-in [kept segment cache](#keeping-the-segment-cache-across-a-stop).
 
 ### Whole-session segment storage admission
 
@@ -2388,6 +2388,30 @@ Both are per session, not a process-wide total. Two players with a 256 MiB cap c
 **When a write does not fit.** A writer blocked by the cap waits for playback to move on. It stops waiting when the session is cancelled or closed. A segment larger than the cap, or a write the reserve refuses, ends playback with `PlaybackErrorKind.storageExhausted`. Cancelling does not. Another process can still fill the volume between the measurement and the write.
 
 **Status fields.** `SessionCacheStatus` reports `hardLimitBytes`, `freeDiskReserveBytes`, `stagingBytes` and `rejectedDiskWrites`. `currentDiskBytes` is resident plus staging bytes, but staging is only counted while one of the two options is set, so with both off it equals the resident bytes. `diskAdmissionWaiting` is true while a writer waits for disk room. That is different from `producerParked`, which means the producer is waiting on the forward window.
+
+### Keeping the segment cache across a stop
+
+`LoadOptions.retainsSessionCacheAfterStop` (AE#1095) is for the viewer who leaves a title to its detail page and presses Resume a few minutes later. Without it `stop()` deletes the session's segments within a second, and the reopen fetches them again. With it the segments stay on disk, and the next `load()` of the same source serves them from there and fetches only what is missing. Off by default, and then nothing changes.
+
+Measured with `aetherctl play --host-calls stopreopen@25` on a 1080p MKV from an origin with 150 ms per response and 4 MB/s: the clock moved 0.71 to 0.81 s after the reopen, against 3.66 to 3.70 s without the option (three runs each).
+
+**What is kept.** At most one stopped session per process, in its own directory under `aether-segments/`, for as long as the process lives. Parking adds no disk writes: the files are moved, not copied. The embedded subtitles the session had read stay in RAM with it (kilobytes for text, at most the subtitle store's own caps for bitmap tracks).
+
+**When it is reused.** Only when all of these hold. Anything else deletes the kept session, and the load runs as it does today.
+
+- The URL is the same, and the `LoadOptions` are equal apart from `sourceDiagnosticsContext`. A different signature in a signed URL is a different source.
+- What the engine derives on top (display capabilities, the audio stream, the Dolby Vision handling, the audio delay and shaping) is the same.
+- The source gives the same segment plan.
+
+The new session takes the kept segments below the first one missing at or after its start position, and its producer starts there. Its first segment lands at once, and so does its clock.
+
+**When it is deleted.**
+
+- A `load()` of any other source, or a load without the option.
+- The end of the process. After a crash or a kill, the stale sweep of the next session takes it an hour later.
+- `AetherEngine.discardRetainedSessionCache()`, for a host that knows the viewer will not return (signed out, switched profile). `AetherEngine.retainedSessionCacheBytes` reports the size, 0 when nothing is kept.
+
+**What never keeps a session.** Only the host's own `stop()` parks. An internal reload, a reroute, an audio switch, the next `load()` while playing, and a session that ended in `.error` delete the cache as before, so a reopen after a failure never gets the segments it may have failed on. Live, custom IO, `sequentialOrigin`, `nativeRemoteHLS` and the software path never park.
 
 ### Per-frame benchmark
 
@@ -2450,6 +2474,7 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
 | `sessionCacheByteBudget` | nil | Optional byte request for the temporary VOD cache. See [Session cache budget and status](#session-cache-budget-and-status). |
 | `sessionCacheHardLimitBytes` | nil | Opt-in per-session disk cap for resident plus staging bytes on VOD loopback. See [Whole-session segment storage admission](#whole-session-segment-storage-admission). |
 | `sessionCacheFreeReserveBytes` | 0 | Opt-in free-volume reserve checked before segment writes; independent of the hard cap and also available to live sessions. See [Whole-session segment storage admission](#whole-session-segment-storage-admission). |
+| `retainsSessionCacheAfterStop` | false | Keep the segment cache after `stop()` and reuse it when the same source loads again, so a Resume serves from disk what the last session fetched. One kept session per process. See [Keeping the segment cache across a stop](#keeping-the-segment-cache-across-a-stop). |
 | `progressiveSegmentDelivery` | false | Serve each VOD loopback segment while it is being written. VOD only; ignored on live, `nativeRemoteHLS` and the software path. See note 2. |
 | `softwarePacketCacheStorage` | `.automatic` | `SoftwarePacketCacheStorage` picks where seekable software VOD stores compressed packets. The choice survives session reloads. See note 3. |
 | `generatesBackgroundScrubPreviews` | true | Build the sparse scrub-still ladder while the source is idle. Correctable through `reloadAtCurrentPosition(applying:)`. See note 4. |

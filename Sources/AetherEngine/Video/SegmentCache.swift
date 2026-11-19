@@ -87,6 +87,8 @@ final class SegmentCache: @unchecked Sendable {
 
     /// Pinned in RAM (~3.5 KB); AVPlayer fetches exactly once per session; never evicted.
     private var initSegment: Data?
+    /// AE#1095: `initSegment` came from a parked session; the producer's first own init is checked against it.
+    private var adoptedParkedInit = false
 
     /// Mid-session SSAI program-switch inits: (versionID, fromSegment, data). Version 0 = session init.
     private var initVersions: [(versionID: Int, fromSegment: Int, data: Data)] = []
@@ -276,6 +278,17 @@ final class SegmentCache: @unchecked Sendable {
 
     func setInit(_ data: Data) {
         condition.lock()
+        if adoptedParkedInit {
+            adoptedParkedInit = false
+            if initSegment != data {
+                // The same thing a producer restart inside one session does: the init AVPlayer
+                // already holds stays valid for what follows only if the two agree.
+                EngineLog.emit(
+                    "[SegmentCache] the producer's init (\(data.count) B) differs from the parked "
+                    + "session's (\(initSegment?.count ?? 0) B) (AE#1095)",
+                    category: .session)
+            }
+        }
         initSegment = data
         condition.broadcast()
         condition.unlock()
@@ -489,6 +502,116 @@ final class SegmentCache: @unchecked Sendable {
         if residentSetChanged { onResidentSetChanged?() }
         if renameOK { observer?(index, byteCount, parked) }
         return renameOK
+    }
+
+    // MARK: - AE#1095 parking
+
+    /// The sealed segments `detachForParking(into:)` moved out, and what this cache knew about them.
+    struct ParkedSegments: Sendable {
+        let directory: URL
+        let files: [Int: URL]
+        let bytes: [Int: Int]
+        let reaches: [Int: VideoReach]
+        let foldCounts: [Int: Int]
+        let initSegment: Data
+
+        var totalBytes: Int { bytes.values.reduce(0, +) }
+    }
+
+    /// AE#1095: moves every sealed segment into `directory` and forgets it, so the `close()` that
+    /// follows deletes only what is left (staging files, previews, the i-frame rendition). Run after
+    /// the producer finished and the local server stopped, when nothing reads or writes any more.
+    ///
+    /// nil when a later session could not use any of it: no init, no segments, an SSAI-versioned
+    /// init, or a cache that is already closed.
+    func detachForParking(into directory: URL) -> ParkedSegments? {
+        condition.lock()
+        guard !closed, let initData = initSegment, initVersions.isEmpty, !entries.isEmpty else {
+            condition.unlock()
+            return nil
+        }
+        let files = entries
+        let bytes = entryBytes
+        let reaches = videoReaches
+        let folds = foldCounts
+        entries.removeAll(keepingCapacity: false)
+        entryBytes.removeAll(keepingCapacity: false)
+        videoReaches.removeAll(keepingCapacity: false)
+        _totalBytes = 0
+        condition.unlock()
+
+        var moved: [Int: URL] = [:]
+        var movedBytes: [Int: Int] = [:]
+        for (index, url) in files {
+            let target = directory.appendingPathComponent(url.lastPathComponent)
+            guard (try? FileManager.default.moveItem(at: url, to: target)) != nil else { continue }
+            moved[index] = target
+            movedBytes[index] = bytes[index] ?? byteSize(of: target)
+        }
+        guard !moved.isEmpty else { return nil }
+        return ParkedSegments(
+            directory: directory, files: moved, bytes: movedBytes,
+            reaches: reaches.filter { moved[$0.key] != nil }, foldCounts: folds, initSegment: initData)
+    }
+
+    /// AE#1095: takes over a parked session's segments below `frontier` as if this session had cut
+    /// them, init included. Runs before the first producer starts and before the local server
+    /// answers. Returns what was taken; the caller discards the parked directory with the rest.
+    @discardableResult
+    func adoptParked(_ parked: ParkedSegments, below frontier: Int) -> (segments: Int, bytes: Int) {
+        var moved: [(index: Int, url: URL, bytes: Int)] = []
+        for (index, url) in parked.files where index < frontier {
+            let target = nextSegmentFileURL(index: index)
+            guard (try? FileManager.default.moveItem(at: url, to: target)) != nil else { continue }
+            moved.append((index, target, parked.bytes[index] ?? byteSize(of: target)))
+        }
+        condition.lock()
+        guard !closed else {
+            condition.unlock()
+            for entry in moved { try? FileManager.default.removeItem(at: entry.url) }
+            return (0, 0)
+        }
+        var adoptedBytes = 0
+        for entry in moved {
+            if let oldBytes = entryBytes[entry.index] { _totalBytes -= oldBytes }
+            entries[entry.index] = entry.url
+            entryBytes[entry.index] = entry.bytes
+            videoReaches[entry.index] = parked.reaches[entry.index]
+            _totalBytes += entry.bytes
+            adoptedBytes += entry.bytes
+            if entry.index > _highestStoredIndex { _highestStoredIndex = entry.index }
+            _totalStoredCount &+= 1
+        }
+        // The folds describe the source, not the session: a hole the old pumps passed over is one
+        // the new ones will pass over too, and the #358 arms count across restarts on purpose. From
+        // the frontier on, the new producer cuts and counts for itself, like a fresh session.
+        for (index, count) in parked.foldCounts where index < frontier && entries[index] == nil {
+            foldCounts[index] = max(foldCounts[index] ?? 0, count)
+        }
+        if initSegment == nil, !moved.isEmpty {
+            initSegment = parked.initSegment
+            adoptedParkedInit = true
+        }
+        let doomed = pruneOutsideWindow()
+        condition.broadcast()
+        condition.unlock()
+        for url in doomed { try? FileManager.default.removeItem(at: url) }
+        if !moved.isEmpty { onResidentSetChanged?() }
+        return (moved.count, adoptedBytes)
+    }
+
+    /// Where the first producer of a session that adopts parked segments starts: the first index at or
+    /// after `start` that neither holds a segment nor is a hole the old pumps folded over. Never past
+    /// the last segment, so a fully parked title still has a producer that reaches the end.
+    static func parkedAdoptionFrontier(start: Int, stored: Set<Int>, folded: Set<Int>,
+                                       planCount: Int) -> Int {
+        guard planCount > 0 else { return 0 }
+        var index = min(max(0, start), planCount - 1)
+        while index < planCount - 1,
+              stored.contains(index) || (index > start && folded.contains(index)) {
+            index += 1
+        }
+        return index
     }
 
     @discardableResult

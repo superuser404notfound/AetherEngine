@@ -1130,6 +1130,32 @@ public struct LoadOptions: Sendable, Equatable {
     /// Compressed-packet storage for seekable software VOD; automatic retains platform defaults.
     public var softwarePacketCacheStorage: SoftwarePacketCacheStorage = .automatic
 
+    /// Keep this session's segment cache after `stop()` and reuse it when the same source loads again
+    /// (AE#1095). Built for the viewer who leaves to a detail page and presses Resume: the reopen
+    /// serves what the last session already fetched from disk and fetches only what is missing.
+    ///
+    /// One stopped session is kept per process, as long as the process lives, in the same disk budget
+    /// it had while playing. It is reused only when the next `load()` names the exact same URL with
+    /// options that are equal apart from `sourceDiagnosticsContext`, the engine derives the same
+    /// output (display, audio stream, Dolby Vision handling) and the source yields the same segment
+    /// plan. Any other load deletes it, so does the end of the process, and so does a crash or kill
+    /// after the next session's stale sweep (one hour). `AetherEngine.discardRetainedSessionCache()`
+    /// deletes it on demand.
+    ///
+    /// Only the host's own `stop()` keeps a session: an internal reload, a reroute, an audio switch,
+    /// a failed session and the next `load()` while playing all delete the cache as before. Native
+    /// loopback VOD over a URL only; ignored for live, custom IO, `sequentialOrigin`,
+    /// `nativeRemoteHLS` and the software path. Default false, which changes nothing.
+    public var retainsSessionCacheAfterStop: Bool = false
+
+    /// The options a parked session is matched on: everything but the diagnostics label, which every
+    /// load carries a fresh one of.
+    var normalizedForSessionParking: LoadOptions {
+        var copy = self
+        copy.sourceDiagnosticsContext = nil
+        return copy
+    }
+
     /// Serve each VOD loopback segment while it is being written instead of after its cut. The
     /// muxer flushes a fragment about every half second and the loopback server sends each one as
     /// it lands, so AVPlayer can show and start on the first fragments of a segment rather than
@@ -1316,6 +1342,7 @@ public struct LoadOptions: Sendable, Equatable {
         sessionCacheHardLimitBytes: Int? = nil,
         sessionCacheFreeReserveBytes: Int = 0,
         softwarePacketCacheStorage: SoftwarePacketCacheStorage = .automatic,
+        retainsSessionCacheAfterStop: Bool = false,
         progressiveSegmentDelivery: Bool = false,
         autoplay: Bool = true,
         teletextPage: Int? = nil,
@@ -1391,6 +1418,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.sessionCacheHardLimitBytes = sessionCacheHardLimitBytes
         self.sessionCacheFreeReserveBytes = max(0, sessionCacheFreeReserveBytes)
         self.softwarePacketCacheStorage = softwarePacketCacheStorage
+        self.retainsSessionCacheAfterStop = retainsSessionCacheAfterStop
         self.progressiveSegmentDelivery = progressiveSegmentDelivery
         self.autoplay = autoplay
         self.teletextPage = teletextPage

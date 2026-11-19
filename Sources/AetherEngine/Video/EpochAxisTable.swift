@@ -60,6 +60,24 @@ struct EpochAxisTable: Equatable, Sendable {
 
     var isEmpty: Bool { epochs.isEmpty }
 
+    /// AE#1095: the epochs that cut segments below `index`, for a session that adopts those segments
+    /// and starts its own first producer at `index`.
+    func keeping(below index: Int) -> EpochAxisTable {
+        var kept = EpochAxisTable()
+        kept.epochs = epochs.filter { $0.key < index }
+        return kept
+    }
+
+    /// AE#1095: a session that adopts parked segments hands AVPlayer a fresh item whose first segment
+    /// usually sits inside a run, and only an opening publishes an axis. Measured on a source with a
+    /// 600 s origin: without this the reopened clock read -557 s, because nothing published the 600 s
+    /// the bytes carry. The segment was cut on its own boundary, so it opens with no backoff. Unlike
+    /// `record`, the openings above it stay: each still begins a run of its own.
+    mutating func markAdoptedStart(at index: Int) {
+        guard epochs[index] == nil, let carried = carried(at: index) else { return }
+        epochs[index] = EpochAxis(presented: carried, carried: carried, isRecut: false)
+    }
+
     /// Record what the epoch beginning at `index` left, dropping every entry at or above it: a
     /// producer that starts writing there rewrites those segments on their own boundaries, so an
     /// older epoch's offset must stop being claimed for them.
