@@ -1527,6 +1527,9 @@ final class SoftwarePlaybackHost {
 
         let onFrame = upscaledFrameHandler(
             baseOnFrame, decoder: videoDecoder, frameRate: AetherEngine.detectFrameRate(stream: vStream))
+        // 10-bit AV1 on the GPU: up to two frames converting while dav1d decodes the next, instead of the
+        // decode thread waiting for each (the decoder's own flush and drain settle them).
+        (videoDecoder as? SoftwareVideoDecoder)?.overlapsGPUConversion = true
 
         if vStream.pointee.codecpar?.pointee.codec_id == AV_CODEC_ID_VP9 {
             let opened = try VideoDecoderOpener.openPreferredOrFallback(

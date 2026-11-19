@@ -2,6 +2,7 @@ import Foundation
 import CoreVideo
 import Metal
 import AetherLibavutil
+import AetherLibswscale
 
 /// A decoded `yuv420p10le` frame into a P010 pixel buffer on the GPU, with AV1 film grain applied on the
 /// way when the frame carries its parameters (see `AV1FilmGrainTables`). Replaces, for those frames,
@@ -12,14 +13,30 @@ import AetherLibavutil
 /// decode.
 ///
 /// The frame is read where dav1d left it when its buffer lies on page boundaries (the GPU maps the
-/// pages, nothing is copied), and copied once into a staging buffer otherwise. Synchronous: `convert`
-/// returns after the GPU finished, so the frame and the pixel buffer are free to go on as before.
-/// Called under the decoder's lock only, which serialises it.
+/// pages, nothing is copied), and copied once into a staging buffer otherwise.
+///
+/// Two ways to run a frame, both called under the decoder's lock only, which serialises them:
+///
+/// - `encode` returns the frame's work without committing it. The playback decoder hands it to a
+///   `PipelinedFrameStage`, so up to `slotCount` frames are on the GPU while dav1d decodes the next, and
+///   calls `finished` when the work completed. Waiting for each frame on the decoder's thread held a 1080p
+///   10-bit AV1 episode at about 23 of its 24 frames a second on an Apple TV 4K (A15), so the clock paused
+///   to rebuffer every few seconds (see measurements.md).
+/// - `convert` commits and waits, for the callers that read the frame right after `decode` returns (the
+///   probe, the still extractor, the tests).
 final class GPUFrameConverter: @unchecked Sendable {
 
     /// Process switch for comparisons (`AetherEngine.convertsAV1FramesOnGPU`). Read when a decoder
     /// opens, since dav1d is told then whether to apply film grain itself.
     nonisolated(unsafe) static var enabled = true
+
+    /// Frames this converter can have on the GPU at once, each with buffers of its own: the depth of the
+    /// pipeline the playback decoder runs it in. A frame's buffers are reused two frames later, when the
+    /// pipeline has already delivered it.
+    static let slotCount = PipelinedFrameStage.defaultDepth
+
+    /// Frames between two `[GPUFrameConverter] last N frames` lines (about 10 s at 24 fps).
+    static let statsInterval = 240
 
     private let device: MTLDevice
     private let queue: MTLCommandQueue
@@ -27,18 +44,55 @@ final class GPUFrameConverter: @unchecked Sendable {
     private let chroma: MTLComputePipelineState
     private let io: MetalFrameIO
 
-    private let uniformBuffer: MTLBuffer
-    private let lumaGrainBuffer: MTLBuffer
-    private let chromaGrainBuffer: MTLBuffer
-    private let scalingBuffer: MTLBuffer
-    private var offsetsBuffer: MTLBuffer?
-    private var staging: MTLBuffer?
+    /// The buffers one frame's work reads besides its picture: written while it is encoded, read by the
+    /// GPU until it completes, so a frame still on the GPU keeps its own set.
+    private final class Slot {
+        let uniform: MTLBuffer
+        let lumaGrain: MTLBuffer
+        let chromaGrain: MTLBuffer
+        let scaling: MTLBuffer
+        var offsets: MTLBuffer?
+        var staging: MTLBuffer?
 
-    private(set) var framesConverted = 0
-    private(set) var framesGrained = 0
-    private(set) var framesCopied = 0
+        init?(device: MTLDevice) {
+            let lumaBytes = AV1FilmGrainTables.lumaWidth * AV1FilmGrainTables.lumaHeight * 2
+            let chromaBytes = 2 * AV1FilmGrainTables.chromaWidth * AV1FilmGrainTables.chromaHeight * 2
+            guard let u = device.makeBuffer(length: MemoryLayout<AV1FilmGrainTables.Uniforms>.stride, options: .storageModeShared),
+                  let lg = device.makeBuffer(length: lumaBytes, options: .storageModeShared),
+                  let cg = device.makeBuffer(length: chromaBytes, options: .storageModeShared),
+                  let sc = device.makeBuffer(length: 3 * AV1FilmGrainTables.scalingSize, options: .storageModeShared)
+            else { return nil }
+            uniform = u
+            lumaGrain = lg
+            chromaGrain = cg
+            scaling = sc
+        }
+    }
+    private let slots: [Slot]
+    private var nextSlot = 0
+
+    /// Counts and the periodic timing line, written on the decoder's thread (`encode`) and on a Metal
+    /// completion thread (`finished`).
+    private let statsLock = NSLock()
+    private var converted = 0
+    private var grained = 0
+    private var copied = 0
+    private var window = Window()
     private var loggedFailure = false
     private var loggedRoute = false
+
+    /// Per-frame times since the last timing line, in milliseconds.
+    private struct Window {
+        var frames = 0
+        var encodeMs = 0.0
+        var gpuMs = 0.0
+        var heldMs = 0.0
+        var overlapped = 0
+    }
+
+    /// The CPU conversion a frame gets when its GPU work failed after the decoder had moved on (`finished`
+    /// runs on a Metal completion thread, away from the decoder's own `sws_scale` context).
+    private let fallback = CPUFallback()
 
     private static let pageSize = Int(getpagesize())
 
@@ -76,20 +130,21 @@ final class GPUFrameConverter: @unchecked Sendable {
         chroma = shared.chroma
         guard let io = MetalFrameIO(device: dev) else { return nil }
         self.io = io
-        let lumaBytes = AV1FilmGrainTables.lumaWidth * AV1FilmGrainTables.lumaHeight * 2
-        let chromaBytes = 2 * AV1FilmGrainTables.chromaWidth * AV1FilmGrainTables.chromaHeight * 2
-        guard let u = dev.makeBuffer(length: MemoryLayout<AV1FilmGrainTables.Uniforms>.stride, options: .storageModeShared),
-              let lg = dev.makeBuffer(length: lumaBytes, options: .storageModeShared),
-              let cg = dev.makeBuffer(length: chromaBytes, options: .storageModeShared),
-              let sc = dev.makeBuffer(length: 3 * AV1FilmGrainTables.scalingSize, options: .storageModeShared)
-        else { return nil }
-        uniformBuffer = u
-        lumaGrainBuffer = lg
-        chromaGrainBuffer = cg
-        scalingBuffer = sc
+        var made: [Slot] = []
+        for _ in 0..<Self.slotCount {
+            guard let slot = Slot(device: dev) else { return nil }
+            made.append(slot)
+        }
+        slots = made
     }
 
-    /// Whether this frame is one `convert` takes: planar 10-bit 4:2:0, positive strides.
+    /// Frames the GPU converted, grained and had to copy first.
+    var counts: (converted: Int, grained: Int, copied: Int) {
+        statsLock.lock(); defer { statsLock.unlock() }
+        return (converted, grained, copied)
+    }
+
+    /// Whether this frame is one `encode` takes: planar 10-bit 4:2:0, positive strides.
     static func accepts(_ frame: UnsafePointer<AVFrame>) -> Bool {
         frame.pointee.format == AV_PIX_FMT_YUV420P10LE.rawValue
             && frame.pointee.linesize.0 > 0 && frame.pointee.linesize.1 > 0
@@ -106,14 +161,46 @@ final class GPUFrameConverter: @unchecked Sendable {
         return params.type == AV_FILM_GRAIN_PARAMS_AV1 ? params : nil
     }
 
-    /// Writes `frame` into `pixelBuffer` (a P010 buffer of the frame's size). False when anything on the
-    /// way failed; the caller then converts on the CPU instead (and without grain).
+    /// One frame's work, encoded and not yet committed.
+    struct Encoded: @unchecked Sendable {
+        let work: EncodedGPUWork
+        let width: Int, height: Int
+        let grained: Bool
+        let copied: Bool
+        /// The time `encode` took on the decoder's thread (film grain tables, source, encoding).
+        let encodeMs: Double
+    }
+
+    /// The command buffer's failure, as the frame stages report theirs.
+    struct Failure: GPUStageFailure, CustomStringConvertible {
+        let status: MTLCommandBufferStatus
+        let underlying: Error?
+        var description: String {
+            "command buffer status \(status.rawValue)" + (underlying.map { ": \($0.localizedDescription)" } ?? "")
+        }
+    }
+
+    /// Writes `frame` into `pixelBuffer` (a P010 buffer of the frame's size) and waits for the GPU. False
+    /// when anything on the way failed; the caller then converts on the CPU instead (and without grain).
     func convert(_ frame: UnsafeMutablePointer<AVFrame>, into pixelBuffer: CVPixelBuffer) -> Bool {
+        guard let encoded = encode(frame, into: pixelBuffer) else { return false }
+        encoded.work.commandBuffer.commit()
+        encoded.work.commandBuffer.waitUntilCompleted()
+        return finished(encoded, heldMs: nil)
+    }
+
+    /// Encodes `frame` into `pixelBuffer` (a P010 buffer of the frame's size) without committing it. Nil
+    /// when anything on the way failed, logged once; the caller then converts on the CPU (without grain).
+    ///
+    /// The caller commits the work, keeps `frame`'s buffer alive until it completed (the GPU reads it in
+    /// place), and then calls `finished`. At most `slotCount` frames may be on the GPU at once.
+    func encode(_ frame: UnsafeMutablePointer<AVFrame>, into pixelBuffer: CVPixelBuffer) -> Encoded? {
+        let started = DispatchTime.now().uptimeNanoseconds
         let width = Int(frame.pointee.width), height = Int(frame.pointee.height)
         let chromaW = (width + 1) >> 1, chromaH = (height + 1) >> 1
         guard Self.accepts(frame), width > 0, height > 0,
               CVPixelBufferGetWidth(pixelBuffer) == width, CVPixelBufferGetHeight(pixelBuffer) == height
-        else { return false }
+        else { return nil }
 
         var tables: AV1FilmGrainTables?
         if let params = Self.filmGrain(of: frame) {
@@ -133,7 +220,10 @@ final class GPUFrameConverter: @unchecked Sendable {
             uniforms.applyCr = 0
         }
 
-        guard let source = sourceBuffer(frame, chromaHeight: chromaH),
+        let slot = slots[nextSlot]
+        nextSlot = (nextSlot + 1) % slots.count
+
+        guard let source = sourceBuffer(frame, chromaHeight: chromaH, slot: slot),
               let cb = queue.makeCommandBuffer(),
               let enc = cb.makeComputeCommandEncoder()
         else { return fail("no command buffer or source") }
@@ -146,57 +236,105 @@ final class GPUFrameConverter: @unchecked Sendable {
             return fail("no destination textures")
         }
 
-        withUnsafeBytes(of: &uniforms) { uniformBuffer.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        withUnsafeBytes(of: &uniforms) { slot.uniform.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
         if let tables {
-            tables.lumaGrain.withUnsafeBytes { lumaGrainBuffer.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
-            tables.chromaGrain.withUnsafeBytes { chromaGrainBuffer.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
-            tables.scaling.withUnsafeBytes { scalingBuffer.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
-            if (offsetsBuffer?.length ?? 0) < tables.offsets.count {
-                offsetsBuffer = device.makeBuffer(length: tables.offsets.count, options: .storageModeShared)
+            tables.lumaGrain.withUnsafeBytes { slot.lumaGrain.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+            tables.chromaGrain.withUnsafeBytes { slot.chromaGrain.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+            tables.scaling.withUnsafeBytes { slot.scaling.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+            if (slot.offsets?.length ?? 0) < tables.offsets.count {
+                slot.offsets = device.makeBuffer(length: tables.offsets.count, options: .storageModeShared)
             }
             tables.offsets.withUnsafeBytes { raw in
-                offsetsBuffer?.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+                slot.offsets?.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
             }
         }
-        if offsetsBuffer == nil { offsetsBuffer = device.makeBuffer(length: 16, options: .storageModeShared) }
-        guard let offsets = offsetsBuffer else {
+        if slot.offsets == nil { slot.offsets = device.makeBuffer(length: 16, options: .storageModeShared) }
+        guard let offsets = slot.offsets else {
             enc.endEncoding()
             return fail("no offsets buffer")
         }
 
         enc.setComputePipelineState(luma)
         enc.setBuffer(source.buffer, offset: source.y, index: 0)
-        enc.setBuffer(uniformBuffer, offset: 0, index: 1)
-        enc.setBuffer(lumaGrainBuffer, offset: 0, index: 2)
-        enc.setBuffer(scalingBuffer, offset: 0, index: 3)
+        enc.setBuffer(slot.uniform, offset: 0, index: 1)
+        enc.setBuffer(slot.lumaGrain, offset: 0, index: 2)
+        enc.setBuffer(slot.scaling, offset: 0, index: 3)
         enc.setBuffer(offsets, offset: 0, index: 4)
         enc.setTexture(outY, index: 0)
         dispatch(enc, pipeline: luma, width: width, height: height)
 
         enc.setComputePipelineState(chroma)
-        enc.setBuffer(chromaGrainBuffer, offset: 0, index: 2)
+        enc.setBuffer(slot.chromaGrain, offset: 0, index: 2)
         enc.setBuffer(source.buffer, offset: source.cb, index: 5)
         enc.setBuffer(source.buffer, offset: source.cr, index: 6)
         enc.setTexture(outUV, index: 0)
         dispatch(enc, pipeline: chroma, width: chromaW, height: chromaH)
         enc.endEncoding()
 
-        cb.commit()
-        cb.waitUntilCompleted()
-        withExtendedLifetime(textures) {}
-        if let error = cb.error { return fail("command buffer: \(error.localizedDescription)") }
+        let work = EncodedGPUWork(commandBuffer: cb, textures: textures) { status, error in
+            Failure(status: status, underlying: error)
+        }
+        let encodeMs = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+        return Encoded(work: work, width: width, height: height, grained: tables != nil,
+                       copied: source.copied, encodeMs: encodeMs)
+    }
 
-        framesConverted += 1
-        if tables != nil { framesGrained += 1 }
-        if !loggedRoute {
-            loggedRoute = true
+    /// After the work `encode` made completed: the counts, the route line once, the timing line every
+    /// `statsInterval` frames. `heldMs` is how long the frame held the decoder's thread in the pipeline
+    /// (nil when `convert` waited for it there). False when the GPU work failed; the frame then still needs
+    /// converting (`convertOnCPU`).
+    func finished(_ encoded: Encoded, heldMs: Double?) -> Bool {
+        let gpuMs: Double
+        do {
+            gpuMs = try encoded.work.finish()
+        } catch {
+            // A refusal while the app is in the background (iOS) is the system's, not a fault worth a line.
+            if !EncodedGPUWork.isBackgroundRefusal(error) { _ = fail("\(error)") }
+            return false
+        }
+        statsLock.lock()
+        converted += 1
+        if encoded.grained { grained += 1 }
+        if encoded.copied { copied += 1 }
+        let firstFrame = !loggedRoute
+        loggedRoute = true
+        window.frames += 1
+        window.encodeMs += encoded.encodeMs
+        window.gpuMs += gpuMs
+        if let heldMs {
+            window.heldMs += heldMs
+            window.overlapped += 1
+        } else {
+            window.heldMs += encoded.encodeMs + gpuMs
+        }
+        let report = window.frames >= Self.statsInterval ? window : nil
+        if report != nil { window = Window() }
+        statsLock.unlock()
+
+        if firstFrame {
             EngineLog.emit(
-                "[GPUFrameConverter] \(width)x\(height) yuv420p10le -> P010 on the GPU, "
-                + (tables != nil ? "AV1 film grain applied here" : "no film grain on the first frame")
-                + (source.copied ? ", frame copied to a staging buffer" : ", frame read in place"),
+                "[GPUFrameConverter] \(encoded.width)x\(encoded.height) yuv420p10le -> P010 on the GPU, "
+                + (encoded.grained ? "AV1 film grain applied here" : "no film grain on the first frame")
+                + (encoded.copied ? ", frame copied to a staging buffer" : ", frame read in place")
+                + (heldMs != nil ? ", up to \(Self.slotCount) frames on the GPU" : ", waiting for each frame"),
+                category: .swPlayback)
+        }
+        if let report {
+            let n = Double(report.frames)
+            EngineLog.emit(
+                "[GPUFrameConverter] last \(report.frames) frames: "
+                + String(format: "encode %.2f ms, GPU %.2f ms, decoder thread held %.2f ms per frame",
+                         report.encodeMs / n, report.gpuMs / n, report.heldMs / n)
+                + (report.overlapped == report.frames ? " (overlapped)" : " (waited for each)"),
                 category: .swPlayback)
         }
         return true
+    }
+
+    /// `frame` into `pixelBuffer` on the CPU, without grain, for a frame whose GPU work failed after the
+    /// decoder moved on. `format` is the decoder's output format (`OutputFormat.swscaleFormat`).
+    func convertOnCPU(_ frame: UnsafeMutablePointer<AVFrame>, into pixelBuffer: CVPixelBuffer, format: AVPixelFormat) {
+        fallback.convert(frame, into: pixelBuffer, format: format)
     }
 
     /// One buffer that covers all three planes, and where each starts in it.
@@ -206,7 +344,7 @@ final class GPUFrameConverter: @unchecked Sendable {
         let copied: Bool
     }
 
-    private func sourceBuffer(_ frame: UnsafeMutablePointer<AVFrame>, chromaHeight: Int) -> Source? {
+    private func sourceBuffer(_ frame: UnsafeMutablePointer<AVFrame>, chromaHeight: Int, slot: Slot) -> Source? {
         let height = Int(frame.pointee.height)
         guard let y = frame.pointee.data.0, let u = frame.pointee.data.1, let v = frame.pointee.data.2 else { return nil }
         let lsY = Int(frame.pointee.linesize.0), lsC = Int(frame.pointee.linesize.1)
@@ -235,12 +373,12 @@ final class GPUFrameConverter: @unchecked Sendable {
             }
         }
 
-        // Copied: the three planes back to back in a reusable staging buffer.
+        // Copied: the three planes back to back in the slot's staging buffer.
         let total = planes.reduce(0) { $0 + $1.1 }
-        if (staging?.length ?? 0) < total {
-            staging = device.makeBuffer(length: total, options: .storageModeShared)
+        if (slot.staging?.length ?? 0) < total {
+            slot.staging = device.makeBuffer(length: total, options: .storageModeShared)
         }
-        guard let staging else { return nil }
+        guard let staging = slot.staging else { return nil }
         var offset = 0
         var offsets: [Int] = []
         for p in planes {
@@ -248,7 +386,6 @@ final class GPUFrameConverter: @unchecked Sendable {
             (staging.contents() + offset).copyMemory(from: p.0, byteCount: p.1)
             offset += p.1
         }
-        framesCopied += 1
         return Source(buffer: staging, y: offsets[0], cb: offsets[1], cr: offsets[2], copied: true)
     }
 
@@ -258,12 +395,32 @@ final class GPUFrameConverter: @unchecked Sendable {
         io.dispatch(enc, grid: (width, height), threadgroup: group)
     }
 
-    private func fail(_ why: String) -> Bool {
-        if !loggedFailure {
-            loggedFailure = true
+    private func fail(_ why: String) -> Encoded? {
+        statsLock.lock()
+        let first = !loggedFailure
+        loggedFailure = true
+        statsLock.unlock()
+        if first {
             EngineLog.emit("[GPUFrameConverter] frame left to sws_scale (logged once): \(why)", category: .swPlayback)
         }
-        return false
+        return nil
+    }
+
+    /// `sws_scale` of its own, for `convertOnCPU`.
+    private final class CPUFallback: @unchecked Sendable {
+        private let lock = NSLock()
+        private var context: UnsafeMutablePointer<SwsContext>?
+
+        func convert(_ frame: UnsafeMutablePointer<AVFrame>, into pixelBuffer: CVPixelBuffer, format: AVPixelFormat) {
+            lock.lock(); defer { lock.unlock() }
+            let width = frame.pointee.width, height = frame.pointee.height
+            context = sws_getCachedContext(context, width, height, AVPixelFormat(rawValue: frame.pointee.format),
+                                           width, height, format, Int32(SWS_BILINEAR.rawValue), nil, nil, nil)
+            guard let context else { return }
+            SoftwareVideoDecoder.scale(frame, into: pixelBuffer, with: context)
+        }
+
+        deinit { if context != nil { sws_freeContext(context) } }
     }
 }
 

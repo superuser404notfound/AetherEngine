@@ -199,8 +199,8 @@ Notes:
 | `VideoRoutingPolicy.swift` | Pure dispatch rule by codec and field order. See note. |
 | `HardwareVideoDecoder.swift` | Software path: VideoToolbox hardware decoder (HEVC, VP9, AV1 Dolby Vision) for sources routed away from AVPlayer. |
 | `DualLayerVideoDecoder.swift` | Software path: Dolby Vision Profile 7 FEL (`DualLayerDolbyVision` trait). See note. |
-| `SoftwareVideoDecoder.swift` | Software path: libavcodec/dav1d → `CVPixelBuffer` (NV12 / P010), HDR10+ side data, HDR10 static metadata. 10-bit AV1 reaches P010 through `GPUFrameConverter`. |
-| `GPUFrameConverter.swift` | Software path: converts a 10-bit AV1 frame to P010 in one Metal pass and applies its film grain there (dav1d exports the grain instead of applying it). `sws_scale` stays the fallback. |
+| `SoftwareVideoDecoder.swift` | Software path: libavcodec/dav1d → `CVPixelBuffer` (NV12 / P010), HDR10+ side data, HDR10 static metadata. 10-bit AV1 reaches P010 through `GPUFrameConverter`, in a `PipelinedFrameStage` of its own when the playback host sets `overlapsGPUConversion`. |
+| `GPUFrameConverter.swift` | Software path: converts a 10-bit AV1 frame to P010 in one Metal pass and applies its film grain there (dav1d exports the grain instead of applying it). `encode` and `finished` for the pipeline, with buffers per frame on the GPU; `convert` waits. `sws_scale` stays the fallback. |
 | `AV1FilmGrain.swift` | The per-frame grain tables (templates, scaling functions, block offsets), computed on the CPU the way dav1d computes them. |
 | `AV1FilmGrainShaderSource.swift` | The Metal kernels: dav1d's per-pixel grain and the P010 write. |
 | `AV1GaussianSequence.swift` | AV1's Gaussian_Sequence (specification 7.18.3.3). |
@@ -611,7 +611,7 @@ Notes:
 | `IFrameJPEGBuilder.swift` | AE#682: one keyframe as a Motion JPEG fragment, for sources whose own keyframes AVKit will not show. |
 | `IFramePayloadCache.swift` | AE#682: byte-capped on-disk cache of keyframe payloads read for the rendition. |
 | `FrameUpscaler.swift` | The per-frame upscale stage (#846): optional VT super resolution, then MetalFX, with overrun fallback. `UpscaleBenchmarkStage` builds the same stage for the benchmark. |
-| `PipelinedFrameStage.swift` | AE#957: runs a per-frame GPU stage with two frames in flight, delivered in decode order; `settle()` delivers them after a decoder flush. `EncodedGPUWork` is one frame's uncommitted command buffer. |
+| `PipelinedFrameStage.swift` | AE#957: runs a per-frame GPU stage with two frames in flight, delivered in decode order; `settle()` delivers them after a decoder flush. Also runs the software decoder's 10-bit AV1 conversion. `EncodedGPUWork` is one frame's uncommitted command buffer. |
 | `FrameToneMapper.swift` | #957: the per-frame picture processing stage: a frame chain with the tone map, rebuilt for a frame's own metadata, with the overrun and HDR10+ switch-off. |
 | `BT2390ToneCurve.swift` | AE#957: the BT.2390 tone curve from a source peak to a target peak on PQ values (the CPU reference), the PQ conversions, which source value sets the peak (`ToneMapSourcePeak`), and the curve's shader parameters. |
 | `FrameChainOutput.swift` | AE#957: `FrameChainColorVolume`, the colour volume a frame chain stage declares for its output, and the attachments a chain's output buffer carries (the source's, minus its geometry, with the declared HDR10 metadata). |

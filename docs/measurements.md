@@ -492,6 +492,22 @@ Current rule: [architecture-software.md › Two frames in flight on the GPU](arc
 - A seek to 3 s while playing and a seek to 12 s while paused both landed on their target, the paused one with its frame on screen. The clip played to the end with 0 dropped frames and no `settle` timeout.
 - The picture processing tone map (1000 to 600 nit) on the 4K 23.976 fps pattern held the decoder's thread 1.3 to 1.5 ms per frame, 0 dropped frames. 4K60 is not measured through the pipeline: the 4K60 test clip declares no HDR10 metadata, so the route is not taken.
 
+### 10-bit AV1 conversion on the A15
+
+Measured on an Apple TV 4K (A15, tvOS 27.2.1) on 2026-11-18, in playback in a host app: a 1080p 23.976 fps 10-bit AV1 episode with film grain, Opus stereo, MKV, 2.8 Mbit/s over the home network. The answer first: **waiting for the GPU on every frame held the decode below real time, and the clock paused to rebuffer every few seconds.**
+
+Current rule: [architecture-software.md › 10-bit AV1 conversion](architecture-software.md#10-bit-av1-conversion).
+
+| Route | Frames to the renderer per second | Audio lead | CPU (one core = 100%) |
+|---|---|---|---|
+| GPU conversion, waiting for each frame (7.54) | 22 to 23 | fell 1 s per second, clock paused every 4.5 s | dav1d 9%, other threads 63% |
+| GPU conversion, waiting for each frame (7.70) | 22 to 23 | same, clock paused every 8 s | dav1d 10%, other threads 62% |
+| CPU (`convertsAV1FramesOnGPU` off) | 23 to 26, mean 24 | steady at 4.0 s, no pause | dav1d 55%, other threads 11% |
+
+- Per-second counts from `[SWDiag]` (`enq=`), CPU from the 30 s `cpuprobe`. The network was not the cause: the reader stopped at its 16 MB window and every pause resumed within 0.3 s.
+- With the GPU route the dav1d workers were mostly idle. The decoder's thread was the limit: it encoded each frame, then waited for the GPU before it took the next.
+- The audio lead could only grow as far as the file was read, and the file was read only as fast as video was decoded, so the lead drained at the shortfall.
+
 ### Software channel layout mismatch
 
 Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.
