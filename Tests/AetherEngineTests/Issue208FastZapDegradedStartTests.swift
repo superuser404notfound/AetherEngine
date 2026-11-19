@@ -30,21 +30,6 @@ private final class Issue208WaitResult: @unchecked Sendable {
 }
 
 final class Issue208FastZapDegradedStartTests: XCTestCase {
-    func testDegradedGraceIsOneSegmentDurationClampedToBounds() {
-        XCTAssertEqual(
-            LiveEdgePolicy.fastZapDegradedGraceSeconds(maxSegmentDuration: 0.2),
-            0.5
-        )
-        XCTAssertEqual(
-            LiveEdgePolicy.fastZapDegradedGraceSeconds(maxSegmentDuration: 0.8),
-            0.8
-        )
-        XCTAssertEqual(
-            LiveEdgePolicy.fastZapDegradedGraceSeconds(maxSegmentDuration: 4.0),
-            2.0
-        )
-    }
-
     private func makeProvider(
         allowsBoundedDegradedStart: Bool
     ) -> (VideoSegmentProvider, SegmentCache) {
@@ -64,7 +49,9 @@ final class Issue208FastZapDegradedStartTests: XCTestCase {
                 targetSegmentDurationSeconds: 0.5,
                 dvrWindowSeconds: nil
             ),
-            allowsBoundedDegradedStart: allowsBoundedDegradedStart
+            allowsBoundedDegradedStart: allowsBoundedDegradedStart,
+            // The grace these cases exercise. The default is 0 since the live start measurements of 2026-11-19.
+            startupGraceSeconds: 0.5
         )
         return (provider, cache)
     }

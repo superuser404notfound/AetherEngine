@@ -30,6 +30,8 @@ final class Issue684FirstServeLatchTests: XCTestCase {
             isLive: true,
             liveWindowSizing: LiveWindowSizing(targetSegmentDurationSeconds: 0.5, dvrWindowSeconds: nil),
             allowsBoundedDegradedStart: true,
+            // The grace these cases exercise. The default is 0 since the live start measurements of 2026-11-19.
+            startupGraceSeconds: 0.5,
             liveCadencePolicy: policy
         )
         return (provider, cache)

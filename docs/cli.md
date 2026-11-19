@@ -199,7 +199,11 @@ On a 30 fps H.264 + AAC fixture the source's own alignment is +21.8 ms. `--audio
 
 **`--standard-join`** loads with `LoadOptions.liveJoinProfile = .standard`. Without it the load takes the engine default, `.fastZap`. `--fast-zap` is still accepted (and does nothing) so older scripts keep running. To judge a join, read the first-serve line (AE#374), not a first-frame stopwatch.
 
-The default `.fastZap` first serve prefers the full holdback (how far behind the live edge the first manifest waits to start). It does not wait forever: it is bounded after two finalized segments plus a 0.5 to 2.0 s observed-segment grace. That grace ends early once the source reads at 1x and the open segment cannot reach its next keyframe inside it (AE#936).
+The default `.fastZap` first serve goes out once the window holds the full holdback (how far behind the live edge the first manifest starts) or two finalized segments, whichever comes first.
+
+**`--startup-grace SECONDS`** sets `LoadOptions.liveStartupGraceSeconds`, an extra wait for a deeper first window. It ends early once the source reads at 1x and the open segment cannot reach its next keyframe inside it (AE#936). **`--single-segment-min SECONDS`** sets `LoadOptions.liveStartupSingleSegmentMinimumSeconds`.
+
+**Reading a start.** `live` prints every startup checkpoint and every `playbackPhase` change to the millisecond from load start (`STARTUP +0.193s routed`, `PHASE +0.221s playing`). The 1 Hz `JOIN` line is quantized to a second; use these to compare against a stopwatch.
 
 To try fastZap against an origin of your own (the shape a downstream player ships), put [`hlsfixture`](#hlsfixture) in front. The served `#EXT-X-TARGETDURATION` is then floored by the upstream's observed arrival cadence (`LiveCadencePolicy`). `live`'s raw-TS fixture has no playlist, so it cannot show this. The numbers are in [Measurements › fastZap against an own origin](measurements.md#play-fastzap-against-an-own-origin-ae374).
 

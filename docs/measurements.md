@@ -744,6 +744,27 @@ Current rule: [api.md › Live: a resume that had to move](api.md#live-a-resume-
 
 On the harness, with a 30 s window and a 70 s pause, the playhead sat at 93881.2, the window slid to 93890.0...93920.0 underneath it, and the resume landed at 93895.0 without a word. A viewer who paused a match came back to it continuing somewhere else, with nothing on screen to say why.
 
+### Live join: the first-serve grace
+
+Measured: the automatic `.fastZap` grace (one observed segment, clamped to 0.5 to 2 s) delayed every raw MPEG-TS start by 1 to 2 s and prevented no rebuffer. Since 7.71 the default is no grace.
+
+Current rule: [api.md › Live](api.md) note 2 on `liveStartupGraceSeconds`.
+
+`aetherctl live --realtime --seconds 20`, release build, 1080p25 H.264 + AAC raw TS at 6 Mbit/s, three runs per cell, median time from load start to `playbackPhase == .playing`. `--preroll 0` is a strict-realtime origin, `--preroll 3` one that bursts 3 s on connect (with the fixture's 2 s lead, 5 s), which is the shape of most IPTV providers.
+
+| GOP | origin | old auto grace | grace 0 | grace 0 + one segment (`--single-segment-min 0.4`) |
+|---|---|---|---|---|
+| 0.48 s | strict | 1.27 s | 0.27 s | 0.22 s |
+| 0.48 s | burst | 1.15 s | 0.23 s | 0.22 s |
+| 1 s | strict | 1.40 s | 0.36 s | 0.25 s |
+| 1 s | burst | 1.26 s | 0.22 s | 0.22 s |
+| 2 s | strict | 4.39 s | 2.38 s | 0.37 s |
+| 2 s | burst | 1.39 s | 0.21 s | 0.22 s |
+
+- **Rebuffers:** none in the first two columns. The one-segment start rebuffered in 3 of 3 runs on the 2 s strict cell, so it stays opt-in. A host saw a 4.5 s stall from it on real channels.
+- **`-16832`:** grace 0 on a strict origin logs one or two `restarting ... from end of live playlist` warnings per start. On macOS they delay nothing (`playing` still comes at 0.27 to 0.37 s). On a bursting origin there were none, because the burst deepens the window before AVPlayer looks.
+- **Why the grace bought nothing:** on a burst origin the window stops just short of the holdback (5.76 of 6 s on the 0.48 s cell), and the grace waited a full segment for the next keyframe at 1x. The AE#936 early exit keeps 0.5 s of slack, so it rarely fires at these lengths.
+
 ### Live join: sealing over the upstream segment
 
 Measured against late-delivering origins: sealing a live join over the whole upstream segment cuts `-12888` errors and stalls, at the cost of a deeper holdback. The seal (the TARGETDURATION the engine serves, which sets the holdback AVPlayer keeps behind the live edge) is bounded by what the join pays for.

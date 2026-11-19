@@ -110,7 +110,9 @@ final class Issue936GraceReadHeadTests: XCTestCase {
                 targetSegmentDurationSeconds: 0.5,
                 dvrWindowSeconds: nil
             ),
-            allowsBoundedDegradedStart: true
+            allowsBoundedDegradedStart: true,
+            // The grace these cases exercise. The default is 0 since the live start measurements of 2026-11-19.
+            startupGraceSeconds: 2.0
         )
         return (provider, cache)
     }

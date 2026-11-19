@@ -38,6 +38,15 @@ the public-API contract.
   video stream first, and a file with HDR10+ keeps the default route. A file without it still takes the forced
   route. Off by default, because tvOS cannot tell whether the TV takes HDR10+ (Sodalite#245, thanks @Tchet33).
 
+### Changed
+
+- **A `.fastZap` live start no longer waits for a grace before the first manifest.** Once the window holds two
+  finished segments it is served at once, unless `LoadOptions.liveStartupGraceSeconds` asks for a wait. The old
+  automatic grace (one segment, 0.5 to 2 s) delayed every raw MPEG-TS start by 1 to 2 s and prevented no
+  rebuffer. Measured on 0.5, 1 and 2 s GOPs: a 1 s GOP channel now plays after 0.22 to 0.36 s instead of 1.26
+  to 1.40 s. A strict-realtime origin may log one `-16832` warning at the start. `aetherctl live` gained
+  `--startup-grace`, `--single-segment-min` and millisecond `STARTUP` / `PHASE` lines.
+
 ### Fixed
 
 - **Upscaling no longer switches itself off at 720p60 in a host's Debug build.** A Debug build compiles the
