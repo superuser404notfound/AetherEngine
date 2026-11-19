@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.71.0] - 2026-11-19
+
 ### Added
 
 - **`LoadOptions.retainsSessionCacheAfterStop` keeps a stopped session's segments for a Resume.** `stop()`
