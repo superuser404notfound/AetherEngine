@@ -1276,7 +1276,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var fragmentHeadersMissingIndex: Range<Int64>?
     private var fragmentHeadersIndexPrefix = Data()
     /// Connections the fragment header fetch may hold; requests still pass the origin budget.
-    private static let fragmentHeaderConnections = 8
+    static let fragmentHeaderConnections = 8
     /// Bytes fetched in front of each `moof`, for a `sidx` or `styp` that sits there.
     private static let fragmentHeaderLead = 256
     /// A fragment this small is fetched whole, so that a read-ahead from its `moof` to the next
