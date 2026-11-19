@@ -234,7 +234,9 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
 
     private func installCompanion(_ companion: HLSLiveIngestReader) {
         companion.setJoinCushion(joinCushionSeconds)
-        // The companion never reopens on its own, so only the first join point carries over.
+        // The companion never reopens on its own, and the engine builds no reopen for a session that
+        // has one (`ingestReopenFactory`), so a `.sequence` resume never reaches here. Only the first
+        // join point carries over; the rendition's own sequence axis would not match anyway.
         if joinPoint != .liveEdge { companion.setJoinPoint(.playlistStart) }
         startLock.lock()
         let raceClosed = closed

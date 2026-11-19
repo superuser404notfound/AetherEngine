@@ -240,18 +240,22 @@ struct Issue1090LiveJoinAtPlaylistStartTests {
         let drain = Drain(reader)
         let burstBytes = segments.prefix(8).reduce(0) { $0 + $1.count }
         try await waitFor { drain.data.count >= burstBytes }
-        let start = Date()
         #expect(drain.data.prefix(burstBytes) == segments.prefix(8).reduce(Data(), +))
         #expect(reader.joinBacklogSeconds == 8)
 
-        try await Task.sleep(nanoseconds: 2_500_000_000)
+        // Wait until the pacer has released a few segments past the burst. No deadline of its own: a
+        // starved runner only makes this later, and the suite's time limit catches a hang.
+        try await waitFor { origin.segmentRequests.contains { $0.index >= 11 } }
         let requests = origin.segmentRequests
-        let highest = requests.map(\.index).max() ?? -1
-        // Segment k (k >= 8) is due k - 7 s after the join; at 2.5 s that is segment 9. Unpaced, the
-        // whole listing (segment 59) would have been asked for within a fraction of a second.
-        #expect(highest >= 8, "nothing past the burst was fetched")
-        #expect(highest <= 11, "the backlog was fetched at link speed, highest=\(highest)")
-        #expect(Date().timeIntervalSince(start) < 10)
+        let joinedAt = try #require(requests.first { $0.index == 0 }?.at)
+        // Segment k (k >= 8) is due k - 7 s after the join, and the join began just before segment 0
+        // was asked for. Load can only make a request LATER, so this lower bound holds on any runner;
+        // unpaced, the whole listing would have been asked for within a fraction of a second.
+        for request in requests where request.index >= 8 {
+            let earliest = Double(request.index - 7) - 0.25
+            #expect(request.at.timeIntervalSince(joinedAt) >= earliest,
+                    "segment \(request.index) fetched \(request.at.timeIntervalSince(joinedAt))s after the join")
+        }
 
         // Delivered bytes are in playlist order from segment 0.
         let delivered = drain.data
