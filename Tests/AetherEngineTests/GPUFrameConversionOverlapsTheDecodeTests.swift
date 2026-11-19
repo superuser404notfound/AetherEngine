@@ -4,14 +4,17 @@ import CoreMedia
 import CoreVideo
 import Metal
 import AetherLibavutil
+import AetherLibavcodec
+import AetherLibavformat
 @testable import AetherEngine
 
 /// The playback decoder's 10-bit AV1 conversion overlaps the decode (`overlapsGPUConversion`): up to
 /// `GPUFrameConverter.slotCount` frames are on the GPU at once, each with buffers of its own, and they
 /// leave in the order they were decoded. Waiting for each frame on the decoder's thread held a 1080p
-/// episode below 24 fps on an Apple TV 4K (A15) in a host's Debug build. Synthetic pictures against the dav1d 1.5.4 digests of
-/// `AV1FilmGrainGPUReferenceTests`, so it runs wherever Metal does; the media check in `AV1FilmGrainGPUTests`
-/// runs the same route on a real clip.
+/// episode below 24 fps on an Apple TV 4K (A15). The converter and the pipeline are checked on synthetic
+/// pictures against the dav1d 1.5.4 digests of `AV1FilmGrainGPUReferenceTests`, and the decoder's own
+/// route on a committed clip (`AV1FilmGrainClipFixture`): order, the waiting route's samples, a flush, the
+/// drain. All of it runs wherever Metal does.
 @Suite("GPU frame conversion overlaps the decode", .serialized, .timeLimit(.minutes(3)),
        .enabled(if: MTLCreateSystemDefaultDevice() != nil, "needs a Metal device"))
 struct GPUFrameConversionOverlapsTheDecodeTests {
@@ -115,6 +118,152 @@ struct GPUFrameConversionOverlapsTheDecodeTests {
     /// still extractor and the tests read a frame as soon as `decode` returns.
     @Test func onlyThePlaybackHostOverlapsTheConversion() {
         #expect(SoftwareVideoDecoder().overlapsGPUConversion == false)
+        let playback = SoftwareVideoDecoder()
+        SoftwarePlaybackHost.prepareForPlayback(playback)
+        #expect(playback.overlapsGPUConversion)
+    }
+
+    // MARK: - The decoder's own route, on the committed clip
+
+    typealias Media = AV1FilmGrainGPUTests
+
+    /// The clip open, its video stream, and decoders on it; closed by `close()`.
+    final class Session: @unchecked Sendable {
+        let url: URL
+        let demuxer = Demuxer()
+        let videoIndex: Int32
+        let stream: UnsafeMutablePointer<AVStream>
+        private var decoders: [SoftwareVideoDecoder] = []
+
+        init() throws {
+            url = try AV1FilmGrainClipFixture.write()
+            try demuxer.open(url: url)
+            videoIndex = demuxer.videoStreamIndex
+            stream = try #require(demuxer.stream(at: videoIndex))
+        }
+
+        func decoder(overlapped: Bool, onFrame: @escaping DecodedFrameHandler) throws -> SoftwareVideoDecoder {
+            let decoder = SoftwareVideoDecoder()
+            decoder.overlapsGPUConversion = overlapped
+            try decoder.open(stream: stream, onFrame: onFrame)
+            decoders.append(decoder)
+            return decoder
+        }
+
+        /// Every video packet of the clip, from where the demuxer stands, to each decoder.
+        func decodeAll(_ targets: [SoftwareVideoDecoder]) {
+            while let pkt = try? demuxer.readPacket() {
+                if pkt.pointee.stream_index == videoIndex {
+                    for decoder in targets { decoder.decode(packet: pkt) }
+                }
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                trackedPacketFree(&p)
+            }
+        }
+
+        func close() {
+            for decoder in decoders { decoder.close() }
+            demuxer.close()
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// Through the pipeline every frame arrives, in order, sample for sample the frame the waiting route
+    /// delivers, with its grain applied on the GPU.
+    @Test func theDecoderDeliversEveryFrameInOrderAsTheWaitingRouteDoes() async throws {
+        let session = try Session()
+        defer { session.close() }
+        let waitingFrames = Media.FrameSink(), overlappedFrames = Media.FrameSink()
+        let waiting = try session.decoder(overlapped: false) { pb, pts, _ in waitingFrames.add(pb, pts: pts) }
+        let overlapped = try session.decoder(overlapped: true) { pb, pts, _ in overlappedFrames.add(pb, pts: pts) }
+        #expect(!waiting.convertsInPipeline)
+        #expect(overlapped.convertsInPipeline)
+
+        let done = runOnOwnThread {
+            session.decodeAll([waiting, overlapped])
+            waiting.drainForEndOfStream()
+            overlapped.drainForEndOfStream()
+        }
+        try await waitFor { done.isSet }
+
+        let reference = waitingFrames.all, frames = overlappedFrames.all
+        #expect(reference.count == AV1FilmGrainClipFixture.frameCount)
+        #expect(frames.count == reference.count)
+        var report = Media.Report()
+        for (a, b) in zip(reference, frames) { report.compare(a, b) }
+        #expect(report.ptsMismatches == 0)
+        #expect(report.yMismatches == 0)
+        #expect(report.uvMismatches == 0)
+        let pts = frames.map(\.pts.seconds)
+        #expect(pts == pts.sorted(), "decode order")
+        #expect(overlapped.gpuConversionCounts?.grained == AV1FilmGrainClipFixture.frameCount)
+    }
+
+    /// After `flush()` returns, no frame from before it reaches the handler (a frame still on the GPU is
+    /// retired with its epoch), and the decoder goes on with what it is given next.
+    @Test func aFlushRetiresTheFramesStillOnTheGPU() async throws {
+        let session = try Session()
+        defer { session.close() }
+        let recorder = FlushRecorder()
+        let decoder = try session.decoder(overlapped: true) { pb, pts, _ in recorder.add(pts) }
+        #expect(decoder.convertsInPipeline)
+
+        let flushed = runOnOwnThread {
+            session.decodeAll([decoder])
+            decoder.flush()
+            recorder.markFlushed()
+        }
+        try await waitFor { flushed.isSet }
+        // The bound is the assertion: nothing from before the flush may turn up after it.
+        let late = try await waitFor(upTo: .milliseconds(300)) { recorder.afterFlush > 0 }
+        #expect(!late, "\(recorder.afterFlush) frame(s) from before the flush arrived after it")
+
+        // The next position decodes as usual under the new epoch.
+        let again = runOnOwnThread {
+            _ = session.demuxer.seek(to: 0)
+            session.decodeAll([decoder])
+            decoder.drainForEndOfStream()
+        }
+        try await waitFor { again.isSet }
+        #expect(recorder.afterFlush == AV1FilmGrainClipFixture.frameCount)
+    }
+
+    /// When `drainForEndOfStream()` returns, every frame has reached the handler, those still on the GPU
+    /// included: the host drains the renderer right after it.
+    @Test func theDrainDeliversEveryFrameBeforeItReturns() async throws {
+        let session = try Session()
+        defer { session.close() }
+        let recorder = FlushRecorder()
+        let decoder = try session.decoder(overlapped: true) { pb, pts, _ in recorder.add(pts) }
+        let countAtReturn = Counted()
+        let drained = runOnOwnThread {
+            session.decodeAll([decoder])
+            decoder.drainForEndOfStream()
+            countAtReturn.set(recorder.total)
+        }
+        try await waitFor { drained.isSet }
+        #expect(countAtReturn.value == AV1FilmGrainClipFixture.frameCount)
+    }
+
+    /// Frames as they arrive, and how many came after `markFlushed`.
+    private final class FlushRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var flushed = false
+        private var count = 0
+        private var late = 0
+        func add(_ pts: CMTime) {
+            lock.lock(); count += 1; if flushed { late += 1 }; lock.unlock()
+        }
+        func markFlushed() { lock.lock(); flushed = true; lock.unlock() }
+        var total: Int { lock.lock(); defer { lock.unlock() }; return count }
+        var afterFlush: Int { lock.lock(); defer { lock.unlock() }; return late }
+    }
+
+    private final class Counted: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored = -1
+        func set(_ v: Int) { lock.lock(); stored = v; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return stored }
     }
 
     /// The picture a frame's work reads in place, freed once the completion that holds it is gone.

@@ -193,6 +193,7 @@ struct AV1FilmGrainGPUTests {
         private var frames: [Frame] = []
 
         var first: Frame? { lock.withLock { frames.first } }
+        var all: [Frame] { lock.withLock { frames } }
         func removeFirst() { lock.withLock { _ = frames.removeFirst() } }
 
         func add(_ pb: CVPixelBuffer, pts: CMTime) {

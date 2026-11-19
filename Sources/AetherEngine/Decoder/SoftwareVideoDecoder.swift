@@ -77,6 +77,13 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// still extractor and the tests read a frame as soon as `decode` returns, so they keep the default.
     var overlapsGPUConversion = false
 
+    /// Whether this decoder's 10-bit AV1 conversion runs in `conversionPipeline` (the tests' check that
+    /// the overlapped route is the one under test).
+    var convertsInPipeline: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return conversionPipeline != nil
+    }
+
     /// The pipeline the GPU conversion runs in, when `overlapsGPUConversion` is set and the converter is in
     /// use. Every frame of this decoder goes through it then, a CPU-converted one included, so they stay in
     /// order. Written in `open` and `close`; read under `lock`.
