@@ -1212,7 +1212,11 @@ In-band CEA-608 (`eia_608` / QuickTime `c608`, a demuxable caption track) produc
 - Instead, a read-only tap on the segment producer's existing source connection reads the caption track's `cc_data`. Its packets are kept in the demuxer's keep-set, observed, then dropped. They are never muxed, so the loopback-HLS output stays byte-identical.
 - An in-house line-21 decoder (validated against FFmpeg's `ccaption_dec.c`) turns it into cues, and they publish on the same `subtitleCues` overlay path as every other codec.
 - First cut: field-1 / channel CC1 only. CEA-708 (DTVCC) and field 2 are follow-ons.
-- Field 1 also carries CC2, the text service T1 and XDS packets (the network name, for one). Characters follow the data channel of the last control code, and CC1's TR and RTD switch to the text service until RCL, RU2-4 or RDC. Only CC1 caption characters reach the screen.
+- Only CC1 caption characters reach the screen. Field 1 also carries three other services, and the decoder keeps their characters out:
+  - CC2, the second caption channel. Its control codes start with 0x18-0x1F instead of CC1's 0x10-0x17.
+  - XDS (Extended Data Services), packets of programme data such as the network name. A packet starts with a byte from 0x01-0x0F.
+  - The text service T1, a scrolling text page that shares CC1's control codes. TR (Text Restart) and RTD (Resume Text Display) switch to it.
+- A character belongs to the service of the last control code before it. After TR or RTD, CC1 stays in the text service until a caption mode command comes back: RCL (pop-on), RU2-RU4 (roll-up with 2 to 4 rows) or RDC (paint-on).
 
 **Captions inside the video bitstream (#131).** Captions carried only inside the video (ATSC A/53 `cc_data`, the US broadcast/cable case) are extracted too:
 

@@ -51,7 +51,8 @@ the public-API contract.
   broadcast that carries an XDS packet (the network name, for one), the second caption channel or the text
   service T1 on field 1 showed that data inside the captions. With roll-up captions the network name came
   back every few seconds. Characters now follow the data channel of the last control code, and CC1's TR and
-  RTD hand them to the text service until RCL, RU2-4 or RDC. Pinned by `CEA608DecoderTests`.
+  RTD hand them to the text service until RCL, RU2-4 or RDC. Pinned by `CEA608DecoderTests` (PR #1098,
+  thanks @MistyKuu).
 - **HDR10 coded 3840x2176 no longer shows 16 padding lines at the bottom on older Apple TVs.** Since 7.69.0
   the tvOS remux replaced the conformance window of such a stream with a `clap` box on every Apple TV. For PQ
   HDR, tvOS does not crop with that box. It squeezes all 2176 lines into 2160, so the padding showed as a band
