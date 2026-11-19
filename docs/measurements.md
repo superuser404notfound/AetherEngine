@@ -524,15 +524,16 @@ Current rule: [architecture-software.md › 10-bit AV1 conversion](architecture-
 - On the A15 the whole encode (the tables, mapping the picture and encoding the passes) took 40 to 44 ms with the old loops, against 40.8 ms for the tables alone on the M1: the tables were nearly all of it.
 - The output is unchanged: `AV1FilmGrainTablesMatchTheReferenceArithmeticTests` holds the new loops to the plain version, and the GPU digest tests hold both to dav1d.
 
-**With both changes**, the same episode on the same Apple TV for four minutes, in the host's Debug build:
+**With both changes**, the same episode on the same Apple TV, in the host's Debug build (four minutes, then two after the last loop change):
 
 | Route | Frames to the renderer per second | Encode per frame | GPU per frame | Clock paused | CPU (one core = 100%) |
 |---|---|---|---|---|---|
 | GPU conversion, overlapped, template loops written out | 24 in 213 of 249 one-second samples, 22 to 26 in all but 3 (the first second, and two resumes from a pause, each only partly playing) | 8.4 to 11.7 ms | 1.7 ms | only for the first fill at the start | 50% to 78% in all |
+| GPU conversion, overlapped, every loop written out (2026-11-19, two minutes) | 24 in 75 of 112, 22 to 26 in all but the first second | 6.2 to 8.9 ms | 1.7 ms | only for the first fill at the start | 68% to 74% in all |
 
-- The encode is the decoder's thread per frame: the grain tables, mapping the picture for the GPU and encoding the two passes. It uses about a quarter of the 41.7 ms frame interval.
-- The narrowing and scaling loops were written out after this run (1.45 ms against 3.05 ms for the whole table build on the M1), and are not measured on the A15 yet.
-- The audio lead stayed at 4.0 s throughout, through two pauses by the viewer.
+- The encode is the decoder's thread per frame: the grain tables, mapping the picture for the GPU and encoding the two passes. It uses a quarter of the 41.7 ms frame interval or less.
+- Writing out the narrowing and scaling loops too (1.45 ms against 3.05 ms for the whole table build on the M1) took about 2 ms off the A15's encode per frame.
+- The audio lead stayed at 4.0 s throughout both runs, in the first through two pauses by the viewer.
 - Every session pauses once as it starts, while the audio lead fills for the first time (`audio lead exhausted (-2.48s)` 50 ms after the open). The earlier runs did too.
 
 ### Software channel layout mismatch
