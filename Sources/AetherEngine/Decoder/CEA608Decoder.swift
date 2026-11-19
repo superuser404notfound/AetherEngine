@@ -36,6 +36,13 @@ final class CEA608Decoder {
     /// Bottom (base) row of the roll-up window.
     private var rollBaseRow = CEA608Decoder.rowCount - 1
 
+    /// Which service the characters on field 1 currently belong to. Every control code names its data
+    /// channel (0x10-0x17 CC1, 0x18-0x1F CC2) and an XDS code (0x01-0x0F) starts an XDS packet, so the
+    /// characters that follow belong to that service until the next control code; CC1's TR and RTD hand
+    /// them to the text service T1 until RCL, RU2-4 or RDC. Only CC1 caption characters reach the screen.
+    private var dataChannelIsCC1 = true
+    private var inTextService = false
+
     /// Last control pair processed, for doubled-control-code suppression. Mirrors FFmpeg's `prev_cmd`:
     /// set on every processed control pair, cleared only after a standard character pair, so a control
     /// transmitted twice is processed once, and even a 3× burst stays suppressed until a different pair
@@ -59,6 +66,8 @@ final class CEA608Decoder {
         rollBaseRow = CEA608Decoder.rowCount - 1
         lastControlPair = nil
         lastRendered = ""
+        dataChannelIsCC1 = true
+        inTextService = false
     }
 
     /// True when `b` carries correct odd parity (line-21 sets bit 7 so each byte has an odd number of 1s).
@@ -75,8 +84,15 @@ final class CEA608Decoder {
         // Null padding.
         if b0 == 0 && b1 == 0 { return [] }
 
+        if b0 >= 0x01 && b0 <= 0x0F {
+            dataChannelIsCC1 = false
+            lastControlPair = nil
+            return []
+        }
+
         let isControl = (b0 >= 0x10 && b0 <= 0x1F)
         if isControl {
+            dataChannelIsCC1 = b0 <= 0x17
             // Doubled control: suppress an identical immediately-repeated pair, but DON'T clear
             // `lastControlPair` (FFmpeg keeps prev_cmd set; only a standard char clears it).
             if let last = lastControlPair, last == (b0, b1) { return [] }
@@ -84,8 +100,9 @@ final class CEA608Decoder {
             return handleControl(b0, b1)
         }
 
-        // Standard character pair (channel-agnostic). Clears the doubled-control guard.
+        // Standard character pair of the current data channel. Clears the doubled-control guard.
         lastControlPair = nil
+        guard dataChannelIsCC1, !inTextService else { return [] }
         if b0 >= 0x20 {
             writeChar(Self.basicChar(b0))
             if b1 >= 0x20 { writeChar(Self.basicChar(b1)) }
@@ -105,6 +122,8 @@ final class CEA608Decoder {
     private func handleControl(_ b0: UInt8, _ b1: UInt8) -> [Action] {
         // CC1 (channel 1) uses b0 0x10–0x17; CC2 uses 0x18–0x1F. First cut: CC1 only.
         guard b0 <= 0x17 else { return [] }
+        if b0 == 0x14, let entersText = Self.serviceSwitch(b1) { inTextService = entersText }
+        guard !inTextService else { return [] }
 
         // Misc control: 0x14 + 0x20…0x2F.
         if b0 == 0x14, b1 >= 0x20, b1 <= 0x2F {
@@ -142,6 +161,15 @@ final class CEA608Decoder {
             return []
         }
         return []
+    }
+
+    /// RCL, RU2-4 and RDC enter the caption service; TR and RTD enter the text service. Nil for the rest.
+    private static func serviceSwitch(_ b1: UInt8) -> Bool? {
+        switch b1 {
+        case 0x20, 0x25, 0x26, 0x27, 0x29: return false
+        case 0x2A, 0x2B: return true
+        default: return nil
+        }
     }
 
     private func handleMiscControl(_ b1: UInt8) -> [Action] {

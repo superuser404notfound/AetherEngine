@@ -1212,6 +1212,7 @@ In-band CEA-608 (`eia_608` / QuickTime `c608`, a demuxable caption track) produc
 - Instead, a read-only tap on the segment producer's existing source connection reads the caption track's `cc_data`. Its packets are kept in the demuxer's keep-set, observed, then dropped. They are never muxed, so the loopback-HLS output stays byte-identical.
 - An in-house line-21 decoder (validated against FFmpeg's `ccaption_dec.c`) turns it into cues, and they publish on the same `subtitleCues` overlay path as every other codec.
 - First cut: field-1 / channel CC1 only. CEA-708 (DTVCC) and field 2 are follow-ons.
+- Field 1 also carries CC2, the text service T1 and XDS packets (the network name, for one). Characters follow the data channel of the last control code, and CC1's TR and RTD switch to the text service until RCL, RU2-4 or RDC. Only CC1 caption characters reach the screen.
 
 **Captions inside the video bitstream (#131).** Captions carried only inside the video (ATSC A/53 `cc_data`, the US broadcast/cable case) are extracted too:
 
