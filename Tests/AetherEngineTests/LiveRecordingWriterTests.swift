@@ -416,7 +416,7 @@ struct LiveRecordingWriterTests {
 
     /// An HEVC stream carrying the Dolby Vision configuration record the TS demuxer reads from a
     /// source's DOVI video stream descriptor.
-    private func makeDolbyVisionParameters(profile: UInt8, compatibility: UInt8) -> UnsafeMutablePointer<AVCodecParameters> {
+    private func makeDolbyVisionParameters(profile: UInt8, compatibility: UInt8) throws -> UnsafeMutablePointer<AVCodecParameters> {
         let p = avcodec_parameters_alloc()!
         p.pointee.codec_type = AVMEDIA_TYPE_VIDEO
         p.pointee.codec_id = AV_CODEC_ID_HEVC
@@ -430,8 +430,14 @@ struct LiveRecordingWriterTests {
         dovi.pointee.rpu_present_flag = 1
         dovi.pointee.bl_present_flag = 1
         dovi.pointee.dv_bl_signal_compatibility_id = compatibility
-        _ = av_packet_side_data_add(&p.pointee.coded_side_data, &p.pointee.nb_coded_side_data,
-                                    AV_PKT_DATA_DOVI_CONF, dovi, size, 0)
+        // On failure the record stays ours, so free it here instead of failing later on a nil profile.
+        guard av_packet_side_data_add(&p.pointee.coded_side_data, &p.pointee.nb_coded_side_data,
+                                      AV_PKT_DATA_DOVI_CONF, dovi, size, 0) != nil else {
+            av_free(dovi)
+            var q: UnsafeMutablePointer<AVCodecParameters>? = p
+            avcodec_parameters_free(&q)
+            throw RecordingFailure.writeFailed("could not attach the Dolby Vision record")
+        }
         return p
     }
 
@@ -456,8 +462,9 @@ struct LiveRecordingWriterTests {
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let params = makeDolbyVisionParameters(profile: profile, compatibility: compatibility)
-        defer { free(params) }
+        let params = try makeDolbyVisionParameters(profile: profile, compatibility: compatibility)
+        // avcodec_parameters_free, not free: the codecpar owns the side data.
+        defer { var q: UnsafeMutablePointer<AVCodecParameters>? = params; avcodec_parameters_free(&q) }
 
         let writer = try LiveRecordingWriter(
             url: url,
@@ -468,7 +475,8 @@ struct LiveRecordingWriterTests {
             onFailure: { _ in }
         )
         for i in 0..<10 {
-            // HEVC NAL header: type 19 (IDR_W_RADL) then type 1 (TRAIL_R), layer 0, tid 1.
+            // First HEVC NAL header byte only: type 19 (IDR_W_RADL), then type 1 (TRAIL_R). The
+            // second byte is filler, which the muxer never reads.
             let payload = annexBPayload(1024, nalType: i == 0 ? 0x26 : 0x02)
             payload.withUnsafeBytes { buf in
                 writer.accept(packetBytes: buf, sourceStreamIndex: 0,
