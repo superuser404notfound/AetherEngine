@@ -1178,7 +1178,6 @@ final class SoftwarePlaybackHost {
             && dolbyVisionHandling == .automatic
     }
 
-    /// Whether `decoder` is a `DualLayerVideoDecoder`; always false without the trait.
     /// Set on the decoder before it opens for playback: 10-bit AV1 converts on the GPU with up to two frames
     /// in flight while dav1d decodes the next, instead of the decode thread waiting for each (the decoder's
     /// own flush, drain and close settle them). The probe and the still extractor open theirs without it.
@@ -1186,6 +1185,7 @@ final class SoftwarePlaybackHost {
         (decoder as? SoftwareVideoDecoder)?.overlapsGPUConversion = true
     }
 
+    /// Whether `decoder` is a `DualLayerVideoDecoder`; always false without the trait.
     nonisolated static func isDualLayer(_ decoder: any VideoDecodingPipeline) -> Bool {
         #if DualLayerDolbyVision
         return decoder is DualLayerVideoDecoder

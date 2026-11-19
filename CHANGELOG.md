@@ -37,8 +37,8 @@ the public-API contract.
   converted each frame to P010 with its film grain on the GPU, then waited for the GPU before it took the
   next. On an Apple TV 4K (A15) a 1080p 23.976 fps episode reached the renderer at 22 to 23 frames a second,
   and the clock paused to rebuffer every 4.5 to 8 s. Now up to two frames convert on the GPU while dav1d
-  decodes the next, and the episode plays at 24 fps without a pause, in Debug and Release builds alike. A
-  frame neither the GPU nor `sws_scale` could convert is dropped rather than shown unwritten.
+  decodes the next, and the episode plays at 24 fps without a pause in the host's Debug build (a Release
+  build on the device was not measured). A frame neither the GPU nor `sws_scale` could convert is dropped rather than shown unwritten.
 - **10-bit AV1 with film grain keeps up in a host's Debug build.** The film grain tables are built on the
   decoder's thread for every frame. Written with `Array` and `for ... in`, they took 40.8 ms a frame
   unoptimised on an M1, and the encode around them 40 to 44 ms on an Apple TV 4K (A15): the whole frame
