@@ -11,7 +11,7 @@
 //                        [--discontinuity-at N] [--slow-refresh]
 //                        [--drop-segment N] [--encrypted] [--fmp4] [--self-test]
 //                        [--require-header "Name: Value"] [--redirect-entry]
-//                        [--redirect-host localhost]
+//                        [--redirect-host localhost] [--recording-backlog N]
 //
 // Slicing
 // -------
@@ -59,6 +59,10 @@
 //                        the way a portal-to-CDN handoff does.
 // --media-origin H:P     Master's variant URIs point at that origin absolutely
 //                        (portal serves the master, CDN the media playlist).
+// --recording-backlog N A recording in progress (AE#1090): the playlist keeps
+//                        every segment from MEDIA-SEQUENCE 0 and grows, and N
+//                        segments are already listed when the server starts.
+//                        --window is ignored.
 // --deny-status N        Refuse with N instead of 403 (401 reaches the engine
 //                        as a different NSURLError code, so both are cases).
 // --deny-segments-only   Enforce the header on .ts requests only: the refusal
@@ -126,6 +130,7 @@ func runHLSFixture(args: [String]) -> Int32 {
     let windowSegs    = takeIntFlag("--window", from: &rest) ?? 6
     let discAt        = takeIntFlag("--discontinuity-at", from: &rest)
     let dropSeg       = takeIntFlag("--drop-segment", from: &rest)
+    let recordingBacklog = takeIntFlag("--recording-backlog", from: &rest)
     // An advertised TD below ceil(max EXTINF) is not a stricter origin, it is an invalid playlist.
     if let td = advertisedTD, td < segSeconds {
         print("ERROR: --target-duration must be >= --segment-seconds (HLS requires TD >= ceil(max EXTINF));"
@@ -200,7 +205,8 @@ func runHLSFixture(args: [String]) -> Int32 {
         enforceOnSegmentsOnly: denySegments,
         redirectEntryToHost: redirectEntry ? redirectHost : nil,
         redirectEntryToPort: redirectPort,
-        absoluteMediaOrigin: mediaOrigin
+        absoluteMediaOrigin: mediaOrigin,
+        recordingBacklogSegments: recordingBacklog.map { max(0, $0) }
     )
     let server = HLSFixtureServer(config: config)
     // UInt16(exactly:) rejects out-of-range port values instead of wrapping silently.
@@ -413,6 +419,9 @@ struct HLSFixtureConfig {
     /// hands out (master here, media and segments on the CDN) and a different question from the
     /// redirect: whether a client carries its origin headers to a host the PLAYLIST names.
     var absoluteMediaOrigin: String? = nil
+    /// AE#1090: a recording in progress. The playlist never slides: it lists every segment from 0,
+    /// starting this many deep, and grows on the same real-time timer. nil = sliding window.
+    var recordingBacklogSegments: Int? = nil
 }
 
 // MARK: - HTTP server
@@ -641,12 +650,12 @@ final class HLSFixtureServer: @unchecked Sendable {
     /// Media-sequence number derived from wall-clock elapsed time; advances by 1 per segmentSeconds.
     private func currentSequence() -> Int {
         let elapsed = Date().timeIntervalSince(startTime)
-        return max(0, Int(elapsed / Double(config.segmentSeconds)))
+        return max(0, Int(elapsed / Double(config.segmentSeconds))) + (config.recordingBacklogSegments ?? 0)
     }
 
     private func mediaPlaylist() -> String {
         let seq = currentSequence()
-        let start = max(0, seq - config.windowSegments + 1)
+        let start = config.recordingBacklogSegments == nil ? max(0, seq - config.windowSegments + 1) : 0
 
         var lines: [String] = []
         lines.append("#EXTM3U")

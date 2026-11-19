@@ -63,6 +63,12 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// `LoadOptions.liveEdgeCushionSeconds`, validated, set by the engine before the first read: the
     /// join takes enough of the upstream listing to cover it (`HLSPlaylistTracker.joining(cushion:)`).
     private var _joinCushionSeconds: Double?
+    /// AE#1090: where the first batch begins (`LoadOptions.liveJoinsAtPlaylistStart`, or the reopen of
+    /// a session that joined there). Set before the first read.
+    private var _joinPoint: HLSPlaylistTracker.JoinPoint = .liveEdge
+    /// AE#1090: media sequence of the first segment not yet delivered to the FIFO, so a reopen of a
+    /// session behind the edge resumes there instead of jumping to live.
+    private var _nextUndeliveredSequence: Int?
     /// The Retry-After of the last refused playlist request, taken by the refresh loop as it waits.
     private var _playlistRetryAfter: TimeInterval?
 
@@ -213,8 +219,23 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         return _joinCushionSeconds
     }
 
+    /// AE#1090: `LoadOptions.liveJoinsAtPlaylistStart`. Set before the first read.
+    func setJoinsAtPlaylistStart(_ joinsAtStart: Bool) {
+        setJoinPoint(joinsAtStart ? .playlistStart : .liveEdge)
+    }
+
+    func setJoinPoint(_ point: HLSPlaylistTracker.JoinPoint) {
+        startLock.withLock { _joinPoint = point }
+    }
+
+    var joinPoint: HLSPlaylistTracker.JoinPoint {
+        startLock.withLock { _joinPoint }
+    }
+
     private func installCompanion(_ companion: HLSLiveIngestReader) {
         companion.setJoinCushion(joinCushionSeconds)
+        // The companion never reopens on its own, so only the first join point carries over.
+        if joinPoint != .liveEdge { companion.setJoinPoint(.playlistStart) }
         startLock.lock()
         let raceClosed = closed
         if !raceClosed { _companionAudioReader = companion }
@@ -247,6 +268,13 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                                         followsSessionHeaders: followsSessionHeaders)
         if let store = startLock.withLock({ _headerStore }) { fresh.adoptSessionHeaderStore(store) }
         fresh.setJoinCushion(joinCushionSeconds)
+        // AE#1090: a session behind the edge picks up where this reader stopped delivering. The bytes
+        // still in the dead FIFO are lost either way, which is a few seconds at 1x pacing, against the
+        // whole delay a live-edge rejoin would throw away.
+        let (point, resume) = startLock.withLock { (_joinPoint, _nextUndeliveredSequence) }
+        if point != .liveEdge {
+            fresh.setJoinPoint(resume.map { .sequence($0) } ?? point)
+        }
         return fresh
     }
 
@@ -348,7 +376,10 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             // A media playlist the host's URL led to directly (through redirects, as an IPTV panel's
             // tokenized session URL), which that URL can lead to afresh when the session expires.
             let mediaURLIsReresolvable = seedPlaylist != nil && mediaURL != playlistURL
-            var tracker = HLSPlaylistTracker.joining(cushion: joinCushionSeconds)
+            let joinPoint = self.joinPoint
+            var tracker = HLSPlaylistTracker.joining(cushion: joinCushionSeconds, at: joinPoint)
+            // AE#1090: set by a join behind the live edge, dropped when the tracker loses that position.
+            var pacer: LiveBacklogPacer?
             var loggedEncryptedDirectPlay = false
             var refreshInterval: Double = 2
             var pendingPlaylist: HLSMediaPlaylist? = seedPlaylist
@@ -390,13 +421,35 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                 let isJoin = !sniffedFirstSegment
                 let fresh = tracker.newSegments(in: media)
                 if tracker.stallCount > 6 { throw HLSIngestError.ingestStalled }
-                if !fresh.isEmpty {
+                if pacer != nil, !fresh.isEmpty, tracker.lastBatchRejoinedAtEdge {
+                    pacer = nil
+                    EngineLog.emit(
+                        "[HLSIngest] AE#1090: the playlist dropped the segments behind the delayed position; "
+                        + "rejoined at the live edge, backlog pacing off",
+                        category: .engine
+                    )
+                }
+                // AE#1090: the burst a join behind the edge delivers at once; the rest of the batch is paced.
+                var joinBurst: Int?
+                if isJoin, !fresh.isEmpty, joinPoint != .liveEdge {
+                    let coverage = tracker.joinCoverageSeconds(in: media)
+                    let burst = HLSPlaylistTracker.behindEdgeJoinBurstDepth(
+                        durations: fresh.map(\.duration), coverage: coverage, limit: tracker.edgeOffset)
+                    let lead = fresh.prefix(burst).reduce(0.0) { $0 + $1.duration }
+                    pacer = LiveBacklogPacer(anchor: Self.monotonicNow(), leadSeconds: lead)
+                    joinBurst = burst
+                }
+                // AE#1090: a paced batch arrives as it is released (in the delivery callback below), so
+                // the cadence the engine shapes its playlist around is the release cadence, not one
+                // batch per refresh. Its join burst is the one arrival that happens here.
+                let arrivedNow = joinBurst.map { Array(fresh.prefix($0)) } ?? (pacer == nil ? fresh : [])
+                if !arrivedNow.isEmpty {
                     // Real arrival of new content: the interval since the previous arrival is the observed
                     // cadence the engine shapes the local playlist around (AetherEngine#167). The longest
                     // segment served rides along, because it bounds that cadence from below before any
                     // interval has closed, which is when the served TARGETDURATION is sealed (AE#447).
                     let now = Self.monotonicNow()
-                    let longest = fresh.reduce(0.0) { max($0, $1.duration) }
+                    let longest = arrivedNow.reduce(0.0) { max($0, $1.duration) }
                     startLock.withLock {
                         _cadenceMeter.recordArrival(at: now)
                         if longest > 0 {
@@ -411,16 +464,53 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                         startLock.withLock { _joinWallClock = joinDate }
                     }
                     let backlog = fresh.reduce(0.0) { $0 + $1.duration }
-                    startLock.withLock { _joinBacklogSeconds = backlog }
-                    EngineLog.emit(
-                        "[HLSIngest] joined \(fresh.count) segment(s), ~\(String(format: "%.0f", backlog))s behind the live edge"
-                        + " pdt=\(fresh.first?.programDateTime.map { "\($0)" } ?? "nil")",
-                        category: .engine
-                    )
+                    if let joinBurst, let pacer {
+                        // AE#684 reads the join as what is delivered before the first serve, which here
+                        // is the burst, not the listing.
+                        startLock.withLock { _joinBacklogSeconds = pacer.leadSeconds }
+                        EngineLog.emit(
+                            "[HLSIngest] AE#1090: joined at the \(joinPoint == .playlistStart ? "playlist start" : "resume point"): "
+                            + "\(fresh.count) segment(s), ~\(String(format: "%.0f", backlog))s behind the live edge; "
+                            + "first \(joinBurst) (~\(String(format: "%.0f", pacer.leadSeconds))s) at once, the rest at 1x"
+                            + " pdt=\(fresh.first?.programDateTime.map { "\($0)" } ?? "nil")",
+                            category: .engine
+                        )
+                    } else {
+                        startLock.withLock { _joinBacklogSeconds = backlog }
+                        EngineLog.emit(
+                            "[HLSIngest] joined \(fresh.count) segment(s), ~\(String(format: "%.0f", backlog))s behind the live edge"
+                            + " pdt=\(fresh.first?.programDateTime.map { "\($0)" } ?? "nil")",
+                            category: .engine
+                        )
+                    }
                 }
 
                 if !fresh.isEmpty {
-                    guard try await ingestSegmentBatch(fresh, mediaURL: mediaURL) else {
+                    var dueTimes: [Double]?
+                    if var schedule = pacer {
+                        dueTimes = fresh.map { schedule.dueTime(forNextSegmentOfDuration: $0.duration) }
+                        pacer = schedule
+                    }
+                    let firstSequence = tracker.lastBatchFirstSequence
+                    let pacedArrivalsFrom = joinBurst ?? 0
+                    let durations = fresh.map(\.duration)
+                    guard try await ingestSegmentBatch(fresh, mediaURL: mediaURL, dueTimes: dueTimes,
+                                                       onDelivered: { [self] index in
+                        let now = Self.monotonicNow()
+                        startLock.withLock {
+                            if let firstSequence { _nextUndeliveredSequence = firstSequence + index + 1 }
+                            if dueTimes != nil, index >= pacedArrivalsFrom {
+                                _cadenceMeter.recordArrival(at: now)
+                                if durations[index] > 0 {
+                                    _upstreamSegmentDurationSeconds = max(_upstreamSegmentDurationSeconds ?? 0,
+                                                                          durations[index])
+                                }
+                            }
+                            // The first serve waits on the join being committed, which for a paced join
+                            // is its burst.
+                            if isJoin, let joinBurst, index + 1 == joinBurst { _joinBatchCommitted = true }
+                        }
+                    }) else {
                         return // FIFO closed underneath us
                     }
                     if isJoin { startLock.withLock { _joinBatchCommitted = true } }
@@ -457,7 +547,13 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// FIFO write) is unchanged. In-flight bytes are held in memory, decoupled from FIFO
     /// backpressure; the window is anchored at the commit point, bounding buffered segments to the
     /// window size even when the head segment is slow. Returns false when the FIFO was closed.
-    private func ingestSegmentBatch(_ segments: [HLSMediaSegment], mediaURL: URL) async throws -> Bool {
+    ///
+    /// AE#1090: `dueTimes` (monotonic seconds, one per segment) holds each fetch back until its time;
+    /// nil fetches as fast as the window allows. `onDelivered` runs for every segment in playlist order
+    /// once it is in the FIFO or was skipped as gone.
+    private func ingestSegmentBatch(_ segments: [HLSMediaSegment], mediaURL: URL,
+                                    dueTimes: [Double]? = nil,
+                                    onDelivered: (Int) -> Void = { _ in }) async throws -> Bool {
         // Resolve every URI upfront so an unresolvable one throws before any fetch is spawned.
         let resolved: [(segment: HLSMediaSegment, url: URL)] = try segments.map { segment in
             guard let url = HLSPlaylistParser.resolve(uri: segment.uri, against: mediaURL) else {
@@ -472,12 +568,28 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             var nextToCommit = 0
             var ready: [Int: Data] = [:]
 
-            while nextToSpawn < resolved.count,
-                  nextToSpawn < nextToCommit + window {
-                spawnFetch(into: &group, index: nextToSpawn, item: resolved[nextToSpawn], mediaURL: mediaURL)
-                nextToSpawn += 1
+            func isDue(_ index: Int) -> Bool {
+                guard let dueTimes else { return true }
+                return dueTimes[index] <= Self.monotonicNow()
             }
+            func spawnDue() {
+                while nextToSpawn < resolved.count,
+                      nextToSpawn < nextToCommit + window,
+                      isDue(nextToSpawn) {
+                    spawnFetch(into: &group, index: nextToSpawn, item: resolved[nextToSpawn], mediaURL: mediaURL)
+                    nextToSpawn += 1
+                }
+            }
+
+            spawnDue()
             while nextToCommit < resolved.count {
+                if nextToSpawn == nextToCommit, let dueTimes {
+                    // Nothing in flight and the next segment is not due: sleep until it is.
+                    let wait = dueTimes[nextToSpawn] - Self.monotonicNow()
+                    if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+                    spawnDue()
+                    continue
+                }
                 guard let (index, bytes) = try await group.next() else { break }
                 ready[index] = bytes
                 while let head = ready.removeValue(forKey: nextToCommit) {
@@ -489,7 +601,10 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                         // heuristic downstream; a deterministic force-cut hint is a P2 item.
                         EngineLog.emit("[HLSIngest] discontinuity seam before segment \(segment.uri)", category: .engine)
                     }
-                    if head.isEmpty { continue } // 404: slid out of the provider window
+                    if head.isEmpty { // 404: slid out of the provider window
+                        onDelivered(nextToCommit - 1)
+                        continue
+                    }
                     if !sniffedFirstSegment {
                         sniffedFirstSegment = true
                         try classifyFirstSegment(head)
@@ -498,12 +613,9 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                         group.cancelAll()
                         return false
                     }
+                    onDelivered(nextToCommit - 1)
                 }
-                while nextToSpawn < resolved.count,
-                      nextToSpawn < nextToCommit + window {
-                    spawnFetch(into: &group, index: nextToSpawn, item: resolved[nextToSpawn], mediaURL: mediaURL)
-                    nextToSpawn += 1
-                }
+                spawnDue()
             }
             return true
         }

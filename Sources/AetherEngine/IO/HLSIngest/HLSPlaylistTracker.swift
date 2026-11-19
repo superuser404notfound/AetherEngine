@@ -6,10 +6,30 @@ import Foundation
 ///
 /// `edgeOffset` is a sanity bound on the burst, not the policy. It used to be 3, which is a COUNT standing in for a burst measured in SECONDS, and the coverage term above already bounds long segments on its own (6s segments break at 12s, 12s segments at 24s). So the count only ever bound SHORT segments, which are exactly the sources the 8s coverage floor was written for, and it cut them to a third of it. The cost was not only buffer: three joined segments yield only TWO finalized ones downstream, because the last one is still open until the next arrives, and the loopback startup cushion wants three. The live join therefore waited one upstream segment duration in wall clock for content the origin was already holding. Measured on `hlsfixture --window 8` with `play --live --fast-zap` (three runs per row, engine 6.76.1 against this change): first picture on a 2s-segment channel 2.22s before, 0.20s after; on 1s segments 0.41 to 1.22s before (it depended on where in the upstream segment cycle the tune landed) against 0.18 to 0.20s after, the phase dependency gone with it. A window three segments deep has nothing deeper to join into and is unchanged. The origin request log is what says the depth is not paid back later: both arms fetch up to the same upstream segment number at the same wall clock, so the burst is caught up at I/O speed rather than becoming a standing lag behind the live edge.
 struct HLSPlaylistTracker {
-    private let edgeOffset: Int          // max segments behind the live edge on join
+    /// AE#1090: where the first batch begins. Every later rejoin (window slid past the cursor, a
+    /// MEDIA-SEQUENCE reset) is at the live edge whatever this says, because the content behind the
+    /// edge that the join wanted is then gone.
+    enum JoinPoint: Equatable {
+        /// The few segments that cover the join, counted back from the newest (the default).
+        case liveEdge
+        /// The oldest listed segment and everything after it (`LoadOptions.liveJoinsAtPlaylistStart`).
+        case playlistStart
+        /// This media sequence and everything after it, or the oldest listed one when it has already
+        /// left the window. The in-engine reopen of a session that joined behind the edge.
+        case sequence(Int)
+    }
+
+    let edgeOffset: Int                  // max segments behind the live edge on join
     private let minJoinCoverageSeconds: Double // floor for the duration-coverage target
+    private let joinPoint: JoinPoint
     private(set) var nextSequence: Int?  // next media-sequence not yet returned; nil until primed
     private(set) var stallCount = 0
+    /// Media sequence of the first segment of the last non-empty batch. The reader adds the commit
+    /// index to it to know which segment it has delivered last (AE#1090 reopen).
+    private(set) var lastBatchFirstSequence: Int?
+    /// AE#1090: the last non-empty batch was a rejoin at the live edge after the first join, so a
+    /// session that joined behind the edge has lost that position.
+    private(set) var lastBatchRejoinedAtEdge = false
     /// #199: consecutive refreshes whose whole window sits BEHIND the cursor (MEDIA-SEQUENCE went
     /// backward: encoder restart, looped test pool). One or two can be a stale CDN edge; at the
     /// threshold the axis is treated as reset and the tracker rejoins at the new edge. Regressions
@@ -114,20 +134,47 @@ struct HLSPlaylistTracker {
     /// only costs the bounded start's grace, which is what every join paid before AE#678.
     static let openGOPMarginSeconds: Double = 4
 
-    init(edgeOffset: Int = 8, minJoinCoverageSeconds: Double = 8) {
+    init(edgeOffset: Int = 8, minJoinCoverageSeconds: Double = 8, joinPoint: JoinPoint = .liveEdge) {
         self.edgeOffset = edgeOffset
         self.minJoinCoverageSeconds = minJoinCoverageSeconds
+        self.joinPoint = joinPoint
     }
 
     /// A tracker whose join covers a host's `liveEdgeCushionSeconds` as well as the loopback's own
     /// holdback, so a listing that holds the backlog fills the cushion at link speed instead of at 1x.
     /// The segment cap grows with it on the assumption of segments of a second or longer; the
     /// coverage, not the cap, ends the join on every listing deep enough to meet it.
-    static func joining(cushion: Double?) -> HLSPlaylistTracker {
-        guard let cushion, cushion.isFinite, cushion > 0 else { return HLSPlaylistTracker() }
+    static func joining(cushion: Double?, at joinPoint: JoinPoint = .liveEdge) -> HLSPlaylistTracker {
+        guard let cushion, cushion.isFinite, cushion > 0 else {
+            return HLSPlaylistTracker(joinPoint: joinPoint)
+        }
         let coverage = cushion + openGOPMarginSeconds
         return HLSPlaylistTracker(edgeOffset: max(8, Int(coverage.rounded(.up))),
-                                  minJoinCoverageSeconds: max(8, coverage))
+                                  minJoinCoverageSeconds: max(8, coverage),
+                                  joinPoint: joinPoint)
+    }
+
+    /// The seconds a join wants delivered before the first serve, the same at either end of the
+    /// listing: the coverage floor, one and a half upstream target durations, and what the loopback's
+    /// own holdback asks for (AE#678).
+    func joinCoverageSeconds(in playlist: HLSMediaPlaylist) -> Double {
+        max(minJoinCoverageSeconds, 1.5 * playlist.targetDuration,
+            Self.loopbackCushionCoverageSeconds(segments: playlist.segments))
+    }
+
+    /// AE#1090: how many segments from the FRONT of a batch a join behind the edge delivers at once,
+    /// which is the edge join's coverage rule run forwards: segments until `coverage` is met, at most
+    /// `limit`. What follows is released at 1x (`LiveBacklogPacer`), so the first serve waits for the
+    /// same few seconds an edge join does and not for the backlog.
+    static func behindEdgeJoinBurstDepth(durations: [Double], coverage: Double, limit: Int) -> Int {
+        var taken = 0
+        var seconds = 0.0
+        for duration in durations {
+            if taken >= limit || seconds >= coverage { break }
+            taken += 1
+            seconds += duration
+        }
+        return taken
     }
 
     mutating func newSegments(in playlist: HLSMediaPlaylist) -> [HLSMediaSegment] {
@@ -153,8 +200,7 @@ struct HLSPlaylistTracker {
         }
 
         func joinStart() -> Int {
-            let coverage = max(minJoinCoverageSeconds, 1.5 * playlist.targetDuration,
-                               Self.loopbackCushionCoverageSeconds(segments: playlist.segments))
+            let coverage = joinCoverageSeconds(in: playlist)
             let limit = Self.joinSegmentLimit(edgeOffset: edgeOffset,
                                               windowSegmentCount: playlist.segments.count)
             let taken = Self.phaseEqualisedJoinDepth(durations: playlist.segments.map(\.duration),
@@ -162,9 +208,33 @@ struct HLSPlaylistTracker {
             return windowEnd &- taken
         }
 
+        func batch(from sequence: Int, markFirstDiscontinuity: Bool, edgeRejoin: Bool) -> [HLSMediaSegment] {
+            let result = segments(from: sequence, markFirstDiscontinuity: markFirstDiscontinuity)
+            if !result.isEmpty {
+                lastBatchFirstSequence = max(sequence, windowStart)
+                lastBatchRejoinedAtEdge = edgeRejoin
+            }
+            return result
+        }
+
         guard let cursor = nextSequence else {
-            nextSequence = windowEnd
-            return segments(from: joinStart(), markFirstDiscontinuity: false)
+            switch joinPoint {
+            case .liveEdge:
+                nextSequence = windowEnd
+                return batch(from: joinStart(), markFirstDiscontinuity: false, edgeRejoin: false)
+            case .playlistStart:
+                nextSequence = windowEnd
+                return batch(from: windowStart, markFirstDiscontinuity: false, edgeRejoin: false)
+            case .sequence(let resume):
+                guard resume < windowEnd else {
+                    // Not listed yet (a refresh served by a lagging edge): wait for it rather than
+                    // replay what the previous reader already delivered.
+                    nextSequence = resume
+                    return []
+                }
+                nextSequence = windowEnd
+                return batch(from: max(resume, windowStart), markFirstDiscontinuity: false, edgeRejoin: false)
+            }
         }
 
         if cursor < windowStart {
@@ -172,7 +242,7 @@ struct HLSPlaylistTracker {
             nextSequence = windowEnd
             stallCount = 0
             sequenceRegressionCount = 0
-            return segments(from: joinStart(), markFirstDiscontinuity: true)
+            return batch(from: joinStart(), markFirstDiscontinuity: true, edgeRejoin: true)
         }
 
         if cursor > windowEnd {
@@ -184,11 +254,11 @@ struct HLSPlaylistTracker {
             nextSequence = windowEnd
             stallCount = 0
             sequenceRegressionCount = 0
-            return segments(from: joinStart(), markFirstDiscontinuity: true)
+            return batch(from: joinStart(), markFirstDiscontinuity: true, edgeRejoin: true)
         }
         sequenceRegressionCount = 0
 
-        let fresh = segments(from: cursor, markFirstDiscontinuity: false)
+        let fresh = batch(from: cursor, markFirstDiscontinuity: false, edgeRejoin: false)
         if fresh.isEmpty {
             stallCount += 1
         } else {

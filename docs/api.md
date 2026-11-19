@@ -1686,6 +1686,29 @@ Both are recoveries, not opinions about where a viewer should be. Both are silen
 
 **Where did a seek land?** Use `SeekEvent.landed(renderedTime:)` on `$seekEvents`. `await seek(to:)` returns no position, so a harness that records its own requested target reports an intention, not an outcome.
 
+### Starting a recording in progress from its beginning
+
+Set `liveJoinsAtPlaylistStart: true` and load the recording's live playlist through the ingest. The session then plays as if it had been tuned in when the recording started (AE#1090).
+
+```swift
+let reader = HLSLiveIngestReader(playlistURL: recordingPlaylistURL)
+try await engine.load(source: .custom(reader, formatHint: "mpegts"),
+                      options: LoadOptions(isLive: true, dvrWindowSeconds: 4 * 3600,
+                                           liveJoinsAtPlaylistStart: true))
+```
+
+The playlist has to list the whole recording. A DVR serves that for a recording that is still running: Plex's live session playlist with `offset=0`, for one, starts at `#EXT-X-MEDIA-SEQUENCE:0` and keeps growing. A live HLS URL the engine routes onto its own ingest takes the flag too.
+
+**What happens.** The join delivers the same few seconds an edge join would (8 s or more, see [Where a live start's seconds go](#where-a-live-starts-seconds-go)), so the first picture comes as fast as on any live channel. The rest of the backlog is fetched at 1x, one segment as the previous one is needed. The rewind window grows from the start of the recording, as far as `dvrWindowSeconds` and the disk budget allow.
+
+**It stays behind live.** Nothing past the playhead plus those few seconds has been fetched, so a seek forward ends at the session's own edge, not at the recording's. That is deliberate: fetching an hour of backlog at link speed would push the start out of the window before anyone watched it. For "jump to live", load again without the flag.
+
+**Limits.**
+
+- The ingest path only. `nativeRemoteHLS` keeps AVPlayer's own edge join and ignores the flag.
+- An in-engine reopen after an ingest failure resumes at the first segment the old reader had not delivered, not at the edge. A host retune is a new load and starts wherever the host's options say.
+- On a playlist that slides, the session runs about one window behind live. If the window ever slides past what the session still needs, it rejoins at the live edge with a discontinuity and logs `AE#1090: ... rejoined at the live edge`.
+
 ## Recording a live stream
 
 | Symbol | Notes |
@@ -2456,6 +2479,7 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
 | `softwareDVRRetention` | nil | Opts the software live spool into `SoftwareDVRRetentionOptions` (`startupMaximumBytes`, `playbackCushionBytes`, `playbackCushionSeconds`), and with that into `setSoftwareLiveDVRLimits`. nil keeps the default spool. |
 | `clampsLiveResumeToWindow` | true | Whether `play()` may move a behind-live playhead by itself: a snap to the edge on a live-only source more than 45 s behind, or a landing above the retained floor when a DVR window has slid past it. `false` hands the whole decision to the host, which then also owns the eviction case. |
 | `liveEdgeCushionSeconds` | nil | How far behind the live edge a live session plays, in seconds. See [`liveEdgeCushionSeconds`](#liveedgecushionseconds). |
+| `liveJoinsAtPlaylistStart` | false | Joins a live HLS ingest at the oldest segment its playlist lists instead of near the edge, for "start from the beginning" on a recording in progress. See [Starting a recording in progress from its beginning](#starting-a-recording-in-progress-from-its-beginning). |
 | `liveJoinStartsImmediately` | true | Cuts AVPlayer's stall-avoidance wait short once at the live join, on an item that has reached `readyToPlay`, over a buffer that is non-empty and at least 1.5 s deep (AE#684). No host can reach this join wait otherwise. See [The tail after the first serve](#the-tail-after-the-first-serve-and-which-signal-survives-it). |
 | `liveBlockingReload` | nil (auto) | LL-HLS blocking-reload override for loopback live sessions. Auto decides from the observed upstream cadence, which is what keeps a bursty relay out of a `-15410` loop. |
 | `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Built for `isLive: true`; a remote HLS VOD URL reaches this route anyway (AE#154). The clock here is item time; see `clock.$sourceTime` (AE#616). |

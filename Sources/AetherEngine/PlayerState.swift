@@ -859,6 +859,26 @@ public struct LoadOptions: Sendable, Equatable {
     /// AVPlayer's own policy for the join.
     public var liveJoinStartsImmediately: Bool = true
 
+    /// Join a live HLS ingest at the oldest segment its playlist lists instead of near the live edge.
+    /// Default `false` (AE#1090).
+    ///
+    /// For "start from the beginning" on a recording that is still running: a DVR's playlist for an
+    /// in-progress recording (Plex's `offset=0`, for one) lists every segment since the recording
+    /// began and keeps growing. The session then plays as if it had been tuned in when the recording
+    /// started: the first serve waits for the same few seconds an edge join does, the rest of the
+    /// backlog is fetched at 1x as it is needed, and the rewind window grows from the start of the
+    /// recording. It stays that far behind live for the whole session, since nothing past the playhead
+    /// plus the join's few seconds has been fetched yet. A host that offers "jump to live" reloads
+    /// without the flag.
+    ///
+    /// Applies to the live ingest path only: an `HLSLiveIngestReader` loaded as `.custom`, or a live
+    /// HLS URL the engine routes onto its own ingest. `nativeRemoteHLS` keeps AVPlayer's edge join. An
+    /// in-engine reopen after an ingest failure resumes at the first segment not yet delivered rather
+    /// than at the edge. On a playlist that slides, the session runs about one window behind live, and
+    /// should the window slide past what it still needs, it rejoins at the live edge with a
+    /// discontinuity. Ignored for VOD.
+    public var liveJoinsAtPlaylistStart: Bool = false
+
     /// Whether `play()` may move a behind-live playhead by itself. Default `true`, which is the historical
     /// behaviour (AE#444).
     ///
@@ -1268,6 +1288,7 @@ public struct LoadOptions: Sendable, Equatable {
         liveStartupSingleSegmentMinimumSeconds: Double? = nil,
         liveEdgeCushionSeconds: Double? = nil,
         liveJoinStartsImmediately: Bool = true,
+        liveJoinsAtPlaylistStart: Bool = false,
         clampsLiveResumeToWindow: Bool = true,
         nativeRemoteHLS: Bool = false,
         nativeRemoteHLSIngestFallback: Bool = true,
@@ -1342,6 +1363,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.liveStartupSingleSegmentMinimumSeconds = liveStartupSingleSegmentMinimumSeconds
         self.liveEdgeCushionSeconds = liveEdgeCushionSeconds
         self.liveJoinStartsImmediately = liveJoinStartsImmediately
+        self.liveJoinsAtPlaylistStart = liveJoinsAtPlaylistStart
         self.clampsLiveResumeToWindow = clampsLiveResumeToWindow
         self.nativeRemoteHLS = nativeRemoteHLS
         self.nativeRemoteHLSIngestFallback = nativeRemoteHLSIngestFallback
