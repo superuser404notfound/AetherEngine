@@ -100,6 +100,18 @@ the public-API contract.
   source can seek, so `canSeek` stayed false until the next load and a host hid its scrubber. The
   native path already learned it again from its new session (AE#1086).
 
+### Performance
+
+- **A fragmented MP4 over HTTP opens without a request per fragment.** libavformat indexes a fragmented MP4
+  that has no complete `sidx` by reading every `moof` before the open returns, one request each: a 4 minute,
+  96 fragment file took 24 s to its first frame on a 19 Mbps origin, and a 2 hour file would need about 2,800
+  requests. When the file ends in an `mfra`, `AVIOReader` now fetches the `moof` headers it lists side by side
+  and answers the walk from them (2.5 s to the first frame on the same file). With an FFmpegBuild that has
+  movdec's `lazy_frag_index`, the walk is skipped: the demuxer reads the first and last fragments, the segment
+  plan takes its keyframes from the `mfra` once they agree with those fragments, and the open needs one extra
+  request whatever the file's length (0.6 to 1.4 s to open on a WAN origin, the same plan and seek landings as the full
+  index). `AETHER_NO_FRAGMENT_HEADERS=1` and `AETHER_NO_LAZY_FRAGMENTS=1` turn either off.
+
 ## [7.70.0] - 2026-11-17
 
 ### Security

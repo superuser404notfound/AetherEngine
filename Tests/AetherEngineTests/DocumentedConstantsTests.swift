@@ -25,6 +25,14 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("0 (open), 1 (stream information), and 2 (read)", try documentation())
     }
 
+    func testFragmentHeaderFetchBoundsMatchDocumentation() throws {
+        let docs = try documentation()
+        XCTAssertEqual(AVIOReader.fragmentHeaderConnections, 8)
+        XCTAssertEqual(FragmentHeaderShare.retentionSeconds, 60)
+        assertDocumented("side by side, up to eight at a time within the origin's request budget", docs)
+        assertDocumented("to the other readers of the same source for 60 s", docs)
+    }
+
     func testLiveReplayQuarantineBoundsMatchDocumentation() throws {
         XCTAssertEqual(LivePacketReplayGuard.maximumPendingBytes, 96 * 1_024 * 1_024)
         XCTAssertEqual(LivePacketReplayGuard.maximumPendingPackets, 10_000)

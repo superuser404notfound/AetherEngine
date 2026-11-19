@@ -238,6 +238,7 @@ Notes:
 | `RangeHonestyProbe.swift` | Checks a ranged reconnect against bytes already held. The request starts a few KB early, and delivery waits until those KB match. A mismatch latches the reader into failing reads and records the origin, so the session fails as `sourceFabricatesRanges` instead of playing another chunk's bytes (AE#958). |
 | `ContentRange.swift` | One parser for a `Content-Range: bytes first-last/total` value, used by every ranged reader so they agree on case, order and the total (audit DMX-R202). |
 | `CustomIOReaderBridge.swift` | Bridges a host-supplied `IOReader` into `avio_alloc_context` read / seek callbacks, with the same read deadline and reversible read abort as `AVIOReader`, so bounded seeks also bound (and unwedge) disc-adapter sources. |
+| `FragmentedMP4RandomAccess.swift` | A fragmented MP4's video random-access points from its `mfra`, read before the open so the demuxer can index the file lazily, and the check that puts them on the index axis. |
 | `Demuxer.swift` | libavformat wrapper: seek, bounded seek, byte-estimate positioning fallback, per-open probe budgets. See note. |
 | `RedirectHeaderPolicy.swift` | Which headers are replayed on a redirect, for `AVIOReader` and every other engine session (audit NET-108, NET-109). See note. |
 | `SlowReadDiagnostics.swift` | One-shot explanation of a very slow `AVIOReader.read()` (detour fetch / connStall / reconnect / backoff / dropped-generation bytes), #93 restart latency. |

@@ -183,6 +183,17 @@ The only rewrite happens as the bytes are served: each moof gets the virtual fil
 - **Refused, with the reason in the error:** live manifests (`type="dynamic"`), more than one Period, `SegmentTemplate` and `SegmentList` addressing, an initialization segment in a separate file, hierarchical `sidx` (`reference_type` 1), and encryption (`ContentProtection`, `pssh`, `encv` / `enca`). An unplayable audio adaptation set is skipped when the video plays. An unplayable video one fails the load.
 - **Seeking a fragmented MP4.** libavformat indexes such a file one fragment at a time. Without a guard, a forward seek whose next sync sample starts an unread fragment lands on whatever later fragment an earlier read indexed (a start at 150 s and a seek to 60 s rendered 122 s). So `Demuxer.seek(to:streamIndex:)` checks the samples between the target and the chosen sync sample for a hole in the index. If it finds one, it lands on the sync sample before the target instead. This applies to every fragmented MP4, not only to DASH.
 
+### Fragmented MP4 over HTTP
+
+A fragmented MP4 (a `moov` with an `mvex`, then `moof` + `mdat` pairs) without a complete `sidx` has no up-front index. libavformat builds one while it opens by reading every top-level `moof` to the end of the file, one seek per fragment. Over HTTP each of those seeks is a request, so the open costs one request per fragment before the first packet: a 4 minute file of 96 fragments needs about 95, a 2 hour file of 2.6 s fragments about 2,800.
+
+When the file ends in an `mfra`, the engine avoids that in one of two ways:
+
+- **Lazy index** (FFmpegBuild with the `mov-lazy-frag-index` patch). Before the open, `FragmentedMP4RandomAccess` reads the head boxes, the `moov` and the `mfra` (both usually inside the bytes the open fetches anyway). When the `mfra` lists the video track's random-access points, the demuxer opens with movdec's `lazy_frag_index`: it reads the first fragment and the last one (for the durations) and finds the others as seeks need them. The keyframes the segment plan needs come from the `mfra`. A `tfra` time is the sync sample's presentation time, the index holds decode times, so the first indexed keyframe sets the shift between them, and every `tfra` entry of a fragment the demuxer has read must land on an indexed keyframe. When they agree, the plan is the keyframe-aligned plan a full index builds. When they do not, the `mfra` times are used as declared boundaries ([Segment plan](architecture-native.md#segment-plan)).
+- **Fragment header fetch** (any FFmpegBuild). The open walks every fragment as before, but `AVIOReader` fetches the ranges that hold the `moof` headers side by side, up to eight at a time within the origin's request budget, from the offsets the `mfra` lists, and answers the walk from them. Each `moof` it fetched is also offered to the other readers of the same source for 60 s, so the I-frame reader's walk as the session starts does not refetch them; a reader that opens later fetches its own. If the origin allows only one request at a time, the tail is not prefetched and the walk reads as before.
+
+The `mfra` decides where the plan may cut and which bytes are fetched early, never what a seek returns: the demuxer still reads and checks every `moof` it uses. A file without an `mfra`, or with one the engine cannot use (no video `tfra`, more than one video track, times that go backwards), is opened as before.
+
 ### Hardware decode
 
 Native AVPlayer path, VideoToolbox:

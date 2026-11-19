@@ -1685,12 +1685,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
             //    #268: a segmented time-seekable source (HLS VOD ingest) has no index libavformat could
             //    load, and each reposition refetches a segment, so prewarming would buy the same
             //    uniform-stride plan for the price of two segment downloads at every session start.
+            // A lazily indexed fragmented MP4 is the DASH case here too. The seek would read
+            // one fragment at the midpoint and the plan comes from the mfra instead.
+            let lazyFragments = !dem.lazyFragmentRandomAccessStartsSeconds.isEmpty
             if !Self.cuePrewarmMayRun(hasSegmentedReader: dem.timeSeekableReader != nil,
                                       isSourceSeekable: dem.isSourceSeekable,
-                                      isDASHSource: dem.isDASHSource) {
+                                      isDASHSource: dem.isDASHSource || lazyFragments) {
                 EngineLog.emit(
                     dem.timeSeekableReader != nil
                         ? "[HLSVideoEngine] cue prewarm: skipped for a segmented source (no index to load, every reposition refetches a segment)"
+                        : lazyFragments
+                        ? "[HLSVideoEngine] cue prewarm: skipped for a lazily indexed fragmented MP4 (the plan comes from its mfra)"
                         : dem.isDASHSource
                         ? "[HLSVideoEngine] cue prewarm: skipped for a DASH source (fragmented, no stss to load, AE#1075)"
                         : "[HLSVideoEngine] cue prewarm: skipped for a forward-only source (the seek would be a linear read, "
@@ -1710,7 +1715,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // 3. Build the segment plan. Uses the same cut algorithm as libavformat's hls muxer
             //    (first IDR at-or-after `(segIdx+1) * hls_time`); falls back to uniform stride
             //    if the index has < 2 entries (restart machinery handles any plan/muxer drift).
-            let keyframeEntries = dem.indexedKeyframeEntries(streamIndex: videoIndex)
+            // Lazy fragment index: the mfra's keyframes stand in for the full index when
+            // they agree with the fragments the demuxer has read, so the plan is the keyframe-aligned
+            // one a full index builds (and claims random access, which the I-frame rendition needs).
+            let lazyKeyframeEntries = lazyFragments ? dem.lazyFragmentKeyframeEntries(streamIndex: videoIndex) : nil
+            if lazyFragments {
+                EngineLog.emit(lazyKeyframeEntries.map {
+                    "[HLSVideoEngine] lazy fragment index: the mfra's \($0.count) keyframes agree with the indexed fragments, "
+                    + "keyframe-aligned plan from them"
+                } ?? "[HLSVideoEngine] lazy fragment index: the mfra and the indexed fragments disagree, "
+                    + "plan from its random access points as declared boundaries", category: .session)
+            }
+            let keyframeEntries = lazyKeyframeEntries ?? dem.indexedKeyframeEntries(streamIndex: videoIndex)
             let keyframes = keyframeEntries.map(\.pts)
             let indexTrustworthy = Self.keyframeIndexIsTrustworthy(
                 keyframes: keyframes,
@@ -1733,7 +1749,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     dem.dashRandomAccessStartsSeconds,
                     minimumSeconds: Self.dashMinimumSegmentSeconds(interleaveLeadSeconds: dem.dashInterleaveLeadSeconds))
                 : []
-            let declaredSegmentStarts = dem.timeSeekableReader?.segmentStartTimesSeconds ?? dashStarts
+            // A lazily indexed fragmented MP4 declares its random access points in its mfra. Like a
+            // DASH sidx's they are presentation times, used as differences from the first, so a
+            // constant composition offset cancels (see `FragmentedMP4RandomAccess`).
+            let fragmentStarts = dem.timeSeekableReader == nil && dashStarts.isEmpty && lazyFragments
+                && lazyKeyframeEntries == nil
+                ? Self.coalescedRandomAccessStarts(
+                    dem.lazyFragmentRandomAccessStartsSeconds,
+                    minimumSeconds: Self.dashMinimumSegmentSeconds(interleaveLeadSeconds: 0))
+                : []
+            let declaredSegmentStarts = dem.timeSeekableReader?.segmentStartTimesSeconds
+                ?? (dashStarts.isEmpty ? fragmentStarts : dashStarts)
             let segmentedAnchorPts: Int64 = keyframes.sorted().first
                 ?? (videoStream.pointee.start_time != Int64.min
                     ? max(0, videoStream.pointee.start_time) : 0)
@@ -1750,7 +1776,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     * Double(videoTimeBase.num) / Double(videoTimeBase.den)
                 EngineLog.emit(
                     "[HLSVideoEngine] segment plan: source-declared boundaries"
-                    + (dashStarts.isEmpty ? ", " : " (DASH sidx SAPs, AE#1075), ")
+                    + (!dashStarts.isEmpty ? " (DASH sidx SAPs, AE#1075), "
+                       : !fragmentStarts.isEmpty ? " (mfra random access points, lazy fragment index), " : ", ")
                     + "\(plan.count) segments [anchorPts=\(segmentedAnchorPts) "
                     + "shortestSegment=\(String(format: "%.3f", plan.map { $0.durationSeconds }.min() ?? 0))s]",
                     category: .session

@@ -112,10 +112,11 @@ The plan needs the source's keyframe positions, read from the container's keyfra
 
 The uniform fallback anchors segment 0 at the content start, so a title that starts late does not advertise empty leading segments.
 
-**Declared boundaries come first.** Two sources say where their random-access points are, and the plan is cut on those instead of on the index (`buildSegmentedSourcePlan`):
+**Declared boundaries come first.** Three sources say where their random-access points are, and the plan is cut on those instead of on the index (`buildSegmentedSourcePlan`):
 
 - **HLS VOD ingest:** the playlist's segment starts, summed from `EXTINF` (#268).
 - **MPEG-DASH:** the video `sidx`, which marks each subsegment that starts with a SAP (a random-access point) and gives its time (AE#1075). Only SAP types 1 and 2 count (closed GOP). If one subsegment lacks such a SAP, the source declares nothing and the plan falls back as above.
+- **Fragmented MP4 with a lazy index:** the `mfra`'s video random-access points, when they do not agree with the fragments the demuxer has read. When they agree, they stand in for the full index and the keyframe-aligned plan is built from them ([Fragmented MP4 over HTTP](formats.md#fragmented-mp4-over-http)).
 
 Each boundary is pulled up to 0.5 s below its declared time. The declared time and the container timestamp can differ by rounding, and a boundary that lands past its keyframe would open the segment one GOP late.
 
