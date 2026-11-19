@@ -536,6 +536,25 @@ Current rule: [architecture-software.md › 10-bit AV1 conversion](architecture-
 - The audio lead stayed at 4.0 s throughout both runs, in the first through two pauses by the viewer.
 - Every session pauses once as it starts, while the audio lead fills for the first time (`audio lead exhausted (-2.48s)` 50 ms after the open). The earlier runs did too.
 
+### Upscale edge band in a Debug build (AE#1097)
+
+Measured on 2026-11-19. The answer first: **in a host's Debug build, the CPU step that rewrites the upscaled frame's outer band (`edge` in the timing line) cost 20 to 22 ms per 720p frame on an A15, and that alone put a 720p60 upscale over its 15 ms budget.** The same arithmetic in raw-pointer `while` loops costs about 5 ms there and writes the same bytes.
+
+The band is the outer 8 output samples on every side (4 in chroma), rewritten as a bilinear scale of the source since AE#846. It is about 72,000 samples per 1080p frame, which takes a fraction of a millisecond optimised. Unoptimised, every `Array` subscript, tuple copy and `for ... in` step is a call.
+
+| Build | Code | 720p to 1080p `edge` per frame |
+|---|---|---|
+| M1, `aetherctl bench`, debug | tuple arrays, range loops (7.70.0) | 21.5 ms |
+| M1, `aetherctl bench`, debug | raw pointers, `while` | 5.7 ms |
+| M1, `aetherctl bench`, release | raw pointers, `while` | 0.52 ms |
+| Apple TV 4K (A15, tvOS 27.2), host Debug build | tuple arrays, range loops (7.70.0, reporter's log) | 20.3 to 22.4 ms |
+| Apple TV 4K (A15, tvOS 27.2.1), Sodalite Debug build | raw pointers, `while` | 4.7 to 6.1 ms |
+
+- The reporter's stage (1280x720 59.94 fps MPEG-2) went over budget in the first 48-frame window, dropped MetalFX, and the VideoToolbox-only step then read 43 to 49 ms and switched off. That step's `total` is a frame's whole latency, and with a 20 ms `edge` at a 16.7 ms frame interval each frame waited behind the one before. The MetalFX step's `total` is the time the decoder's thread is held, so the two steps are not directly comparable.
+- On the A15 run (720p 25 fps, a Debug build with the fix), the full chain read 11.2 to 13.1 ms per window: `copy` 0.5 to 0.8, `ml` 6.2 to 7.2, `edge` 4.7 to 6.1, MetalFX 17 to 19 ms on the GPU. From these steps, the VideoToolbox-only step at 59.94 fps comes to about 13 ms against 15.01 ms, and MetalFX at 17 to 19 ms of GPU per frame still does not fit, as before.
+- The micro benchmark of the loop alone (M1, same sizes) read 18.8 ms unoptimised and 0.18 ms optimised before, 1.9 ms and 0.14 ms after, with identical output. `edgeBandIsABilinearScaleOfTheSource` holds the band to a plain bilinear reference in both planes.
+- Not measured: a 59.94 fps source on the device with the fix. The test server has no such title, and its "720p" NDR channel turned out to be 1080p.
+
 ### Software channel layout mismatch
 
 Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.

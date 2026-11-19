@@ -251,6 +251,62 @@ struct FrameUpscalerTests {
         for i in Array(0..<16) + Array((1440 - 16)..<1440) { #expect(p[480 * s + i] <= 132, "column \(i): \(p[480 * s + i])") }
     }
 
+    /// The edge band is exactly a bilinear scale of the source, in both planes and on all four sides. Noise
+    /// makes every tap count. Pins the pointer form `rescaleEdges` took for Debug builds (AE#1097).
+    @Test(.enabled(if: UpscalerGate.mlAvailable), arguments: [(720, 480, Float(2)), (1280, 720, Float(1.5))])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func edgeBandIsABilinearScaleOfTheSource(width: Int, height: Int, scale: Float) throws {
+        let ow = Int((Float(width) * scale).rounded()), oh = Int((Float(height) * scale).rounded())
+        let up = try upscaler(try plan(width, height, display: CGSize(width: ow, height: oh), ml: [scale]))
+        let input = try TestFrames.nv12(width, height)
+        func noise(_ i: Int) -> UInt8 { UInt8(truncatingIfNeeded: (i &* 2_654_435_761) >> 13) }
+        CVPixelBufferLockBaseAddress(input, [])
+        for plane in 0..<2 {
+            let p = CVPixelBufferGetBaseAddressOfPlane(input, plane)!.assumingMemoryBound(to: UInt8.self)
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(input, plane)
+            for row in 0..<CVPixelBufferGetHeightOfPlane(input, plane) {
+                for x in 0..<(width) { p[row * stride + x] = noise(plane * 1_000_003 + row * width + x) }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(input, [])
+        let out = try #require(up.upscale(input))
+        CVPixelBufferLockBaseAddress(input, .readOnly)
+        CVPixelBufferLockBaseAddress(out, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(out, .readOnly)
+            CVPixelBufferUnlockBaseAddress(input, .readOnly)
+        }
+        for plane in 0..<2 {
+            let channels = plane == 0 ? 1 : 2, band = plane == 0 ? 8 : 4
+            let s = CVPixelBufferGetBaseAddressOfPlane(input, plane)!.assumingMemoryBound(to: UInt8.self)
+            let d = CVPixelBufferGetBaseAddressOfPlane(out, plane)!.assumingMemoryBound(to: UInt8.self)
+            let ss = CVPixelBufferGetBytesPerRowOfPlane(input, plane), ds = CVPixelBufferGetBytesPerRowOfPlane(out, plane)
+            let sw = CVPixelBufferGetWidthOfPlane(input, plane), sh = CVPixelBufferGetHeightOfPlane(input, plane)
+            let w = CVPixelBufferGetWidthOfPlane(out, plane), h = CVPixelBufferGetHeightOfPlane(out, plane)
+            func tap(_ i: Int, _ n: Int, _ source: Int) -> (Int, Int, Double) {
+                let p = min(max((Double(i) + 0.5) * Double(source) / Double(n) - 0.5, 0), Double(source - 1))
+                return (Int(p), min(Int(p) + 1, source - 1), p - floor(p))
+            }
+            var worst = 0.0, checked = 0
+            for y in 0..<h {
+                let (y0, y1, ay) = tap(y, h, sh)
+                for x in 0..<w where y < band || y >= h - band || x < band || x >= w - band {
+                    let (x0, x1, ax) = tap(x, w, sw)
+                    for c in 0..<channels {
+                        func v(_ row: Int, _ col: Int) -> Double { Double(s[row * ss + col * channels + c]) }
+                        let top = v(y0, x0) + (v(y0, x1) - v(y0, x0)) * ax
+                        let bottom = v(y1, x0) + (v(y1, x1) - v(y1, x0)) * ax
+                        let expected = top + (bottom - top) * ay
+                        worst = max(worst, abs(Double(d[y * ds + x * channels + c]) - expected))
+                        checked += 1
+                    }
+                }
+            }
+            #expect(checked > 0)
+            #expect(worst <= 0.51, "plane \(plane): worst \(worst) over \(checked) samples")
+        }
+    }
+
     /// The worst flat field for VT's edge ringing (near white, 1.5x) stays flat to the last sample.
     @Test(.enabled(if: UpscalerGate.mlAvailable))
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
