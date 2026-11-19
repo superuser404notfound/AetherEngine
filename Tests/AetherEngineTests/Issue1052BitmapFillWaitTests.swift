@@ -83,6 +83,32 @@ struct Issue1052BitmapFillWaitTests {
         #expect(took < 1.0)
     }
 
+    // Round 5: the requests that arrive between a pick in AVKit's menu and the host's marker hit a
+    // bitmap store nothing fills. Empty is the right answer there, so the server's empty-segment
+    // warning (meant for a rendition that lost a race with its reader) stays quiet for them.
+    @Test("only a store that should have had text counts as empty by accident", .timeLimit(.minutes(3)))
+    func emptyByDesign() {
+        let cache = SegmentCache(forwardWindow: 10, backwardWindow: 10)
+        defer { cache.close() }
+        let text = NativeSubtitleCueStore()
+        let unfilled = NativeSubtitleCueStore(fillsOnDemand: true)
+        let filled = NativeSubtitleCueStore(fillsOnDemand: true)
+        filled.fillStarted()
+        let marker = NativeSubtitleCueStore()
+        marker.servesSilently = true
+        let p = provider(stores: [text, unfilled, filled, marker], cache: cache)
+
+        #expect(!p.nativeSubtitleServesEmptyByDesign(ordinal: 0))
+        #expect(p.nativeSubtitleServesEmptyByDesign(ordinal: 1))
+        #expect(!p.nativeSubtitleServesEmptyByDesign(ordinal: 2))
+        #expect(p.nativeSubtitleServesEmptyByDesign(ordinal: 3))
+        #expect(!p.nativeSubtitleServesEmptyByDesign(ordinal: 4))
+
+        // Once the OCR worker arms on it, the store is expected to carry text again.
+        unfilled.fillStarted()
+        #expect(!p.nativeSubtitleServesEmptyByDesign(ordinal: 1))
+    }
+
     @Test("arming and cancelling the OCR worker starts and ends its store's fill", .timeLimit(.minutes(3)))
     func workerArmsAndReleasesFill() throws {
         let engine = try AetherEngine()
