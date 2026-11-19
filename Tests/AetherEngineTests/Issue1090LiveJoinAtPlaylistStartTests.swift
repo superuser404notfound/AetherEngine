@@ -278,11 +278,18 @@ struct Issue1090LiveJoinAtPlaylistStartTests {
         let drain = Drain(reader)
         let burstBytes = segments.prefix(8).reduce(0) { $0 + $1.count }
         try await waitFor { drain.data.count >= burstBytes }
+        // Bounds from what was read and fetched, not from the clock: the pacer keeps filling the FIFO
+        // while a starved drain thread or test task sleeps, so on a loaded runner the resume point
+        // has run past any fixed cap (CI read more than 12). A segment counts as delivered once it is
+        // in the FIFO, so it is at least what the drain read and at most one past the last fetch.
+        let drained = drain.data.count / segments[0].count
         guard case .sequence(let resume)? = reader.makeFreshMainReader()?.joinPoint else {
             Issue.record("reopen did not resume at a sequence")
             return
         }
-        #expect(resume >= 8 && resume <= 12)
+        let lastFetched = try #require(origin.segmentRequests.map(\.index).max())
+        #expect(resume >= max(8, drained), "resume \(resume), drained \(drained)")
+        #expect(resume <= lastFetched + 1, "resume \(resume), last fetched \(lastFetched)")
 
         // An edge session's reopen stays at the edge.
         let edge = HLSLiveIngestReader(playlistURL: url)
