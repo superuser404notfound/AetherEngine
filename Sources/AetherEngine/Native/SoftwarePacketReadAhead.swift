@@ -127,6 +127,20 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     }
     private var keyframes: [Keyframe] = []
     private let maximumKeyframes = 65_536
+    /// AE#1093: where audio can restart, one point every `audioRestartSpacing`. A hit restores the
+    /// FIFO to a single record, and with audio muxed in long blocks (10 s audio fragments against
+    /// 5 s video ones in DASH `SegmentBase`) the audio for a keyframe sits BEFORE that keyframe's
+    /// record, so a restore at the keyframe alone played on silent until the next audio block.
+    private var audioRestartPoints: [Keyframe] = []
+    private static let audioRestartSpacing = 0.25
+    /// Decoder warm-up in front of the target (AAC overlap, Opus wants 80 ms).
+    private static let audioRestartLeadSeconds = 0.2
+    /// A point further back than this is not used: replaying that much audio is a seek's worth of
+    /// work, and the source seek is the honest answer.
+    private static let audioRestartMaximumLeadSeconds = 5.0
+    /// Video records between an audio restart point and the video anchor, which the consumer drops
+    /// so the decoder does not run a GOP it would only throw away. Belongs to one seek generation.
+    private var pendingVideoSkip: (generation: UInt64, records: Int)?
     private var residency = SoftwarePacketResidency()
     private var timingResidency = SoftwarePacketResidency()
     private let cacheTiming: (any SoftwarePacketCacheTimingSource)?
@@ -308,16 +322,40 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         // where a keyframe needs none (`anchorsOnLastKeyframe`).
         let anchor = candidates.isEmpty ? nil
             : candidates[max(0, candidates.count - (anchorsOnLastKeyframe ? 1 : 2))]
+        // Time coverage says the audio is retained, not that a restore at the video anchor reaches
+        // it. Restore to whichever record comes first; without a usable audio point, decline.
+        var restore = anchor?.cursor
+        var videoRecordsToSkip = 0
+        var audioLine: String?
+        if let anchor, audio != nil {
+            if let point = audioRestartPointLocked(for: seconds) {
+                if point.cursor.recordIndex < anchor.cursor.recordIndex {
+                    restore = point.cursor
+                    videoRecordsToSkip = anchor.cursor.recordIndex - point.cursor.recordIndex
+                    audioLine = "[SWCache] seek audio restart target_s=\(String(format: "%.3f", seconds)) "
+                        + "audio_s=\(String(format: "%.3f", point.seconds)) "
+                        + "keyframe_s=\(String(format: "%.3f", anchor.seconds)) "
+                        + "skipped_records=\(videoRecordsToSkip)"
+                }
+            } else {
+                restore = nil
+                audioLine = "[SWCache] seek declined target_s=\(String(format: "%.3f", seconds)) "
+                    + "reason=no_audio_restart_point"
+            }
+        }
+        pendingVideoSkip = nil
         condition.unlock()
+        if let audioLine { EngineLog.emit(audioLine, category: .swPlayback) }
 
-        if let anchor {
+        if let restore {
             do {
-                try fifo.restore(to: anchor.cursor)
+                try fifo.restore(to: restore)
                 let state = fifo.snapshot
                 condition.lock(); defer { condition.unlock() }
                 guard token == generation, !closed else { throw ReadError.interrupted }
                 copyDiskStateLocked(state)
                 sourceClock = seconds
+                pendingVideoSkip = videoRecordsToSkip > 0 ? (token, videoRecordsToSkip) : nil
                 // The cursor moved, so the reservoir is measured from the target again. Left at
                 // the old high-water mark, a backward hit would read as a full reservoir and a
                 // forward one as an empty one.
@@ -505,15 +543,25 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
             guard sourceEnded else { throw ReadError.interrupted }
             return nil
         }
+        var videoSkip = pendingVideoSkip.flatMap { $0.generation == token ? $0.records : nil } ?? 0
         condition.unlock()
-        guard let data = try fifo.pop() else { throw ReadError.corruptFIFO }
-        var packet = try SoftwareStoredPacket.decode(data)
+        var packet: SoftwareStoredPacket
+        // The video anchor's record lies after every skipped one, so the store cannot run dry here.
+        repeat {
+            guard let data = try fifo.pop() else { throw ReadError.corruptFIFO }
+            packet = try SoftwareStoredPacket.decode(data)
+            guard videoSkip > 0 else { break }
+            videoSkip -= 1
+        } while packet.streamIndex == video.index
         // Equality parks the producer too. Reclaim an eligible consumed chunk at the exact ceiling,
         // otherwise it can remain asleep with unread packets until the queue drains completely.
         try fifo.trimConsumed(toByteBudget: max(0, byteBudget - 1))
         let state = fifo.snapshot
         condition.lock()
         defer { condition.unlock() }
+        if pendingVideoSkip?.generation == token {
+            pendingVideoSkip = videoSkip > 0 ? (token, videoSkip) : nil
+        }
         guard !closed, !seeking, token == generation, isCurrent() else { throw ReadError.interrupted }
         copyDiskStateLocked(state)
         applyCacheTimingLocked()
@@ -530,6 +578,18 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         }
         condition.broadcast()
         return packet
+    }
+
+    /// The audio point a hit at `seconds` restarts from: the latest one at least the decoder lead
+    /// before the target, else the earliest one around the target (session start, after a gap).
+    private func audioRestartPointLocked(for seconds: Double) -> Keyframe? {
+        let usable = audioRestartPoints.filter {
+            $0.seconds <= seconds + Self.audioRestartSpacing
+                && seconds - $0.seconds <= Self.audioRestartMaximumLeadSeconds
+        }
+        return usable.filter { $0.seconds <= seconds - Self.audioRestartLeadSeconds }
+            .max { $0.seconds < $1.seconds }
+            ?? usable.min { $0.seconds < $1.seconds }
     }
 
     private func frontierLocked(at seconds: Double? = nil) -> Double? {
@@ -572,8 +632,16 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         videoCoverage.reset(); audioCoverage.reset(); presentationCoverage?.reset()
         storedVideoSeconds = nil; consumedVideoSeconds = nil
         keyframes.removeAll(keepingCapacity: true)
+        audioRestartPoints.removeAll(keepingCapacity: true)
+        pendingVideoSkip = nil
         residency = SoftwarePacketResidency()
         timingResidency = SoftwarePacketResidency(); cacheTimingInvalid = false; calibrationPressure = false
+    }
+
+    private func audioSeconds(pts: Int64) -> Double? {
+        guard let audio, pts != Int64.min, audio.numerator > 0, audio.denominator > 0 else { return nil }
+        let seconds = Double(pts) * Double(audio.numerator) / Double(audio.denominator)
+        return seconds.isFinite ? seconds : nil
     }
 
     /// Presentation seconds of a stored packet, or nil when this stream cannot express them.
@@ -589,10 +657,14 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         residentBytes = state.residentByteCount
         if let floor = state.oldestRetainedChunkID {
             keyframes.removeAll { $0.cursor.chunkID < floor }
+            audioRestartPoints.removeAll { $0.cursor.chunkID < floor }
             residency.evict(before: floor)
             timingResidency.evict(before: floor)
             cacheTiming?.evict(before: floor, epoch: sourceEpoch)
-        } else { keyframes.removeAll(keepingCapacity: true) }
+        } else {
+            keyframes.removeAll(keepingCapacity: true)
+            audioRestartPoints.removeAll(keepingCapacity: true)
+        }
     }
 
     private func produce() {
@@ -709,6 +781,15 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                                     audioCoverage.prune(before: tick)
                                 }
                                 audioCoverage.insert(pts: packet.pts, duration: packet.duration, byteCount: packet.bytes.count)
+                                // A key flag is the restart contract: libavformat sets it on every
+                                // packet of an intra-only codec, and TrueHD only on a major sync.
+                                if packet.flags & 1 != 0, let seconds = audioSeconds(pts: packet.pts),
+                                   audioRestartPoints.last.map({ abs(seconds - $0.seconds) >= Self.audioRestartSpacing }) ?? true {
+                                    audioRestartPoints.append(Keyframe(seconds: seconds, cursor: cursor))
+                                    if audioRestartPoints.count > maximumKeyframes {
+                                        audioRestartPoints.removeFirst(min(1024, audioRestartPoints.count))
+                                    }
+                                }
                             }
                         }
                     }

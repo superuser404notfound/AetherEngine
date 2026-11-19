@@ -33,6 +33,12 @@ the public-API contract.
 
 ### Fixed
 
+- **A cached seek on the software path no longer lands without sound when the audio is muxed in long
+  blocks.** The cache restored playback at the video keyframe's record. In DASH `SegmentBase` with 10 s audio
+  fragments against 5 s video ones, the audio for that keyframe is stored before it, so a seek to 15 s
+  played from the picture at 15 s and the sound from 20 s. The restore now starts early enough for the audio
+  as well and drops the video it passes on the way, and a cache with no audio restart point near the target
+  answers with a source seek instead (AE#1093, thanks @nulltuple).
 - **10-bit AV1 on the software path no longer stalls while the GPU converts each frame.** The decoder's thread
   converted each frame to P010 with its film grain on the GPU, then waited for the GPU before it took the
   next. On an Apple TV 4K (A15) a 1080p 23.976 fps episode reached the renderer at 22 to 23 frames a second,
