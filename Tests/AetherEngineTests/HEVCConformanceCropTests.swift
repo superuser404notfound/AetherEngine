@@ -1,6 +1,6 @@
 // Apple TV (AppleTV18,1, tvOS 27.2.1) restarts on hardware-decoded HEVC coded 3840x2176 and cropped to
-// 2160 by a conformance window. The native tvOS remux clears that window and crops with a clap box
-// instead; everything else passes.
+// 2160 by a conformance window. On that generation the native tvOS remux clears the window and crops
+// with a clap box instead; everything else passes. Older models keep the window (AE#1094).
 //
 // The SPS bytes are from the recording that reproduced the restart. `cropFree` is what FFmpeg's
 // hevc_metadata filter writes for the same SPS with crop_bottom=0, which played on the device.
@@ -47,6 +47,19 @@ struct HEVCConformanceCropTests {
     func rewritesSPS() {
         #expect(HEVCConformanceCrop.removingUHDPaddingCrop(fromSPS: cropped) == cropFree)
         #expect(HEVCConformanceCrop.removingUHDPaddingCrop(fromSPS: cropFree) == nil)
+    }
+
+    @Test("AE#1094: only the restarting Apple TV generation and later ones clear the window")
+    func modelGate() {
+        #expect(HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV18,1"))
+        #expect(HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV19,2"))
+        // Plays the window, and the clap would squeeze PQ HDR instead of cropping it.
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV14,1"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV11,1"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV6,2"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("arm64"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("iPhone19,7"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV"))
     }
 
     @Test("Other geometries, other NAL types and damaged headers pass untouched")

@@ -350,7 +350,7 @@ Some files carry timestamps or bitstreams that a player would show wrongly. The 
 | MP4 whose composition offsets are missing only in later regions (judder after a seek) | Streams the same slot repair per sequence | None | [architecture › MP4 with composition offsets missing only in later regions](architecture-native.md#mp4-with-composition-offsets-missing-only-in-later-regions), [regression and reproduction](notes/partial-composition-regression.md) |
 | H.264 VOD whose parameter sets change mid-file (audio, no picture) | Moves the session to the software path | Software decode | [Below](#h264-vod-with-changing-parameter-sets) |
 | A video sample whose NAL chain overruns it, or confirmed HEVC with an incomplete two-byte NAL header (AE#561, #960) | Cuts an overlong chain at its last complete NAL; removes incomplete HEVC headers while preserving valid NALs, dropping a sample with no complete header. A CoreMedia refusal that still happens rebuilds the session on the software path, once | None, or software decode | [architecture › A video sample whose NAL chain overruns it](architecture-native.md#a-video-sample-whose-nal-chain-overruns-it) |
-| HEVC coded 3840x2176 and cropped to 2160 by a conformance window, on tvOS. An Apple TV (AppleTV18,1, tvOS 27.2.1) restarts when its hardware decoder gets this SPS | Sets the window's offsets to zero in the init segment and in the in-band SPS of every sample, and crops the 16 padding lines with a `clap` box instead (`HEVCConformanceCrop`) | None, hardware decode stays | [Below](#hevc-coded-3840x2176-and-cropped-to-2160) |
+| HEVC coded 3840x2176 and cropped to 2160 by a conformance window, on tvOS. An Apple TV (AppleTV18,1, tvOS 27.2.1) restarts when its hardware decoder gets this SPS | On AppleTV18 and later, sets the window's offsets to zero in the init segment and in the in-band SPS of every sample, and crops the 16 padding lines with a `clap` box instead (`HEVCConformanceCrop`). Older models keep the window | None, hardware decode stays | [Below](#hevc-coded-3840x2176-and-cropped-to-2160) |
 | 24p film stamped with 2:3 pulldown times, 50 and 33 ms per frame (Sodalite#236) | Puts each frame on its 24p slot on the native route (`PulldownCadenceRetimer`) | None | [architecture › 2:3 pulldown timing on 24p film](architecture-native.md#23-pulldown-timing-on-24p-film) |
 | A declared frame rate that is not a standard rate (mkvmerge writes the first frame's duration, so such a file declares 20 fps) | Measures the rate on the head packets the probe already queued and uses that (23.976 here) for the display switch, the master's `FRAME-RATE` and the frame grid | None | |
 
@@ -367,6 +367,19 @@ On the pulldown clip, 587 of 606 frame steps came out at exactly 41.7 ms, where 
 Without the window the decoder hands out all 2176 lines. So the sample entry states the coded height, and a `clap` box (clean aperture, the container's own crop) of 3840x2160 hides the 16 padding lines. The device played this combination in the same test series.
 
 The `clap` carries a vertical offset of +8, not the -8 the spec asks for. tvOS applies that offset with the opposite sign to the spec and to macOS. Measured on an Apple TV (AppleTV14,1) with a test pattern, over HLS and from an MP4: -8 shows lines 16 to 2175, so 16 lines of picture go missing at the top and 16 padding lines show at the bottom. +8 shows exactly lines 0 to 2159. The same file would sit 16 lines low on macOS, which is another reason the repair stays on tvOS.
+
+**Only the restarting generation gets it.** The `clap` is not a full stand-in for the window. With PQ HDR, tvOS does not crop the picture at all. It squeezes all 2176 lines into the 2160-line aperture, so the padding shows at the bottom, whatever the sign of the offset. A model that plays the window correctly is better off keeping it.
+
+Measured on an Apple TV (AppleTV14,1, tvOS 27.2) over HLS fMP4, with marker rows at the top, at the bottom and in the 16 padding lines:
+
+| Stream | Conformance window | `clap` -8 | `clap` +8 | Neither |
+|---|---|---|---|---|
+| SDR | Lines 0 to 2159 | Lines 16 to 2175 | Lines 0 to 2159 | All 2176 lines, scaled, with thin side bars |
+| PQ HDR10 (with and without the HDR mode switch) | Lines 0 to 2159 | All 2176 lines squeezed | All 2176 lines squeezed | All 2176 lines, scaled, with thin side bars |
+
+A 10-bit SDR file with +8 shows lines 0 to 2159 as well, so the PQ transfer is what changes it, not the bit depth.
+
+So the muxer clears the window only on AppleTV18 and later (`HEVCConformanceCrop.modelNeedsCropFreeSPS`, read from `uname`). An AppleTV14,1 and older models keep the window, as before 7.69.0. A simulator keeps it too. PQ HDR of this geometry is untested on an AppleTV18,1. There it either restarts with the window or shows the padding with the `clap`, and the engine accepts the padding (AE#1094).
 
 The repair is fail-closed. Only a 4:2:0 base-layer SPS of exactly 3840x2176 with a bottom crop of 16 lines and no other crop is rewritten. Other platforms keep the window, since only the Apple TV failed on it.
 

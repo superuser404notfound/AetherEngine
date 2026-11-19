@@ -81,8 +81,9 @@ final class MP4SegmentMuxer {
         /// A stereo source's signalling (`StereoVideoSignal`); nil leaves the track as the source has it.
         let stereo: StereoVideoSignal?
         /// Clear the conformance window of HEVC coded 3840x2176 and cropped to 2160, and crop with a
-        /// `clap` box instead (`HEVCConformanceCrop`). On by default on tvOS, where the window restarts
-        /// an Apple TV; tests turn it on elsewhere.
+        /// `clap` box instead (`HEVCConformanceCrop`). On by default on the Apple TV models whose
+        /// decoder restarts on the window (`HEVCConformanceCrop.modelNeedsCropFreeSPS`); tests turn it
+        /// on elsewhere.
         let clearsUHDPaddingCrop: Bool
 
         init(
@@ -110,7 +111,8 @@ final class MP4SegmentMuxer {
         }
 
         #if os(tvOS)
-        static let clearsUHDPaddingCropByDefault = true
+        static let clearsUHDPaddingCropByDefault =
+            HEVCConformanceCrop.modelNeedsCropFreeSPS(HEVCConformanceCrop.hardwareModel())
         #else
         static let clearsUHDPaddingCropByDefault = false
         #endif
@@ -1432,6 +1434,8 @@ final class MP4SegmentMuxer {
     /// pattern over HLS and MP4) shows as lines 16 to 2175: 16 lines of picture lost at the top, 16 of
     /// padding at the bottom. +8 shows lines 0 to 2159 there, so the side data states a TOP crop, which
     /// movenc writes as +8. macOS would show this file 16 lines low, which is why it is tvOS only.
+    /// For PQ HDR tvOS ignores the crop and squeezes all 2176 lines into the aperture, whatever the
+    /// sign (AE#1094), which is why only the models that restart on the window get this.
     private static func setTVOSPaddingClap(_ codecpar: UnsafeMutablePointer<AVCodecParameters>, lines: Int) {
         av_packet_side_data_remove(codecpar.pointee.coded_side_data, &codecpar.pointee.nb_coded_side_data,
                                    AV_PKT_DATA_FRAME_CROPPING)

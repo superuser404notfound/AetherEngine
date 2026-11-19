@@ -33,6 +33,12 @@ the public-API contract.
 
 ### Fixed
 
+- **HDR10 coded 3840x2176 no longer shows 16 padding lines at the bottom on older Apple TVs.** Since 7.69.0
+  the tvOS remux replaced the conformance window of such a stream with a `clap` box on every Apple TV. For PQ
+  HDR, tvOS does not crop with that box. It squeezes all 2176 lines into 2160, so the padding showed as a band
+  at the bottom. Measured on an AppleTV14,1, either offset sign. The rewrite now runs only on AppleTV18 and
+  later, the generation that restarted on the window (PR #1072). Older models keep the window, which crops
+  SDR and HDR correctly. Reported by @samimt55 (AE#1094).
 - **A cached seek on the software path no longer lands without sound when the audio is muxed in long
   blocks.** The cache restored playback at the video keyframe's record. In DASH `SegmentBase` with 10 s audio
   fragments against 5 s video ones, the audio for that keyframe is stored before it, so a seek to 15 s

@@ -532,7 +532,7 @@ Notes:
 | `CodecRoutePolicy.swift` | Native path: DV / HDR / codec routing decisions (track types, CODECS strings, VIDEO-RANGE). |
 | `AnnexB.swift` | The one Annex-B NAL scanner (3- and 4-byte start codes, leading bytes skipped, trailing zeros trimmed, empty NALs dropped). Every NAL walker goes through it. |
 | `AnnexBSampleConverter.swift` | Native path: the session muxer rewrites Annex-B HEVC samples to length-prefixed NALs, keeping in-band VPS/SPS/PPS. movenc's own conversion under `hvc1` drops them, so a stream that sends a new PPS mid-title stopped decoding at the change (PR #703). |
-| `HEVCConformanceCrop.swift` | tvOS native path: clears the SPS conformance window of HEVC coded 3840x2176 and cropped to 2160, in the init segment and in-band, because an Apple TV restarts on it; the muxer crops with `clap` instead (PR #1072). |
+| `HEVCConformanceCrop.swift` | tvOS native path on AppleTV18 and later: clears the SPS conformance window of HEVC coded 3840x2176 and cropped to 2160, in the init segment and in-band, because that Apple TV restarts on it; the muxer crops with `clap` instead (PR #1072). Older models keep the window, since the `clap` does not crop PQ HDR (AE#1094). |
 | `FelCurves/` | `DolbyVisionFelCurves` trait. See note. |
 | `DoviRpuConverter.swift` | libdovi RPU surgery for both routes. See note. |
 | `DoviRpuConverter+Probe.swift` | Diagnostic DV-conversion probe (`doviConvertProbe` / `DoviConvertProbeResult`); backs `aetherctl dovitest`. |
