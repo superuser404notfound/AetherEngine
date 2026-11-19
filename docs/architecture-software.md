@@ -618,6 +618,10 @@ The cache frontier is how far ahead of the playhead the cache provably holds pla
 
 - A cached seek restores a retained keyframe cursor, including an earlier keyframe for available preroll, and keeps the producer at its existing source frontier.
 - AV1 through dav1d restores to the last keyframe at or before the target instead (`anchorsOnLastKeyframe`). An AV1 keyframe opens on its own, and the earlier one only cost dav1d a whole GOP of decode before the picture came back.
+- A cached seek also needs audio for the target, and a keyframe's record does not always lead to it. With audio muxed in long blocks (DASH `SegmentBase` with 10 s audio fragments against 5 s video ones), the audio for a keyframe is stored before that keyframe, and a restore at the keyframe played up to a whole block silent (AE#1093).
+- So the read-ahead keeps audio restart points as well: one key-flagged audio packet every 0.25 s, pruned with the history. A hit picks the latest point at least 0.2 s before the target (decoder warm-up) and no more than 5 s before it.
+- When that point comes before the video keyframe in the spool, the restore starts there and the consumer drops the video records in between, so the decoder does not run a GOP it would throw away. Otherwise the restore is the keyframe's, as before.
+- No usable audio point means a cache miss and a source seek, never a silent hit. libavformat flags every packet of an intra-only audio codec as a key packet, TrueHD only on a major sync, so this only turns away audio that really cannot restart there.
 - A cache miss clears coverage and repositions the demuxer. Discarding the spool is the worker's job, not the seek's: removing every retained chunk costs more the longer the session has kept them, and no seek waits on it.
 - Consumer generations and source epochs are separate counters. A cached seek must not discard a producer packet in flight, and a superseded consumer must not steal the first packet of a new source epoch.
 - Admission applies equally to packet, EOF, error and delayed end-of-media callbacks.
