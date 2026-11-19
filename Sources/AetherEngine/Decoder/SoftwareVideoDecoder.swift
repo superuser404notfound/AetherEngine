@@ -68,7 +68,68 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// Frames the GPU converted, grained and had to copy first; nil when this decoder does not use it.
     var gpuConversionCounts: (converted: Int, grained: Int, copied: Int)? {
         lock.lock(); defer { lock.unlock() }
-        return gpuConverter.map { ($0.framesConverted, $0.framesGrained, $0.framesCopied) }
+        return gpuConverter?.counts
+    }
+
+    /// Set before `open`, by the playback host only. 10-bit AV1 frames then leave the decoder when their GPU
+    /// conversion completed, with up to `GPUFrameConverter.slotCount` on the GPU while dav1d decodes the
+    /// next (`conversionPipeline`), instead of the decoder's thread waiting for each one. The probe, the
+    /// still extractor and the tests read a frame as soon as `decode` returns, so they keep the default.
+    var overlapsGPUConversion = false
+
+    /// Whether this decoder's 10-bit AV1 conversion runs in `conversionPipeline` (the tests' check that
+    /// the overlapped route is the one under test).
+    var convertsInPipeline: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return conversionPipeline != nil
+    }
+
+    /// The pipeline the GPU conversion runs in, when `overlapsGPUConversion` is set and the converter is in
+    /// use. Every frame of this decoder goes through it then, a CPU-converted one included, so they stay in
+    /// order. Written in `open` and `close`; read under `lock`.
+    private var conversionPipeline: PipelinedFrameStage?
+    /// The conversion `emitInner` hands the pipeline's `begin` (decode thread, under `lock`), and when
+    /// `submit` was called, so the time a frame waits for a free slot counts in its held time.
+    private var pendingConversion: PendingConversion?
+    private var submitStarted: UInt64 = 0
+    /// The frame handler and the feed epoch as the pipeline's delivery queue reads them. Guarded by
+    /// `deliveryLock`, never by `lock`: the decode thread holds `lock` while it waits for a free slot in
+    /// the pipeline, and only a delivery frees one.
+    private let deliveryLock = NSLock()
+    private var deliveryHandler: DecodedFrameHandler?
+    private var deliveryEpoch: UInt64 = 0
+
+    /// One frame's GPU conversion, waiting for the pipeline's `begin`.
+    private struct PendingConversion {
+        let converter: GPUFrameConverter
+        let frame: UnsafeMutablePointer<AVFrame>
+        let pixelBuffer: CVPixelBuffer
+        /// The output format for a CPU conversion of the same frame (`OutputFormat.swscaleFormat`).
+        let format: AVPixelFormat
+    }
+
+    /// A reference to a decoded frame's picture, held until the GPU read it in place; freed with the
+    /// completion that holds it.
+    private final class HeldFrame: @unchecked Sendable {
+        let frame: UnsafeMutablePointer<AVFrame>
+        init?(cloning source: UnsafeMutablePointer<AVFrame>) {
+            guard let clone = av_frame_clone(source) else { return nil }
+            frame = clone
+        }
+        deinit {
+            var f: UnsafeMutablePointer<AVFrame>? = frame
+            av_frame_free(&f)
+        }
+    }
+
+    private var currentDeliveryEpoch: UInt64 {
+        deliveryLock.lock(); defer { deliveryLock.unlock() }
+        return deliveryEpoch
+    }
+
+    private var currentDeliveryHandler: DecodedFrameHandler? {
+        deliveryLock.lock(); defer { deliveryLock.unlock() }
+        return deliveryHandler
     }
 
     private var pixelBufferPool: CVPixelBufferPool?
@@ -286,6 +347,27 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         codecContext = ctx
 
+        // The playback host's 10-bit AV1: the conversion overlaps the decode (see `overlapsGPUConversion`).
+        // A frame is stamped with the feed epoch it was emitted under and delivered only while that epoch
+        // is live, so a flush retires what is still on the GPU the way it retires undecoded packets.
+        conversionPipeline = nil
+        if gpuConverter != nil, overlapsGPUConversion, !decodesSingleThreaded {
+            deliveryLock.lock()
+            deliveryHandler = onFrame
+            deliveryEpoch = _feedEpoch
+            deliveryLock.unlock()
+            conversionPipeline = PipelinedFrameStage(
+                depth: GPUFrameConverter.slotCount,
+                stamp: { [weak self] in self?.currentDeliveryEpoch ?? 0 },
+                isCurrent: { [weak self] epoch in self?.currentDeliveryEpoch == epoch },
+                deliver: { [weak self] buffer, pts, hdr10Plus in
+                    // Read first, so the decoder is not kept alive across the host's handler.
+                    let handler = self?.currentDeliveryHandler
+                    handler?(buffer, pts, hdr10Plus)
+                },
+                begin: { [weak self] _, _, _ in self?.beginPendingConversion() ?? .passThrough })
+        }
+
         containerColor = ColorDescription(codecpar: codecpar)
         containerHDR10 = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
             ? HDR10StaticMetadataSEI.fromCodedSideData(codecpar) : .none
@@ -297,7 +379,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // Release-visible log (no #if DEBUG): needed for TestFlight users and DrHurt #4 black-screen reports.
         EngineLog.emit("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count), \(use10Bit ? "10-bit" : "8-bit")"
                        + (attachesAV1DolbyVisionRPU ? ", Dolby Vision 10.1 (RPU attached per frame)" : "")
-                       + (gpuConverter != nil ? ", P010 and film grain on the GPU" : ""), category: .swPlayback)
+                       + (gpuConverter != nil ? ", P010 and film grain on the GPU" : "")
+                       + (conversionPipeline != nil ? " (\(GPUFrameConverter.slotCount) frames in flight)" : ""),
+                       category: .swPlayback)
     }
 
     /// #407: the timestamp to put on a decoded frame that carries none, or nil when the frame is
@@ -566,7 +650,48 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             onFirstHDR10PlusDetected?()
         }
 
-        onFrame?(pixelBuffer, cmPTS, hdr10PlusData)
+        if let conversionPipeline {
+            // Every frame goes through the pipeline, so a converted one and the next stay in order. `submit`
+            // waits here while the pipeline is full, then calls `beginPendingConversion`.
+            submitStarted = DispatchTime.now().uptimeNanoseconds
+            conversionPipeline.submit(pixelBuffer, pts: cmPTS, hdr10Plus: hdr10PlusData)
+            pendingConversion = nil
+        } else {
+            onFrame?(pixelBuffer, cmPTS, hdr10PlusData)
+        }
+    }
+
+    /// The pipeline's `begin` for the frame `emitInner` is submitting: on the decode thread, under `lock`,
+    /// with a slot free. Encoded here rather than before `submit`, so the converter's buffers it writes
+    /// belong to a frame the pipeline already delivered. The frame's picture is held until the GPU read it.
+    ///
+    /// The pixel buffer is only a picture once something wrote it, so a frame that neither the GPU nor
+    /// `sws_scale` converted is dropped, as `convertFrameToPixelBuffer` returning nil drops it. Only a
+    /// `.later` step can say so after the GPU work completed, which is why the work is committed here
+    /// rather than handed back as `.gpu`.
+    private func beginPendingConversion() -> PipelinedFrameStage.Begun {
+        guard let pending = pendingConversion else { return .passThrough }
+        pendingConversion = nil
+        let pixelBuffer = pending.pixelBuffer
+        guard let held = HeldFrame(cloning: pending.frame),
+              let encoded = pending.converter.encode(pending.frame, into: pixelBuffer) else {
+            // Nothing reached the GPU: converted on the CPU here, as a failed `convert` leaves a frame.
+            return scaleLocked(pending.frame, into: pixelBuffer, format: pending.format) ? .passThrough : .drop
+        }
+        // Waiting for the free slot, then encoding: the time the frame held the decoder's thread.
+        let heldMs = Double(DispatchTime.now().uptimeNanoseconds - submitStarted) / 1_000_000
+        let converter = pending.converter, format = pending.format
+        let buffer = UncheckedSendable(pixelBuffer)
+        return .later { resume in
+            let commandBuffer = encoded.work.commandBuffer
+            commandBuffer.addCompletedHandler { _ in
+                let converted = converter.finished(encoded, heldMs: heldMs)
+                    || converter.convertOnCPU(held.frame, into: buffer.value, format: format)
+                withExtendedLifetime(held) {}
+                resume(converted ? .ready(buffer.value) : .drop)
+            }
+            commandBuffer.commit()
+        }
     }
 
     /// #544: `resetFilterGraph: false` keeps the deinterlace graph across the flush. The still
@@ -588,10 +713,18 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lock.lock()
         guard let ctx = codecContext else { lock.unlock(); return }
         let ret = avcodec_send_packet(ctx, nil)
+        let pipeline = conversionPipeline
         lock.unlock()
         guard ret >= 0 else { return }
         drainDecodedFrames()
-        // DEC-203: the deinterlacer still holds the last picture, waiting for a next one that never comes.
+        drainDeinterlacerForEndOfStream()
+        // The last frames may still be on the GPU: they reach the handler before this returns, so before
+        // the host drains the renderer.
+        pipeline?.settle()
+    }
+
+    /// DEC-203: the deinterlacer still holds the last picture, waiting for a next one that never comes.
+    private func drainDeinterlacerForEndOfStream() {
         lock.lock()
         defer { lock.unlock() }
         guard codecContext != nil, deinterlacer.isActive else { return }
@@ -606,15 +739,22 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     func flush(resetFilterGraph: Bool) {
         lock.lock()
-        defer { lock.unlock() }
         // AE#492: retires every packet a caller had already decided to send. Bumped under the lock,
         // so a feed that has not reached `avcodec_send_packet` yet is refused from here on.
         _feedEpoch &+= 1
+        // The frames still on the GPU are retired with them (`conversionPipeline` delivers only the live epoch).
+        deliveryLock.lock()
+        deliveryEpoch = _feedEpoch
+        deliveryLock.unlock()
         // Deinterlacer temporal references are stale across seeks; drop the graph (lazily rebuilt on next interlaced frame).
         if resetFilterGraph { deinterlacer.teardown() }
         rpuTable.removeAll()
-        guard let ctx = codecContext else { return }
-        avcodec_flush_buffers(ctx)
+        if let ctx = codecContext { avcodec_flush_buffers(ctx) }
+        let pipeline = conversionPipeline
+        lock.unlock()
+        // Waits for those frames to complete and be dropped, so none can reach the renderer after the host
+        // flushes it next. Outside `lock`: the delivery that ends the wait never takes it.
+        pipeline?.settle()
     }
 
     /// Serialise HDR10+ dynamic metadata from AVFrame side data to T.35 SEI bytes (kCMSampleAttachmentKey_HDR10PlusPerFrameData).
@@ -640,7 +780,21 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
 
     func close() {
+        close(settling: true)
+    }
+
+    /// `settling: false` from `deinit`: the last reference can go on the pipeline's delivery queue (a
+    /// delivery finishing as the host lets go), and waiting there for the delivery in progress would
+    /// only time out. Frames still on the GPU then complete into no handler.
+    private func close(settling: Bool) {
         lock.lock()
+        // Frames still on the GPU complete into no handler; each holds its picture until then.
+        let pipeline = conversionPipeline
+        conversionPipeline = nil
+        pendingConversion = nil
+        deliveryLock.lock()
+        deliveryHandler = nil
+        deliveryLock.unlock()
         deinterlacer.teardown()
         if codecContext != nil {
             avcodec_free_context(&codecContext)
@@ -664,10 +818,11 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         onFrame = nil
         onCacheTiming = nil
         lock.unlock()
+        if settling { pipeline?.settle() }
     }
 
     deinit {
-        close()
+        close(settling: false)
     }
 
     // MARK: - Decoder-owned pixel buffer pool
@@ -765,21 +920,38 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         attachColorSpace(from: frame, to: pb)
         attachPixelAspectRatio(from: frame, to: pb)
 
-        if let gpuConverter, outputFormat.tenBit, GPUFrameConverter.accepts(frame),
-           gpuConverter.convert(frame, into: pb) {
-            return pb
+        if let gpuConverter, outputFormat.tenBit, GPUFrameConverter.accepts(frame) {
+            if conversionPipeline != nil {
+                // Encoded by the pipeline's `begin` once a slot is free (`beginPendingConversion`).
+                pendingConversion = PendingConversion(converter: gpuConverter, frame: frame, pixelBuffer: pb, format: dstFmt)
+                return pb
+            }
+            if gpuConverter.convert(frame, into: pb) { return pb }
         }
 
+        return scaleLocked(frame, into: pb, format: dstFmt) ? pb : nil
+    }
+
+    /// `frame` into `pb` with the decoder's own `sws_scale` context. Under `lock`, like the context.
+    private func scaleLocked(_ frame: UnsafeMutablePointer<AVFrame>, into pb: CVPixelBuffer, format dstFmt: AVPixelFormat) -> Bool {
+        let width = Int(frame.pointee.width)
+        let height = Int(frame.pointee.height)
         swsContext = sws_getCachedContext(
             swsContext,
-            Int32(width), Int32(height), srcFmt,
+            Int32(width), Int32(height), AVPixelFormat(rawValue: frame.pointee.format),
             Int32(width), Int32(height), dstFmt,
             // FFmpeg 8 turned the SWS_* constants into a typed `SwsFlags`
             // enum; the C signature still wants a plain int, so unwrap.
             Int32(SWS_BILINEAR.rawValue), nil, nil, nil
         )
-        guard swsContext != nil else { return nil }
+        guard let swsContext else { return false }
+        Self.scale(frame, into: pb, with: swsContext)
+        return true
+    }
 
+    /// One `sws_scale` of `frame` into the two planes of `pb` (NV12 or P010), with a context made for both.
+    static func scale(_ frame: UnsafeMutablePointer<AVFrame>, into pb: CVPixelBuffer, with swsContext: UnsafeMutablePointer<SwsContext>) {
+        let height = Int(frame.pointee.height)
         CVPixelBufferLockBaseAddress(pb, [])
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
 
@@ -822,8 +994,6 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 }
             }
         }
-
-        return pb
     }
 
     // MARK: - Color Space Metadata

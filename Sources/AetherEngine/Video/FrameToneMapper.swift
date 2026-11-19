@@ -115,7 +115,7 @@ final class FrameToneMapper: @unchecked Sendable {
     func process(_ input: CVPixelBuffer, pts: CMTime, carriesHDR10Plus: Bool) -> CVPixelBuffer? {
         let start = DispatchTime.now().uptimeNanoseconds
         switch begin(input, pts: pts, carriesHDR10Plus: carriesHDR10Plus) {
-        case .passThrough, .later: return nil
+        case .passThrough, .later, .drop: return nil
         case let .ready(output): return output
         case let .gpu(work, complete):
             work.commandBuffer.commit()

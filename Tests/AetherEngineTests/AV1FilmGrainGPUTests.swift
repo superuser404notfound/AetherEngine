@@ -9,8 +9,10 @@ import AetherLibavutil
 /// The GPU route for 10-bit AV1 (`GPUFrameConverter`) must hand the display the picture dav1d would
 /// have: the same film grain, the same P010 samples `sws_scale` writes. Opt-in media check, since no
 /// clip is committed: `AV1_FILM_GRAIN_CLIP` names a 10-bit AV1 file with film grain (an `.ivf` or
-/// `.mkv`), `AV1_FILM_GRAIN_FRAMES` how many frames to compare (48 by default). Both decoders take the
-/// same packets; every frame is compared sample for sample.
+/// `.mkv`), `AV1_FILM_GRAIN_FRAMES` how many frames to compare (48 by default). Three decoders take the
+/// same packets: dav1d with `sws_scale`, the GPU route waiting for each frame, and the GPU route as the
+/// playback host runs it (`overlapsGPUConversion`, frames delivered when their work completes). Every
+/// frame of both GPU routes is compared with the first, sample for sample.
 @Suite("AV1 film grain on the GPU matches dav1d (media)", .serialized)
 struct AV1FilmGrainGPUTests {
 
@@ -30,6 +32,7 @@ struct AV1FilmGrainGPUTests {
 
         let cpuFrames = FrameSink()
         let gpuFrames = FrameSink()
+        let overlappedFrames = FrameSink()
         let saved = GPUFrameConverter.enabled
         defer { GPUFrameConverter.enabled = saved }
 
@@ -41,25 +44,48 @@ struct AV1FilmGrainGPUTests {
         let gpu = SoftwareVideoDecoder()
         try gpu.open(stream: stream) { pb, pts, _ in gpuFrames.add(pb, pts: pts) }
         defer { gpu.close() }
+        let overlapped = SoftwareVideoDecoder()
+        overlapped.overlapsGPUConversion = true
+        try overlapped.open(stream: stream) { pb, pts, _ in overlappedFrames.add(pb, pts: pts) }
+        defer { overlapped.close() }
         #expect(cpu.gpuConversionCounts == nil)
         #expect(gpu.gpuConversionCounts != nil)
+        #expect(overlapped.gpuConversionCounts != nil)
 
         var report = Report()
+        var overlappedReport = Report()
+        var reference: [Frame] = []
         var packets = 0
+        func compareReady() {
+            while let a = cpuFrames.first {
+                cpuFrames.removeFirst()
+                reference.append(a)
+            }
+            while let b = gpuFrames.first, report.frames < reference.count {
+                gpuFrames.removeFirst()
+                report.compare(reference[report.frames], b)
+            }
+            while let c = overlappedFrames.first, overlappedReport.frames < reference.count {
+                overlappedFrames.removeFirst()
+                overlappedReport.compare(reference[overlappedReport.frames], c)
+            }
+        }
         while report.frames < Self.frameLimit, let pkt = try? demuxer.readPacket() {
             if pkt.pointee.stream_index == videoIndex {
                 packets += 1
                 cpu.decode(packet: pkt)
                 gpu.decode(packet: pkt)
+                overlapped.decode(packet: pkt)
             }
             var p: UnsafeMutablePointer<AVPacket>? = pkt
             trackedPacketFree(&p)
-            while let a = cpuFrames.first, let b = gpuFrames.first {
-                cpuFrames.removeFirst()
-                gpuFrames.removeFirst()
-                report.compare(a, b)
-            }
+            compareReady()
         }
+        // The overlapped route's last frames may still be on the GPU: the drain delivers them.
+        cpu.drainForEndOfStream()
+        gpu.drainForEndOfStream()
+        overlapped.drainForEndOfStream()
+        compareReady()
 
         let counts = try #require(gpu.gpuConversionCounts)
         print("[AV1FilmGrainGPUTests] \(packets) packets, \(report.frames) frames compared; GPU converted "
@@ -72,6 +98,13 @@ struct AV1FilmGrainGPUTests {
         #expect(report.yMismatches == 0)
         #expect(report.uvMismatches == 0)
         #expect(report.ptsMismatches == 0)
+        print("[AV1FilmGrainGPUTests] overlapped route: \(overlappedReport.frames) frames compared; "
+              + "Y mismatches \(overlappedReport.yMismatches), CbCr mismatches \(overlappedReport.uvMismatches)"
+              + (overlappedReport.firstMismatch.map { "; first at \($0)" } ?? ""))
+        #expect(overlappedReport.frames == report.frames, "the overlapped route delivers every frame the waiting one does")
+        #expect(overlappedReport.yMismatches == 0)
+        #expect(overlappedReport.uvMismatches == 0)
+        #expect(overlappedReport.ptsMismatches == 0)
     }
 
     /// `AV1_FILM_GRAIN_BENCH=gpu` or `cpu`: decodes the whole clip through one route and prints the CPU time
@@ -160,6 +193,7 @@ struct AV1FilmGrainGPUTests {
         private var frames: [Frame] = []
 
         var first: Frame? { lock.withLock { frames.first } }
+        var all: [Frame] { lock.withLock { frames } }
         func removeFirst() { lock.withLock { _ = frames.removeFirst() } }
 
         func add(_ pb: CVPixelBuffer, pts: CMTime) {
@@ -289,9 +323,20 @@ struct AV1FilmGrainGPUReferenceTests {
 
     /// The synthetic picture through `GPUFrameConverter`, read back as 10-bit Y, Cb and Cr planes.
     static func convert(_ grain: Grain?) throws -> (y: [UInt16], u: [UInt16], v: [UInt16]) {
-        var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        var frame: UnsafeMutablePointer<AVFrame>? = try makeFrame(grain)
         defer { av_frame_free(&frame) }
         let f = try #require(frame)
+        let pb = try makePixelBuffer()
+        let converter = try #require(GPUFrameConverter())
+        #expect(GPUFrameConverter.accepts(f))
+        #expect(converter.convert(f, into: pb))
+        return read(pb)
+    }
+
+    /// The synthetic picture as a decoded `yuv420p10le` frame, with `grain`'s parameters attached. The
+    /// caller frees it.
+    static func makeFrame(_ grain: Grain?) throws -> UnsafeMutablePointer<AVFrame> {
+        let f = try #require(av_frame_alloc())
         f.pointee.width = Int32(width); f.pointee.height = Int32(height)
         f.pointee.format = AV_PIX_FMT_YUV420P10LE.rawValue
         #expect(av_frame_get_buffer(f, 0) == 0)
@@ -306,17 +351,22 @@ struct AV1FilmGrainGPUReferenceTests {
         fill(f.pointee.data.1!, stride: f.pointee.linesize.1, w: cw, h: ch, uSample)
         fill(f.pointee.data.2!, stride: f.pointee.linesize.2, w: cw, h: ch, vSample)
         if let grain { try attach(grain, to: f) }
+        return f
+    }
 
+    /// A P010 buffer of the synthetic picture's size, as the decoder's pool makes them.
+    static func makePixelBuffer() throws -> CVPixelBuffer {
         var buffer: CVPixelBuffer?
         let attributes: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
                                          kCVPixelBufferMetalCompatibilityKey as String: true]
         #expect(CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
                                     attributes as CFDictionary, &buffer) == kCVReturnSuccess)
-        let pb = try #require(buffer)
-        let converter = try #require(GPUFrameConverter())
-        #expect(GPUFrameConverter.accepts(f))
-        #expect(converter.convert(f, into: pb))
+        return try #require(buffer)
+    }
 
+    /// A converted buffer back as 10-bit Y, Cb and Cr planes.
+    static func read(_ pb: CVPixelBuffer) -> (y: [UInt16], u: [UInt16], v: [UInt16]) {
+        let cw = (width + 1) / 2, ch = (height + 1) / 2
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         var y: [UInt16] = [], u: [UInt16] = [], v: [UInt16] = []

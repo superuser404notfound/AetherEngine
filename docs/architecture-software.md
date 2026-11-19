@@ -368,6 +368,7 @@ See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.
 - After every decoder flush or drain (seek, error recovery, end of stream, a live seam) and in `stop()`, the host calls `settle()`. The frames still on the GPU reach the renderer before it flushes. `settle()` gives up after 0.5 s and logs `[FramePipeline] settle: ...`, because seek and stop call it on the main actor.
 - Each frame carries the generation its packet was read under, taken when the decoder hands it over, and goes out only while that generation is live (the AE#491 check). At delivery the demux loop may already read packets of the new position, so a check made only then would let a frame from before the seek through. A frame stale at hand-over never reaches the GPU.
 - A frame whose GPU work failed goes out as decoded.
+- A stage can answer `.drop` (from `begin` or a `.later` step's `resume`) when it has no picture for the frame: the frame frees its slot and nothing is delivered for it.
 - A command buffer iOS refuses because the app is in the background (`notPermitted`) also delivers the frame as decoded, and neither stage counts it as a failure. Before, three refused frames switched the stage off for the title.
 - A frame's work holds its plane textures and the texture cache they came from (`MetalTextureLease`). A `CVMetalTexture` calls back into its cache when it is freed and does not retain it, so a stage can now drop or rebuild its chain while frames are still on the GPU.
 - The budget counts the time a frame holds the decoder's thread: waiting for a free slot, then encoding. In steady state that is the stage's cost per frame.
@@ -386,6 +387,21 @@ A failed build of the frame chain or upscaler kernels is kept for 60 s, so it is
 A GPU without non-uniform threadgroups (the A10X in the first Apple TV 4K) cannot run `dispatchThreads`. There every kernel is dispatched in whole threadgroups, and each kernel's bounds guard drops the threads past the picture's edge.
 
 On the A12, 720p to 2160p through MetalFX holds the decoder's thread about 9.5 ms per frame instead of 29.5 ms. Numbers: [measurements.md › Two frames in flight on the A12](measurements.md#two-frames-in-flight-on-the-a12-ae957).
+
+#### 10-bit AV1 conversion
+
+The P010 conversion and film grain of 10-bit AV1 (`GPUFrameConverter`, [formats › AV1](formats.md#av1)) run in a pipeline of the same kind, inside `SoftwareVideoDecoder`. While one frame converts, dav1d decodes the next.
+
+- **Who.** Only the playback host, which sets `overlapsGPUConversion` before it opens the decoder. The probe, the still extractor and the tests read a frame as soon as `decode` returns, so they keep the conversion that waits for each frame.
+- **Order.** Every frame of that decoder goes through the pipeline, one converted on the CPU included, so frames leave in decode order. The frame handler then runs on the pipeline's delivery queue.
+- **Buffers.** The converter has one set of per-frame buffers (uniforms, grain templates, scaling, offsets, staging) for each frame that can be on the GPU. A frame's work is encoded in the pipeline's `begin`, after the wait for a free slot, so the set it writes belongs to a frame already delivered.
+- **The picture.** The GPU reads dav1d's picture in place. The frame's work holds a reference to it until the work completes, because the decoder reuses its frame as soon as `submit` returns.
+- **Seeks.** Each frame carries the feed epoch it was emitted under (AE#492) and goes out only while that epoch is live. `flush()` moves the epoch on, so the frames still on the GPU are retired with the undecoded packets, and it waits for them before it returns. `drainForEndOfStream()` waits for the last frames, and `close()` for any left, so the host's own flush and drain order is unchanged.
+- **Failure.** A frame whose GPU work fails is converted with `sws_scale` when the work completes, without its grain, as when the waiting conversion fails. A frame that never reaches the GPU is converted on the decoder's thread. A frame neither converts is dropped, as the waiting conversion drops it, because its pixel buffer was never written. So the decoder commits the work in a `.later` step, whose `resume` can answer `.drop` once the work completed.
+- **Grain tables.** The frame's film grain tables (`AV1FilmGrainTables`) are built on the decoder's thread when its work is encoded. Their loops run with `while` over raw pointers, so a host's Debug build, which compiles the package unoptimised, keeps up too: written with `Array` and `for ... in` they took the whole frame interval there.
+- **Log.** Every 240 frames the converter logs `[GPUFrameConverter] last 240 frames: encode ... ms, GPU ... ms, decoder thread held ... ms per frame`, ending in `(overlapped)` on this route and `(waited for each)` on the other.
+
+Waiting for each frame held a 1080p 10-bit episode below its 24 frames a second on an Apple TV 4K (A15) in a host's Debug build, so the clock paused to rebuffer every few seconds; most of each frame's time there was the grain tables. Numbers: [measurements.md › 10-bit AV1 conversion on the A15](measurements.md#10-bit-av1-conversion-on-the-a15).
 
 ### HDR10 pass-through probe
 

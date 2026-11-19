@@ -1179,6 +1179,13 @@ final class SoftwarePlaybackHost {
     }
 
     /// Whether `decoder` is a `DualLayerVideoDecoder`; always false without the trait.
+    /// Set on the decoder before it opens for playback: 10-bit AV1 converts on the GPU with up to two frames
+    /// in flight while dav1d decodes the next, instead of the decode thread waiting for each (the decoder's
+    /// own flush, drain and close settle them). The probe and the still extractor open theirs without it.
+    nonisolated static func prepareForPlayback(_ decoder: any VideoDecodingPipeline) {
+        (decoder as? SoftwareVideoDecoder)?.overlapsGPUConversion = true
+    }
+
     nonisolated static func isDualLayer(_ decoder: any VideoDecodingPipeline) -> Bool {
         #if DualLayerDolbyVision
         return decoder is DualLayerVideoDecoder
@@ -1527,6 +1534,7 @@ final class SoftwarePlaybackHost {
 
         let onFrame = upscaledFrameHandler(
             baseOnFrame, decoder: videoDecoder, frameRate: AetherEngine.detectFrameRate(stream: vStream))
+        Self.prepareForPlayback(videoDecoder)
 
         if vStream.pointee.codecpar?.pointee.codec_id == AV_CODEC_ID_VP9 {
             let opened = try VideoDecoderOpener.openPreferredOrFallback(

@@ -33,6 +33,18 @@ the public-API contract.
 
 ### Fixed
 
+- **10-bit AV1 on the software path no longer stalls while the GPU converts each frame.** The decoder's thread
+  converted each frame to P010 with its film grain on the GPU, then waited for the GPU before it took the
+  next. On an Apple TV 4K (A15) a 1080p 23.976 fps episode reached the renderer at 22 to 23 frames a second,
+  and the clock paused to rebuffer every 4.5 to 8 s. Now up to two frames convert on the GPU while dav1d
+  decodes the next, and the episode plays at 24 fps without a pause, in Debug and Release builds alike. A
+  frame neither the GPU nor `sws_scale` could convert is dropped rather than shown unwritten.
+- **10-bit AV1 with film grain keeps up in a host's Debug build.** The film grain tables are built on the
+  decoder's thread for every frame. Written with `Array` and `for ... in`, they took 40.8 ms a frame
+  unoptimised on an M1, and the encode around them 40 to 44 ms on an Apple TV 4K (A15): the whole frame
+  interval at 23.976 fps, so a Debug build stalled where a Release build did not. Their loops now run with
+  `while` over raw pointers: 1.45 ms unoptimised on the M1, under 1 ms optimised, with the same output.
+  Pinned by `AV1FilmGrainTablesMatchTheReferenceArithmeticTests`.
 - **An AES-128 live channel with HEVC in MPEG-TS and no `CODECS` now gets its picture.** The live carriage
   probe gave up on any encrypted first segment, because it could not read the PMT behind the encryption. A
   channel like that (common on Xtream/XUI panels) stayed on AVPlayer with sound and no video, although the

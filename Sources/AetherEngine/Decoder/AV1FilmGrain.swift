@@ -39,6 +39,13 @@ import AetherLibavutil
 /// seconds on an M5 Pro), on the same cores the decode needs; on a fanless Apple TV that
 /// share is heat it does not have to make. The tables below are about 30 KB and well under a
 /// millisecond of work.
+///
+/// They are built once per frame on the decoder's thread, so the loops run over raw pointers with
+/// `while`: in a debug build (the package unoptimised, as a host's Debug configuration compiles it)
+/// every `Array` subscript and every `for ... in` step is a call, and the same arithmetic took 40.8 ms
+/// a frame on an M1. On an Apple TV 4K (A15) the encode around it took 40 to 44 ms, the whole frame
+/// interval at 23.976 fps. Written this way the tables take well under 2 ms unoptimised
+/// and under 1 ms optimised on the M1 (see measurements.md).
 struct AV1FilmGrainTables {
 
     /// `GRAIN_WIDTH` x `GRAIN_HEIGHT`: the luma template.
@@ -141,19 +148,20 @@ struct AV1FilmGrainTables {
         let arShift = Int(aom.ar_coeff_shift)
 
         let luma = Self.lumaTemplate(seed: seed, shift: shift, lag: lag, coeffs: arY, arShift: arShift)
-        lumaGrain = luma.map { Int16($0) }
+        var lumaOut = [Int16](repeating: 0, count: luma.count)
+        Self.narrow(luma, into: &lumaOut)
+        lumaGrain = lumaOut
         var chroma = [Int16](repeating: 0, count: 2 * Self.chromaWidth * Self.chromaHeight)
         let hasLuma = aom.num_y_points > 0
         if u.applyCb != 0 {
             let cb = Self.chromaTemplate(seed: seed ^ 0xB524, shift: shift, lag: lag, coeffs: arCb,
                                          arShift: arShift, luma: luma, addsLuma: hasLuma)
-            for i in 0..<cb.count { chroma[i] = Int16(cb[i]) }
+            Self.narrow(cb, into: &chroma)
         }
         if u.applyCr != 0 {
             let cr = Self.chromaTemplate(seed: seed ^ 0x49D8, shift: shift, lag: lag, coeffs: arCr,
                                          arShift: arShift, luma: luma, addsLuma: hasLuma)
-            let base = Self.chromaWidth * Self.chromaHeight
-            for i in 0..<cr.count { chroma[base + i] = Int16(cr[i]) }
+            Self.narrow(cr, into: &chroma, at: Self.chromaWidth * Self.chromaHeight)
         }
         chromaGrain = chroma
 
@@ -163,18 +171,7 @@ struct AV1FilmGrainTables {
         if aom.num_uv_points.1 > 0 { Self.fillScaling(&tables, table: 2, points: crPoints) }
         scaling = tables
 
-        // The seed of block row r, then one 8-bit draw per block across the row. dav1d draws the row
-        // above again from its own seed for the overlap, which is this same table one row up.
-        var table = [UInt8](repeating: 0, count: blockRows * blockCols)
-        for row in 0..<blockRows {
-            var rowSeed = seed
-            rowSeed ^= UInt32(((row * 37 + 178) & 0xFF) << 8)
-            rowSeed ^= UInt32((row * 173 + 105) & 0xFF)
-            for col in 0..<blockCols {
-                table[row * blockCols + col] = UInt8(Self.random(8, &rowSeed))
-            }
-        }
-        offsets = table
+        offsets = Self.blockOffsets(seed: seed, blockCols: blockCols, blockRows: blockRows)
     }
 
     // MARK: - dav1d's arithmetic
@@ -196,31 +193,94 @@ struct AV1FilmGrainTables {
     private static let grainMin = -(128 << (bitDepth - 8))
     private static let grainMax = (128 << (bitDepth - 8)) - 1
 
-    /// `generate_grain_y_c`.
+    /// The offset of each 32x32 block: the seed of block row r, then one 8-bit draw per block across the
+    /// row. dav1d draws the row above again from its own seed for the overlap, which is this same table one
+    /// row up.
+    static func blockOffsets(seed: UInt32, blockCols: Int, blockRows: Int) -> [UInt8] {
+        var table = [UInt8](repeating: 0, count: blockRows * blockCols)
+        let frameSeed = Int(seed)
+        table.withUnsafeMutableBufferPointer { tp in
+            guard let t = tp.baseAddress else { return }
+            var row = 0
+            while row < blockRows {
+                var state = frameSeed ^ (((row * 37 + 178) & 0xFF) << 8) ^ ((row * 173 + 105) & 0xFF)
+                var col = 0
+                while col < blockCols {
+                    // `random(8, &state)`, written out (see `lumaTemplate`).
+                    let bit = (state ^ (state >> 1) ^ (state >> 3) ^ (state >> 12)) & 1
+                    state = (state >> 1) | (bit << 15)
+                    t[row * blockCols + col] = UInt8(truncatingIfNeeded: state >> 8)
+                    col += 1
+                }
+                row += 1
+            }
+        }
+        return table
+    }
+
+    /// The neighbours the auto-regressive filter weighs, as offsets into a template `width` wide, in
+    /// coefficient order: rows `-lag...0`, columns `-lag...lag`, up to the sample itself.
+    static func neighbours(lag: Int, width: Int) -> [Int] {
+        var out: [Int] = []
+        var dy = -lag
+        while dy <= 0 {
+            var dx = -lag
+            while dx <= lag {
+                if dy == 0 && dx == 0 { return out }
+                out.append(dy * width + dx)
+                dx += 1
+            }
+            dy += 1
+        }
+        return out
+    }
+
+    /// `AV1GaussianSequence.values` widened once, so the per-sample reads need no conversion.
+    private static let gaussian: [Int] = AV1GaussianSequence.values.map { Int($0) }
+
+    /// `generate_grain_y_c`. `random(11, &state)` and `round2` are written out in the loops: unoptimised,
+    /// a call per sample was most of the cost (see the type's comment).
     static func lumaTemplate(seed: UInt32, shift: Int, lag: Int, coeffs: [Int8], arShift: Int) -> [Int] {
         let w = lumaWidth, h = lumaHeight
         var buf = [Int](repeating: 0, count: w * h)
-        var state = seed
-        let gaussian = AV1GaussianSequence.values
-        buf.withUnsafeMutableBufferPointer { b in
-            for i in 0..<(w * h) {
-                b[i] = round2(Int(gaussian[random(11, &state)]), shift)
+        let offsets = neighbours(lag: lag, width: w)
+        let count = offsets.count
+        let weights = coeffs.prefix(count).map { Int($0) } + [0]
+        let rounding = (1 << shift) >> 1, arRounding = (1 << arShift) >> 1
+        let lo = grainMin, hi = grainMax
+        var state = Int(seed)
+        gaussian.withUnsafeBufferPointer { gp in
+        offsets.withUnsafeBufferPointer { op in
+        weights.withUnsafeBufferPointer { wp in
+        buf.withUnsafeMutableBufferPointer { bp in
+            let g = gp.baseAddress!, c = wp.baseAddress!, b = bp.baseAddress!
+            var i = 0
+            while i < w * h {
+                let bit = (state ^ (state >> 1) ^ (state >> 3) ^ (state >> 12)) & 1
+                state = (state >> 1) | (bit << 15)
+                b[i] = (g[(state >> 5) & 0x7FF] + rounding) >> shift
+                i += 1
             }
-            for y in 3..<h {
-                for x in 3..<(w - 3) {
+            guard count > 0, let off = op.baseAddress else { return }
+            var y = 3
+            while y < h {
+                var x = 3
+                while x < w - 3 {
+                    let at = y * w + x
                     var sum = 0
                     var k = 0
-                    rows: for dy in -lag...0 {
-                        for dx in -lag...lag {
-                            if dx == 0 && dy == 0 { break rows }
-                            sum += Int(coeffs[k]) * b[(y + dy) * w + x + dx]
-                            k += 1
-                        }
+                    while k < count {
+                        sum += c[k] * b[at + off[k]]
+                        k += 1
                     }
-                    b[y * w + x] = min(max(b[y * w + x] + round2(sum, arShift), grainMin), grainMax)
+                    var v = b[at] + ((sum + arRounding) >> arShift)
+                    if v < lo { v = lo } else if v > hi { v = hi }
+                    b[at] = v
+                    x += 1
                 }
+                y += 1
             }
-        }
+        }}}}
         return buf
     }
 
@@ -230,76 +290,139 @@ struct AV1FilmGrainTables {
                                luma: [Int], addsLuma: Bool) -> [Int] {
         let w = chromaWidth, h = chromaHeight, lw = lumaWidth
         var buf = [Int](repeating: 0, count: w * h)
-        var state = seed
-        let gaussian = AV1GaussianSequence.values
-        buf.withUnsafeMutableBufferPointer { b in
-            for i in 0..<(w * h) {
-                b[i] = round2(Int(gaussian[random(11, &state)]), shift)
+        let offsets = neighbours(lag: lag, width: w)
+        let count = offsets.count
+        let weights = coeffs.prefix(count + 1).map { Int($0) } + [0]
+        let lumaWeight = addsLuma ? weights[count] : 0
+        let rounding = (1 << shift) >> 1, arRounding = (1 << arShift) >> 1
+        let lo = grainMin, hi = grainMax
+        var state = Int(seed)
+        gaussian.withUnsafeBufferPointer { gp in
+        offsets.withUnsafeBufferPointer { op in
+        weights.withUnsafeBufferPointer { wp in
+        luma.withUnsafeBufferPointer { lp in
+        buf.withUnsafeMutableBufferPointer { bp in
+            let g = gp.baseAddress!, c = wp.baseAddress!, l = lp.baseAddress!, b = bp.baseAddress!
+            var i = 0
+            while i < w * h {
+                let bit = (state ^ (state >> 1) ^ (state >> 3) ^ (state >> 12)) & 1
+                state = (state >> 1) | (bit << 15)
+                b[i] = (g[(state >> 5) & 0x7FF] + rounding) >> shift
+                i += 1
             }
-            for y in 3..<h {
-                for x in 3..<(w - 3) {
+            let off = op.baseAddress
+            var y = 3
+            while y < h {
+                var x = 3
+                while x < w - 3 {
+                    let at = y * w + x
                     var sum = 0
                     var k = 0
-                    rows: for dy in -lag...0 {
-                        for dx in -lag...lag {
-                            if dx == 0 && dy == 0 {
-                                guard addsLuma else { break rows }
-                                let lx = ((x - 3) << 1) + 3
-                                let ly = ((y - 3) << 1) + 3
-                                let l = luma[ly * lw + lx] + luma[ly * lw + lx + 1]
-                                    + luma[(ly + 1) * lw + lx] + luma[(ly + 1) * lw + lx + 1]
-                                sum += round2(l, 2) * Int(coeffs[k])
-                                break rows
-                            }
-                            sum += Int(coeffs[k]) * b[(y + dy) * w + x + dx]
-                            k += 1
-                        }
+                    while k < count {
+                        sum += c[k] * b[at + off![k]]
+                        k += 1
                     }
-                    b[y * w + x] = min(max(b[y * w + x] + round2(sum, arShift), grainMin), grainMax)
+                    if addsLuma {
+                        let la = (((y - 3) << 1) + 3) * lw + ((x - 3) << 1) + 3
+                        sum += ((l[la] + l[la + 1] + l[la + lw] + l[la + lw + 1] + 2) >> 2) * lumaWeight
+                    }
+                    var v = b[at] + ((sum + arRounding) >> arShift)
+                    if v < lo { v = lo } else if v > hi { v = hi }
+                    b[at] = v
+                    x += 1
                 }
+                y += 1
             }
-        }
+        }}}}}
         return buf
     }
 
+    /// `values` into `destination` from `offset` on, narrowed to 16 bits (a template stays within the
+    /// 10-bit grain range). A pointer loop, for the reason the type's comment gives.
+    static func narrow(_ values: [Int], into destination: inout [Int16], at offset: Int = 0) {
+        values.withUnsafeBufferPointer { sp in
+        destination.withUnsafeMutableBufferPointer { dp in
+            guard let s = sp.baseAddress, let d = dp.baseAddress, offset >= 0, offset + sp.count <= dp.count else { return }
+            var i = 0
+            while i < sp.count {
+                d[offset + i] = Int16(truncatingIfNeeded: s[i])
+                i += 1
+            }
+        }}
+    }
+
     /// `generate_scaling` at 10 bits: the piecewise-linear function over the 8-bit points, then each
-    /// step of four filled in between.
+    /// step of four filled in between. Written over a pointer, for the reason the type's comment gives.
     static func fillScaling(_ tables: inout [UInt8], table: Int, points: [(x: Int, y: Int)]) {
         let shiftX = bitDepth - 8
         let size = scalingSize
-        let base = table * size
-        guard let first = points.first, let last = points.last else { return }
+        guard let first = points.first, let last = points.last, table >= 0, (table + 1) * size <= tables.count
+        else { return }
+        let xs = points.map(\.x), ys = points.map(\.y)
+        let segments = points.count - 1
         var s = [Int](repeating: 0, count: size)
-        for i in 0..<min(first.x << shiftX, size) { s[i] = first.y }
-        for i in 0..<(points.count - 1) {
-            let bx = points[i].x, by = points[i].y
-            let dx = points[i + 1].x - bx, dy = points[i + 1].y - by
-            guard dx > 0 else { continue }
-            let delta = dy * ((0x10000 + (dx >> 1)) / dx)
-            var d = 0x8000
-            for x in 0..<dx {
-                s[(bx + x) << shiftX] = (by + (d >> 16)) & 0xFF
-                d += delta
+        s.withUnsafeMutableBufferPointer { sp in
+            let v = sp.baseAddress!
+            // Up to the first point: its value.
+            let firstEnd = min(first.x << shiftX, size)
+            var i = 0
+            while i < firstEnd {
+                v[i] = first.y
+                i += 1
             }
-        }
-        let n = last.x << shiftX
-        for i in n..<size { s[i] = last.y }
-        let pad = 1 << shiftX, rnd = pad >> 1
-        for i in 0..<(points.count - 1) {
-            let bx = points[i].x << shiftX
-            let dx = (points[i + 1].x << shiftX) - bx
-            var x = 0
-            while x < dx {
-                let range = s[bx + x + pad] - s[bx + x]
-                var r = rnd
-                for n in 1..<pad {
-                    r += range
-                    s[bx + x + n] = (s[bx + x] + (r >> shiftX)) & 0xFF
+            // Between points: the line through them, every fourth entry.
+            var p = 0
+            while p < segments {
+                let bx = xs[p], by = ys[p]
+                let dx = xs[p + 1] - bx, dy = ys[p + 1] - by
+                if dx > 0 {
+                    let delta = dy * ((0x10000 + (dx >> 1)) / dx)
+                    var d = 0x8000
+                    var x = 0
+                    while x < dx {
+                        v[(bx + x) << shiftX] = (by + (d >> 16)) & 0xFF
+                        d += delta
+                        x += 1
+                    }
                 }
-                x += pad
+                p += 1
+            }
+            // From the last point on: its value.
+            i = last.x << shiftX
+            while i < size {
+                v[i] = last.y
+                i += 1
+            }
+            // The three entries between each pair of those.
+            let pad = 1 << shiftX, rnd = pad >> 1
+            p = 0
+            while p < segments {
+                let bx = xs[p] << shiftX
+                let dx = (xs[p + 1] << shiftX) - bx
+                var x = 0
+                while x < dx {
+                    let range = v[bx + x + pad] - v[bx + x]
+                    var r = rnd
+                    var k = 1
+                    while k < pad {
+                        r += range
+                        v[bx + x + k] = (v[bx + x] + (r >> shiftX)) & 0xFF
+                        k += 1
+                    }
+                    x += pad
+                }
+                p += 1
             }
         }
-        for i in 0..<size { tables[base + i] = UInt8(s[i]) }
+        s.withUnsafeBufferPointer { sp in
+        tables.withUnsafeMutableBufferPointer { tp in
+            let v = sp.baseAddress!, t = tp.baseAddress! + table * size
+            var i = 0
+            while i < size {
+                t[i] = UInt8(truncatingIfNeeded: v[i])
+                i += 1
+            }
+        }}
     }
 
     // MARK: - Reading the C tuples

@@ -604,6 +604,14 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("`settle()` gives up after 0.5 s", docs)
     }
 
+    func testAV1ConversionSlotsAndTimingLineMatchDocumentation() throws {
+        XCTAssertEqual(GPUFrameConverter.slotCount, PipelinedFrameStage.defaultDepth)
+        XCTAssertEqual(GPUFrameConverter.statsInterval, 240)
+        let docs = try documentation()
+        assertDocumented("up to two frames convert while dav1d decodes the next", docs)
+        assertDocumented("Every 240 frames the converter logs `[GPUFrameConverter] last 240 frames", docs)
+    }
+
     func testHeldPictureFrameWaitMatchesDocumentation() throws {
         XCTAssertEqual(AetherEngine.defaultHeldPictureFrameWaitSeconds, 0.5)
         assertDocumented("waits up to 0.5 s for that frame", try documentation())

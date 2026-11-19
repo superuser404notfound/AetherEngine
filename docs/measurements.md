@@ -492,6 +492,50 @@ Current rule: [architecture-software.md › Two frames in flight on the GPU](arc
 - A seek to 3 s while playing and a seek to 12 s while paused both landed on their target, the paused one with its frame on screen. The clip played to the end with 0 dropped frames and no `settle` timeout.
 - The picture processing tone map (1000 to 600 nit) on the 4K 23.976 fps pattern held the decoder's thread 1.3 to 1.5 ms per frame, 0 dropped frames. 4K60 is not measured through the pipeline: the 4K60 test clip declares no HDR10 metadata, so the route is not taken.
 
+### 10-bit AV1 conversion on the A15
+
+Measured on an Apple TV 4K (A15, tvOS 27.2.1) on 2026-11-18, in playback in a host app's Debug build (the package compiled unoptimised, as in every run in this section): a 1080p 23.976 fps 10-bit AV1 episode with film grain, Opus stereo, MKV, 2.8 Mbit/s over the home network. The answer first: **waiting for the GPU on every frame held the decode below real time, and the clock paused to rebuffer every few seconds.**
+
+Current rule: [architecture-software.md › 10-bit AV1 conversion](architecture-software.md#10-bit-av1-conversion).
+
+| Route | Frames to the renderer per second | Audio lead | CPU (one core = 100%) |
+|---|---|---|---|
+| GPU conversion, waiting for each frame (7.54) | 22 to 23 | fell 1 s per second, clock paused every 4.5 s | dav1d 9%, other threads 63% |
+| GPU conversion, waiting for each frame (7.70) | 22 to 23 | same, clock paused every 8 s | dav1d 10%, other threads 62% |
+| CPU (`convertsAV1FramesOnGPU` off) | 23 to 26, mean 24 | steady at 4.0 s, no pause | dav1d 55%, other threads 11% |
+
+- Per-second counts from `[SWDiag]` (`enq=`), CPU from the 30 s `cpuprobe`. The network was not the cause: the reader stopped at its 16 MB window and every pause resumed within 0.3 s.
+- With the GPU route the dav1d workers were mostly idle. The decoder's thread was the limit: it encoded each frame, then waited for the GPU before it took the next.
+- The audio lead could only grow as far as the file was read, and the file was read only as fast as video was decoded, so the lead drained at the shortfall.
+
+**With the conversion overlapped** (two frames on the GPU), the same episode in the host's Debug build: the GPU took 1.7 ms per frame, but encoding a frame held the decoder's thread 40 to 44 ms, at 100% of a core. The clock paused about once a minute, then every few seconds once the encode crept past the 41.7 ms frame interval. The film grain tables were that cost, not the GPU.
+
+**The film grain tables**, timed on an M1 on 2026-11-19 (lag 3, 1080p):
+
+| Code | Unoptimised (debug build) | Optimised |
+|---|---|---|
+| Luma and both chroma templates, `Array` and `for ... in` | 37.9 ms per frame | 0.61 ms |
+| The same, `while` over raw pointers | 1.3 ms | 0.22 ms |
+| Whole table build, before | 40.8 ms | |
+| Whole table build, template loops written out | 3.05 ms | |
+| Whole table build, every loop written out | 1.45 ms | |
+
+- An unoptimised build makes every `Array` subscript and every `for ... in` step a call, which dav1d's C never pays, so the CPU route kept up in the same debug build.
+- On the A15 the whole encode (the tables, mapping the picture and encoding the passes) took 40 to 44 ms with the old loops, against 40.8 ms for the tables alone on the M1: the tables were nearly all of it.
+- The output is unchanged: `AV1FilmGrainTablesMatchTheReferenceArithmeticTests` holds the new loops to the plain version, and the GPU digest tests hold both to dav1d.
+
+**With both changes**, the same episode on the same Apple TV, in the host's Debug build (four minutes, then two after the last loop change):
+
+| Route | Frames to the renderer per second | Encode per frame | GPU per frame | Clock paused | CPU (one core = 100%) |
+|---|---|---|---|---|---|
+| GPU conversion, overlapped, template loops written out | 24 in 213 of 249 one-second samples, 22 to 26 in all but 3 (the first second, and two resumes from a pause, each only partly playing) | 8.4 to 11.7 ms | 1.7 ms | only for the first fill at the start | 50% to 78% in all |
+| GPU conversion, overlapped, every loop written out (2026-11-19, two minutes) | 24 in 75 of 112, 22 to 26 in all but the first second | 6.2 to 8.9 ms | 1.7 ms | only for the first fill at the start | 68% to 74% in all |
+
+- The encode is the decoder's thread per frame: the grain tables, mapping the picture for the GPU and encoding the two passes. It uses a quarter of the 41.7 ms frame interval or less.
+- Writing out the narrowing and scaling loops too (1.45 ms against 3.05 ms for the whole table build on the M1) took about 2 ms off the A15's encode per frame.
+- The audio lead stayed at 4.0 s throughout both runs, in the first through two pauses by the viewer.
+- Every session pauses once as it starts, while the audio lead fills for the first time (`audio lead exhausted (-2.48s)` 50 ms after the open). The earlier runs did too.
+
 ### Software channel layout mismatch
 
 Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.
