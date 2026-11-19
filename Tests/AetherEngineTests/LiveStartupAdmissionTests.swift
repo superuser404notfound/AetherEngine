@@ -52,6 +52,17 @@ struct LiveStartupAdmissionTests {
         #expect(HLSLocalServer.buildMediaPlaylistText(provider: provider).contains("HOLD-BACK=45.000"))
     }
 
+    @Test("Without a configured grace, two complete segments are served at once")
+    func defaultGraceIsZero() {
+        let (provider, cache) = provider()
+        defer { cache.close() }
+        append(provider, 0); append(provider, 1)
+        let started = ContinuousClock.now
+        #expect(provider.waitForFirstLiveSegment(timeout: 5))
+        #expect(started.duration(to: .now) < .seconds(0.5))
+        #expect(HLSLocalServer.buildMediaPlaylistText(provider: provider).contains("HOLD-BACK=45.000"))
+    }
+
     @Test("An empty timed-out request does not latch admission")
     func emptyWindow() {
         let (provider, cache) = provider(grace: 0)

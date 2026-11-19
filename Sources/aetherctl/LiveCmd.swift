@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import AetherEngine
 
 // MARK: - high-bitrate seed generation
@@ -120,6 +121,8 @@ func runLive(
     realtime: Bool = false,
     fastZap: Bool = false,
     liveCushion: Double? = nil,
+    startupGrace: Double? = nil,
+    singleSegmentMinimum: Double? = nil,
     pacingPreroll: Double? = nil,
     pacingRate: Double? = nil,
     originLead: Double? = nil,
@@ -261,6 +264,8 @@ func runLive(
         }
         box.value = await liveSmokeTest(url: liveURL, seconds: playSeconds, fastZap: fastZap,
                                         liveCushion: liveCushion,
+                                        startupGrace: startupGrace,
+                                        singleSegmentMinimum: singleSegmentMinimum,
                                         dvrWindow: dvrWindow, measureRSS: measureRSS,
                                         reportCacheBytes: reportCacheBytes,
                                         checkMonotonic: discontinuityAt != nil,
@@ -276,6 +281,8 @@ func runLive(
 private func liveSmokeTest(url: URL, seconds playSeconds: Double,
                            fastZap: Bool = false,
                            liveCushion: Double? = nil,
+                           startupGrace: Double? = nil,
+                           singleSegmentMinimum: Double? = nil,
                            dvrWindow: Double? = nil,
                            measureRSS: Bool = false,
                            reportCacheBytes: Bool = false,
@@ -294,10 +301,29 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double,
     options.dvrWindowSeconds = dvrWindow
     options.liveJoinProfile = fastZap ? .fastZap : .standard
     options.liveEdgeCushionSeconds = liveCushion
+    options.liveStartupGraceSeconds = startupGrace
+    options.liveStartupSingleSegmentMinimumSeconds = singleSegmentMinimum
 
     // AE#195: load elapsed includes the startup-cushion gate, so this is the join-latency metric
     // a --realtime fixture A/Bs between profiles.
     let loadStartedAt = Date()
+    // The 1 Hz JOIN line below quantizes to a second, too coarse to compare against a reporter's
+    // stopwatch. These lines carry each checkpoint and phase change to the millisecond, from load start.
+    var startupTimeline: Set<AnyCancellable> = []
+    engine.$startupProgress
+        .compactMap { $0?.checkpoint }
+        .removeDuplicates()
+        .sink { checkpoint in
+            print(String(format: "  STARTUP +%.3fs %@", Date().timeIntervalSince(loadStartedAt), "\(checkpoint)"))
+        }
+        .store(in: &startupTimeline)
+    engine.$playbackPhase
+        .removeDuplicates()
+        .sink { phase in
+            print(String(format: "  PHASE +%.3fs %@", Date().timeIntervalSince(loadStartedAt), "\(phase)"))
+        }
+        .store(in: &startupTimeline)
+    defer { startupTimeline.removeAll() }
     do {
         // AE#509: a live join with a host-supplied resume anchor had no harness. The anchor a host
         // holds is on the PUBLISHED axis (the only one it is shown), the mount seek spends it on the

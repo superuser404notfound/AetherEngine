@@ -47,6 +47,8 @@ final class Issue594BoundedStartFloorTests: XCTestCase {
                 dvrWindowSeconds: nil
             ),
             allowsBoundedDegradedStart: true,
+            // The grace these cases exercise. The default is 0 since the live start measurements of 2026-11-19.
+            startupGraceSeconds: 0.5,
             boundedStartFloorsAtHoldback: floorsAtHoldback
         )
         return (provider, cache)

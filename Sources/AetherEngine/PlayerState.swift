@@ -375,11 +375,10 @@ public enum LiveJoinProfile: Sendable, Equatable {
     /// waits for the full advertised holdback.
     case standard
     /// The default. Channel-zapping profile: cut live segments at every keyframe past 0.5s, so TARGETDURATION and
-    /// holdback collapse to the source keyframe cadence. The first playlist prefers the full holdback,
-    /// but after two finalized segments a strict-realtime source gets one observed-segment grace,
-    /// clamped to 0.5...2.0s, before a shallow first window is served. The grace ends early once the
-    /// source reads at 1x and the open segment cannot reach its keyframe within it (AE#936). That
-    /// bounded start can produce one early -16832 warning or a short rebuffer.
+    /// holdback collapse to the source keyframe cadence. The first playlist is served as soon as the
+    /// window holds the full holdback or two finalized segments, whichever comes first
+    /// (`LoadOptions.liveStartupGraceSeconds` can add a wait). That bounded start can produce one early
+    /// -16832 warning or a short rebuffer.
     case fastZap
 }
 
@@ -770,10 +769,9 @@ public struct LoadOptions: Sendable, Equatable {
     /// cadence, TARGETDURATION follows the real GOP length with 1.5x headroom over the longest GOP seen
     /// before the seal (a broadcast's GOPs are irregular and each segment is one whole GOP, AE#670), and
     /// the holdback shrinks with it: 1 s GOPs serve TARGETDURATION 2, a 6 s holdback. The first serve
-    /// still prefers the full holdback, but after two finalized segments a strict-realtime source gets
-    /// one observed-segment grace clamped to 0.5...2.0s, then may serve a shallow first window, and the
-    /// grace ends early when the next keyframe cannot arrive inside it (AE#936). This bounds black-screen
-    /// startup but may produce one early `-16832` or a short rebuffer. A smaller TARGETDURATION also
+    /// goes out once the window holds that holdback or two finalized segments, whichever comes first,
+    /// so a shallow first window is normal. This bounds black-screen startup but may produce one early
+    /// `-16832` or a short rebuffer. A smaller TARGETDURATION also
     /// tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so an origin that stalls or
     /// bursts mid-stream is likelier to rebuffer. `.standard` cuts ~4s segments, so the served
     /// TARGETDURATION lands at >= 6 and the first manifest waits for the full `3 x TARGETDURATION`
@@ -786,10 +784,12 @@ public struct LoadOptions: Sendable, Equatable {
     /// live, sequential-only sources and disposable frame probes retain their own policies.
     public var sourceOpenPolicy: SourceOpenPolicy = .init()
 
-    /// Extra wait after an eligible finalized window for `.fastZap` loopback live joins.
-    /// Nil uses the observed segment duration clamped to 0.5...2 seconds. Zero serves immediately
-    /// once the minimum media exists. Invalid or negative values use the automatic policy.
-    /// A shorter grace can increase early rebuffering on irregular sources. This does not change
+    /// Extra wait after an eligible finalized window for `.fastZap` loopback live joins, in the hope of
+    /// a deeper first window. Nil (default), zero, invalid or negative values serve as soon as the
+    /// minimum media exists. A positive value waits up to that long and ends early once the next
+    /// keyframe cannot arrive inside it (AE#936). Before 7.71 nil meant one observed segment duration
+    /// clamped to 0.5...2 s; measured, that cost every raw MPEG-TS start 1 to 2 s and prevented no
+    /// rebuffer, only a harmless `-16832` warning on a strict-realtime origin. This does not change
     /// TARGETDURATION, HOLD-BACK, or `.standard` joins. The minimum is two segments unless
     /// `liveStartupSingleSegmentMinimumSeconds` explicitly permits a sufficiently long first one.
     public var liveStartupGraceSeconds: Double? = nil

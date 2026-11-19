@@ -498,7 +498,7 @@ What `.fastZap` changes:
 
 - **Shorter segments.** Live segments are cut at every keyframe after 0.5 s instead of the standard ~4 s. The served `TARGETDURATION` drops to 1.5 x the source GOP length: 1 s GOPs serve 2, and so do segments up to 1.666 s. The headroom covers a broadcast's irregular GOPs (#670).
 - **Smaller holdback.** The live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis minimum, #189) shrinks with it.
-- **A bounded start.** The first manifest still prefers the full holdback. After two finished segments, a source that delivers strictly in real time gets one grace period of one observed segment, clamped to 0.5...2.0 s. After that, a shallow first window may be served so startup stays bounded. This can cause one early `-16832` error or a short rebuffer.
+- **A bounded start.** The first manifest goes out once the window holds the full holdback or two finished segments, whichever comes first. A shallow first window is normal, and on a source that delivers strictly in real time it can cause one early `-16832` warning or a short rebuffer. `liveStartupGraceSeconds` adds a wait for a deeper window if a host prefers that.
 - **Less patience.** A smaller `TARGETDURATION` also makes AVPlayer less patient with an unchanged playlist, and keeps a smaller buffer at the live edge. Origins that stall or deliver in bursts mid-stream rebuffer more easily.
 
 ### The retune request: `liveSourceReset`
