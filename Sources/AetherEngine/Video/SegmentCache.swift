@@ -583,8 +583,9 @@ final class SegmentCache: @unchecked Sendable {
             _totalStoredCount &+= 1
         }
         // The folds describe the source, not the session: a hole the old pumps passed over is one
-        // the new ones will pass over too, and the #358 arms count across restarts on purpose.
-        for (index, count) in parked.foldCounts where entries[index] == nil {
+        // the new ones will pass over too, and the #358 arms count across restarts on purpose. From
+        // the frontier on, the new producer cuts and counts for itself, like a fresh session.
+        for (index, count) in parked.foldCounts where index < frontier && entries[index] == nil {
             foldCounts[index] = max(foldCounts[index] ?? 0, count)
         }
         if initSegment == nil, !moved.isEmpty {

@@ -109,15 +109,19 @@ struct Issue1095ParkedSessionCacheTests {
         let old = SegmentCache(retentionBudgetBytes: 1 << 30, baseDirectory: base)
         let initData = Data("init".utf8)
         old.setInit(initData)
-        for index in 0..<6 { #expect(old.store(index: index, data: Data(repeating: UInt8(index), count: 100 + index))) }
+        // seg3 is a hole the pump folded over, seg6 one past where the next session will start.
+        let stored = [0, 1, 2, 4, 5]
+        func bytes(_ index: Int) -> Data { Data(repeating: UInt8(index), count: 100 + index) }
+        for index in stored { #expect(old.store(index: index, data: bytes(index))) }
+        old.noteFolded(3..<4)
         old.noteFolded(6..<7)
 
         let parkedDir = base.appendingPathComponent("parked", isDirectory: true)
         try FileManager.default.createDirectory(at: parkedDir, withIntermediateDirectories: true)
         let parked = try #require(old.detachForParking(into: parkedDir))
-        #expect(parked.files.count == 6)
-        #expect(parked.totalBytes == (0..<6).reduce(0) { $0 + 100 + $1 })
-        #expect(parked.foldCounts[6] == 1)
+        #expect(parked.files.count == stored.count)
+        #expect(parked.totalBytes == stored.reduce(0) { $0 + 100 + $1 })
+        #expect(parked.foldCounts == [3: 1, 6: 1])
         #expect(parked.initSegment == initData)
         #expect(old.count == 0)
         old.close()
@@ -126,13 +130,15 @@ struct Issue1095ParkedSessionCacheTests {
 
         let new = SegmentCache(retentionBudgetBytes: 1 << 30, baseDirectory: base)
         defer { new.close() }
-        let adopted = new.adoptParked(parked, below: 4)
+        let adopted = new.adoptParked(parked, below: 5)
         #expect(adopted.segments == 4)
-        #expect(adopted.bytes == (0..<4).reduce(0) { $0 + 100 + $1 })
-        for index in 0..<4 { #expect(new.peek(index: index) == Data(repeating: UInt8(index), count: 100 + index)) }
-        #expect(new.peek(index: 4) == nil)
-        #expect(new.highestStoredIndex == 3)
-        #expect(new.foldCount(6) == 1)
+        #expect(adopted.bytes == [0, 1, 2, 4].reduce(0) { $0 + 100 + $1 })
+        for index in [0, 1, 2, 4] { #expect(new.peek(index: index) == bytes(index)) }
+        #expect(new.peek(index: 3) == nil)
+        #expect(new.peek(index: 5) == nil)
+        #expect(new.highestStoredIndex == 4)
+        #expect(new.foldCount(3) == 1, "a hole below the frontier stays known as one")
+        #expect(new.foldCount(6) == 0, "above the frontier the new producer counts for itself")
         #expect(new.fetchInit(timeout: 0.1) == initData)
     }
 
