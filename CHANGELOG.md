@@ -40,6 +40,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Upscaling no longer switches itself off at 720p60 in a host's Debug build.** A Debug build compiles the
+  engine without optimisation, and the CPU step that rewrites the upscaled frame's edge band took 20 to 22 ms
+  per 720p frame on an Apple TV 4K (A15). That alone was over the 15 ms budget at 59.94 fps, so the stage
+  dropped MetalFX and then switched off. The same arithmetic now runs in raw-pointer loops: about 5 ms on the
+  A15 in a Debug build, 0.5 ms optimised on an M1, the same output. `aetherctl bench` prints the step as
+  `edge median` (AE#1097, thanks @sunnierseattle).
 - **HDR10 coded 3840x2176 no longer shows 16 padding lines at the bottom on older Apple TVs.** Since 7.69.0
   the tvOS remux replaced the conformance window of such a stream with a `clap` box on every Apple TV. For PQ
   HDR, tvOS does not crop with that box. It squeezes all 2176 lines into 2160, so the padding showed as a band

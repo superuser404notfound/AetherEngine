@@ -2973,6 +2973,7 @@ The load logs one `[Upscale] taken: <source> -> <target> (<stages>)` / `[Upscale
   - A stage that switched itself off stays off for the rest of the session, also across in-session rebuilds (audio switch, background return), and `$activeUpscale` keeps its `disabledReason`.
   - Its plan (source, ML output and target size) is remembered for the process, together with the source frame rate. A later load with the same plan, at that rate or faster, logs `[Upscale] not taken (the stage disabled itself for this plan earlier in this process)`.
 - **Timing log.** For the first ten 48-frame windows of each stage, it logs a per-step timing line (`[Upscale] timing: total ... ms (copy, ml, edge, metal wall / gpu, attach) over 48 frames at ... ms interval`).
+  - A host's Debug build compiles the engine without optimisation, and `copy` and `edge` are CPU steps, so they read higher there. `edge` on a 720p source reads about 5 ms on an Apple TV 4K (A15) in a Debug build and about 0.5 ms optimised (AE#1097). Judge a device's budget from a Release build.
 
 **Going back to native.** A URL VOD session that only the stage put on the software path goes back to the native path when the stage switches itself off. Once no load is in flight, it reloads at the current position (`reloadAtCurrentPosition()`, logged as `[Upscale] stage disabled on a session it alone put on the software path: ...`). A custom `IOReader` source and a live session stay on the software path, with frames delivered as decoded.
 
