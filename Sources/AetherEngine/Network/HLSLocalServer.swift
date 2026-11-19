@@ -126,8 +126,9 @@ protocol HLSSegmentProvider: AnyObject {
     /// playlist one segment per video segment, so the embedded reader (parked ~90s ahead of the playhead)
     /// has the cues for a segment in the store by the time AVPlayer fetches it.
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String?
-    /// AE#1052: true while `ordinal` is a menu marker, served empty on purpose.
-    func nativeSubtitleServesSilently(ordinal: Int) -> Bool
+    /// AE#1052: true while `ordinal` is served empty on purpose (a menu marker, or a bitmap rendition
+    /// nothing fills), so an empty segment from it is no defect.
+    func nativeSubtitleServesEmptyByDesign(ordinal: Int) -> Bool
 
     /// AE#682: true when this session lists an I-frame rendition in its master. The two calls below
     /// answer `iframe_init.mp4` and `iframe{N}.mp4`; both may block on a source read.
@@ -221,7 +222,7 @@ extension HLSSegmentProvider {
     var nativeSubtitleDefaultOrdinal: Int { 0 }
     var nativeSubtitleWholeProgram: Bool { false }
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
-    func nativeSubtitleServesSilently(ordinal: Int) -> Bool { false }
+    func nativeSubtitleServesEmptyByDesign(ordinal: Int) -> Bool { false }
     var iFrameRenditionServed: Bool { false }
     var iFrameRenditionFormat: IFrameRenditionFormat? { nil }
     func iFrameInitSegment() -> Data? { nil }
@@ -1251,8 +1252,10 @@ final class HLSLocalServer: @unchecked Sendable {
             // a visible level would push the surrounding evidence out of the 300-line ring, and it is
             // exactly the surrounding evidence that says WHY a segment came out empty.
             let cues = vtt.components(separatedBy: "-->").count - 1
-            // An AE#1052 marker is empty on purpose and gets refetched on the next select.
-            if cues == 0, prov.nativeSubtitleServesSilently(ordinal: parsed.ordinal) == false {
+            // AE#1052: a marker and a bitmap rendition nothing fills are empty on purpose, and the
+            // select that later gives either one text deselects and reselects, so AVKit asks again.
+            // The second case is logged once per rendition by the provider.
+            if cues == 0, prov.nativeSubtitleServesEmptyByDesign(ordinal: parsed.ordinal) == false {
                 EngineLog.emit("[HLSLocalServer] served an EMPTY subtitle .vtt ord=\(parsed.ordinal) "
                                + "seg=\(seg) bytes=\(vtt.utf8.count); the receiver caches this segment "
                                + "as it is and never asks again", category: .hlsServer)

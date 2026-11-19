@@ -54,6 +54,10 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
     }
     private var notedWithoutFill = false
 
+    /// An empty segment from this store is expected rather than a lost race: a menu marker, or a
+    /// bitmap store nothing fills. The server keeps its empty-segment warning for the other case.
+    var servesEmptyByDesign: Bool { servesSilently || !waitsForFill }
+
     private static func key(start: Double, end: Double, text: String) -> String {
         let start = SourceTimestampBounds.clampedSeconds(start), end = SourceTimestampBounds.clampedSeconds(end)
         return "\(Int((start * 1000).rounded()))|\(Int((end * 1000).rounded()))|\(text)"

@@ -64,6 +64,11 @@ the public-API contract.
   on. Measured with aetherctl on a PGS-only MKV, a segment took 3.07 s before and 2 ms after. It happened when
   a user picked a bitmap track in AVKit's menu before the host reacted, or when a select named a bitmap track
   the overlay does not show (AE#1052).
+- **An empty segment from a bitmap rendition nothing fills no longer prints the empty-segment warning.** The
+  requests AVKit sends between a pick in its menu and the host's marker took the warning path, which says the
+  receiver keeps the segment for good. That line is meant for a rendition that lost a race with its reader.
+  Here empty is the right answer, and a later select that gives the rendition text reselects, so AVKit asks
+  again. The once-per-rendition line still says why (AE#1052, thanks @axeslasher).
 - **The VOD HLS ingest no longer re-asks a refusing origin three times in 1.5 s.** A 429, 503 or 509 on a
   segment used to be retried in place after 0.5 and 1 s, outside the refusal books. On a panel that allows one
   stream per account that is the churn it answers with a longer refusal or a block. The refusal now goes on

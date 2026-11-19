@@ -3591,8 +3591,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// the AVPlayer timeline. `segments[i].startSeconds` is the absolute output-axis start (correct for both
     /// VOD and the live sliding window, where a cumulative EXTINF sum from firstVisible would not be), so the
     /// window is read straight off the segment plan rather than recomputed.
-    func nativeSubtitleServesSilently(ordinal: Int) -> Bool {
-        ordinal >= 0 && ordinal < nativeSubStores.count && nativeSubStores[ordinal].servesSilently
+    func nativeSubtitleServesEmptyByDesign(ordinal: Int) -> Bool {
+        ordinal >= 0 && ordinal < nativeSubStores.count && nativeSubStores[ordinal].servesEmptyByDesign
     }
 
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? {
