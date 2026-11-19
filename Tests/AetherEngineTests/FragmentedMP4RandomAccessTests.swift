@@ -85,7 +85,74 @@ private func tfra(track: Int, version: UInt8, entries: [(Int64, Int64)]) -> Data
     #expect(FragmentedMP4RandomAccess.shiftOntoIndex(times: [0, 10], indexedKeyframes: []) == nil)
 }
 
+/// An mfra that stops short of the file: the demuxer read the last fragment for the durations and
+/// found a keyframe the last tfra entry's fragment cannot hold, so the two are not trusted.
+@Test func anMfraThatStopsShortOfTheLastFragmentIsRejected() {
+    #expect(FragmentedMP4RandomAccess.shiftOntoIndex(times: [0, 1000], indexedKeyframes: [0, 500, 5000]) == nil)
+}
+
 @Test func startsAreSecondsFromTheFirstEntry() {
     let access = FragmentedMP4RandomAccess(trackID: 1, timescale: 12288, times: [512, 12800, 25088], moofOffsets: [1, 2, 3])
     #expect(access.startsSeconds == [0, 1, 2])
+}
+
+// MARK: - The probe through AVIO
+
+/// A byte source that remembers where it was asked to seek.
+private final class SeekRecordingReader: IOReader, @unchecked Sendable {
+    private let inner: DataIOReader
+    private let lock = NSLock()
+    private var recorded: [Int64] = []
+    init(_ data: Data) { inner = DataIOReader(data: data) }
+    var seeks: [Int64] { lock.lock(); defer { lock.unlock() }; return recorded }
+    func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 { inner.read(buffer, size: size) }
+    func seek(offset: Int64, whence: Int32) -> Int64 {
+        if whence == SEEK_SET { lock.lock(); recorded.append(offset); lock.unlock() }
+        return inner.seek(offset: offset, whence: whence)
+    }
+    func close() { inner.close() }
+    func cancel() {}
+    func makeIndependentReader() -> IOReader? { nil }
+    var discImageProbeEnabled: Bool { false }
+}
+
+private func probe(_ file: Data) throws -> (FragmentedMP4RandomAccess.Probe, [Int64]) {
+    let reader = SeekRecordingReader(file)
+    let bridge = CustomIOReaderBridge(reader: reader)
+    try bridge.open()
+    defer { bridge.close() }
+    let pb = try #require(bridge.context)
+    return (FragmentedMP4RandomAccess.probe(pb), reader.seeks)
+}
+
+private let ftyp = box("ftyp", Data("isom0000isom".utf8))
+private func fragmentedMoov() -> Data {
+    box("moov", fullBox("mvhd", version: 0, Data(count: 96)) + trak(id: 1, handler: "vide", timescale: 12288)
+        + box("mvex", fullBox("trex", version: 0, Data(count: 20))))
+}
+
+@Test func theProbeReadsAFragmentedFilesMfra() throws {
+    let media = box("moof", Data(count: 64)) + box("mdat", Data(count: 4_000))
+    let index = tfra(track: 1, version: 1, entries: [(512, 1_000), (12_800, 5_000)])
+    let mfraBody = index + fullBox("mfro", version: 0, be32(index.count + 8 + 16))
+    let file = ftyp + fragmentedMoov() + media + media + box("mfra", mfraBody)
+    let (result, _) = try probe(file)
+    guard case .usable(let access) = result else { Issue.record("expected usable, got \(result)"); return }
+    #expect(access.trackID == 1 && access.timescale == 12288 && access.times == [512, 12_800])
+}
+
+@Test func aFragmentedFileWithoutMfraIsIndexedInFull() throws {
+    let file = ftyp + fragmentedMoov() + box("moof", Data(count: 64)) + box("mdat", Data(count: 4_000))
+    let (result, _) = try probe(file)
+    #expect(result == .unusable("no mfra at the end of the file"))
+}
+
+/// A classic MP4 whose moov comes after its media: the probe stops at the mdat and reads nothing
+/// near the end, so the open's own trailing-index pass is the only one.
+@Test func mediaBeforeTheMoovStopsTheProbeAtTheMdat() throws {
+    let mdat = box("mdat", Data(count: 200_000))
+    let file = ftyp + mdat + box("moov", fullBox("mvhd", version: 0, Data(count: 96)) + trak(id: 1, handler: "vide", timescale: 24000))
+    let (result, seeks) = try probe(file)
+    #expect(result == .notFragmented)
+    #expect(seeks.allSatisfy { $0 <= Int64(ftyp.count) }, "seeks: \(seeks)")
 }

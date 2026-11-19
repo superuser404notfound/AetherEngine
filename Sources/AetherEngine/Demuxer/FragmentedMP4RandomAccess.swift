@@ -10,8 +10,10 @@ import AetherLibavformat
 /// fragment and finds the others as seeks need them, but then the keyframe index holds only what
 /// has been read, and the segment plan needs every keyframe up front. The `mfra` has them: each
 /// `tfra` entry is a sync sample of its track, with the time it starts at. Those times become the
-/// plan's boundaries the way a DASH source's sidx SAPs do (AE#1075). They are decode times; the
-/// plan uses them as differences from the first, so a constant composition offset cancels.
+/// plan's boundaries the way a DASH source's sidx SAPs do (AE#1075). They are presentation times
+/// (the sync sample's, ISO/IEC 14496-12 8.8.10); the index holds decode times, so
+/// `shiftOntoIndex` aligns them, and a declared-boundary plan uses them as differences from the
+/// first, where a constant composition offset cancels.
 ///
 /// The `mfra` is trusted for where the plan may cut and nothing else: seeks land through the
 /// demuxer's own reading of the fragments, which checks every `moof` it uses.
@@ -43,7 +45,8 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
     // MARK: Reading through AVIO
 
     /// Reads the head boxes, the `moov` and the `mfra` through `pb`, then puts `pb` back at 0.
-    /// A faststart MP4 costs a few 16 byte reads inside the head the open fetches anyway.
+    /// A faststart MP4 costs a few 16 byte reads inside the head the open fetches anyway; an MP4
+    /// whose `mdat` comes before its `moov` stops at that `mdat`.
     static func probe(_ pb: UnsafeMutablePointer<AVIOContext>) -> Probe {
         defer { _ = avio_seek(pb, 0, SEEK_SET) }
         let size = avio_size(pb)
@@ -65,6 +68,10 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
             guard let head = read(offset, Int(min(16, size - offset))),
                   let box = boxHeader(head, at: 0, available: Int64(head.count)) else { return .notFragmented }
             if index == 0, box.type != "ftyp" { return .notFragmented }
+            // A fragmented file's moov comes before any media data. Media first is a classic MP4
+            // (moov at the end, read by the open's own trailing-index pass): nothing more is read
+            // here, so its tail costs no extra request.
+            if box.type == "mdat" || box.type == "moof" { return .notFragmented }
             if box.type == "moov" { moov = (offset, box.size == 0 ? size - offset : box.size, box.headerSize); break }
             guard box.size > 0 else { return .notFragmented }
             offset += box.size
@@ -115,7 +122,6 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
         let shift = firstIndexed - first
         let keyframes = Set(indexed)
         let sorted = indexed.sorted()
-        var checked = 0
         for (i, raw) in times.enumerated() {
             let time = raw + shift
             let next = i + 1 < times.count ? times[i + 1] + shift : Int64.max
@@ -123,12 +129,7 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
             while lo < hi { let mid = (lo + hi) / 2; if sorted[mid] < time { lo = mid + 1 } else { hi = mid } }
             guard lo < sorted.count, sorted[lo] < next else { continue }   // fragment not read
             guard keyframes.contains(time) else { return nil }
-            checked += 1
         }
-        // An indexed keyframe before the first entry or past the last entry's fragment would be one
-        // the mfra does not know about.
-        guard let lastIndexed = sorted.last, sorted.first == first + shift, checked >= 1,
-              lastIndexed >= first + shift else { return nil }
         return shift
     }
 

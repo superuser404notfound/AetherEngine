@@ -62,3 +62,27 @@ private func mfra(_ moofs: [Int64], track2: [Int64] = []) -> Data {
     #expect(AVIOReader.fragmentHeaderShortfall(whole, ceiling: 1 << 20) == nil)
     #expect(AVIOReader.fragmentHeaderShortfall(block, ceiling: 2_500) == 2_500 - block.count)   // capped at the next range
 }
+
+/// What the share keeps of a fetched range: the moof and the 16 bytes behind it, nothing of the
+/// lead in front or the estimate past it.
+@Test func theShareKeepsOnlyTheMoofAndTheHeaderBehindIt() {
+    let moof = box("moof", Data(count: 1_000))
+    let block = Data(count: 256) + moof + Data(count: 4_000)
+    #expect(AVIOReader.fragmentHeaderCore(block) == 256..<(256 + moof.count + 16))
+    #expect(AVIOReader.fragmentHeaderCore(Data(count: 256) + moof.prefix(500)) == nil)   // cut short
+    #expect(AVIOReader.fragmentHeaderCore(Data(count: 4_096)) == nil)
+}
+
+/// The share holds one source, and a retention timer only ever releases the source it was set for.
+@Test func theShareIsReleasedByItsOwnRetentionTimerOnly() {
+    let share = FragmentHeaderShare()
+    share.publish(key: "a", start: 100, block: Data(count: 64))
+    let first = share.currentGeneration
+    #expect(share.heldBytes == 64)
+    share.publish(key: "b", start: 100, block: Data(count: 32))
+    #expect(share.heldBytes == 32)
+    share.drop(generation: first)            // the first source's timer fires late
+    #expect(share.heldBytes == 32)
+    share.drop(generation: share.currentGeneration)
+    #expect(share.heldBytes == 0)
+}

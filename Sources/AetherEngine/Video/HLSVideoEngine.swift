@@ -1749,8 +1749,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     dem.dashRandomAccessStartsSeconds,
                     minimumSeconds: Self.dashMinimumSegmentSeconds(interleaveLeadSeconds: dem.dashInterleaveLeadSeconds))
                 : []
-            // A lazily indexed fragmented MP4 declares its random access points in its mfra,
-            // on the same decode axis as a DASH sidx's (see `FragmentedMP4RandomAccess`).
+            // A lazily indexed fragmented MP4 declares its random access points in its mfra. Like a
+            // DASH sidx's they are presentation times, used as differences from the first, so a
+            // constant composition offset cancels (see `FragmentedMP4RandomAccess`).
             let fragmentStarts = dem.timeSeekableReader == nil && dashStarts.isEmpty && lazyFragments
                 && lazyKeyframeEntries == nil
                 ? Self.coalescedRandomAccessStarts(
