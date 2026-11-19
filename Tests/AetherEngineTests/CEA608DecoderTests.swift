@@ -139,4 +139,72 @@ struct CEA608DecoderTests {
         let actions = doubledControl(d, 0x14, 0x2F)
         #expect(actions.contains(.display("-")))
     }
+
+    /// An XDS Network Name packet (class 0x05, type 0x01) carrying `name`, with its checksum.
+    private func networkName(_ d: CEA608Decoder, _ name: String) {
+        var sum = 0x05 + 0x01 + 0x0F
+        _ = d.feed(parity(0x05), parity(0x01))
+        let bytes = Array(name.utf8)
+        var i = 0
+        while i < bytes.count {
+            let b1: UInt8 = i + 1 < bytes.count ? bytes[i + 1] : 0
+            sum += Int(bytes[i]) + Int(b1)
+            _ = d.feed(parity(bytes[i]), parity(b1))
+            i += 2
+        }
+        _ = d.feed(parity(0x0F), parity(UInt8((128 - sum % 128) % 128)))
+    }
+
+    @Test("An XDS packet sent amid a pop-on caption stays out of it")
+    func xdsAmidPopOn() {
+        let d = CEA608Decoder()
+        doubledControl(d, 0x14, 0x20); doubledControl(d, 0x14, 0x2E); doubledControl(d, 0x14, 0x60)
+        _ = text(d, "CC")
+        networkName(d, "QXV")
+        _ = d.feed(parity(0x14), parity(0x20))   // RCL resumes the caption after the packet
+        _ = text(d, " 1")
+        let actions = doubledControl(d, 0x14, 0x2F)
+        #expect(actions == [.display("CC 1")])
+    }
+
+    @Test("XDS packets between roll-up lines never reach the screen")
+    func xdsBetweenRollUpLines() {
+        let d = CEA608Decoder()
+        doubledControl(d, 0x14, 0x26); doubledControl(d, 0x14, 0x60)
+        var actions: [CEA608Decoder.Action] = []
+        for line in ["ONE", "TWO", "SIX"] {
+            networkName(d, "QXV")
+            doubledControl(d, 0x14, 0x26)
+            _ = text(d, line)
+            actions += doubledControl(d, 0x14, 0x2D)
+        }
+        #expect(actions == [.display("ONE"), .display("ONE\nTWO"), .display("TWO\nSIX")])
+    }
+
+    @Test("Characters of the second caption channel stay out of CC1")
+    func secondChannelStaysOut() {
+        let d = CEA608Decoder()
+        doubledControl(d, 0x14, 0x20); doubledControl(d, 0x14, 0x2E); doubledControl(d, 0x14, 0x60)
+        _ = text(d, "CC")
+        doubledControl(d, 0x1C, 0x20); doubledControl(d, 0x1C, 0x60)   // CC2: RCL, PAC
+        _ = text(d, "QXV")
+        _ = d.feed(parity(0x14), parity(0x20))
+        _ = text(d, " 1")
+        let actions = doubledControl(d, 0x14, 0x2F)
+        #expect(actions == [.display("CC 1")])
+    }
+
+    @Test("The text service of field 1 stays out of the captions until a caption command")
+    func textServiceStaysOut() {
+        let d = CEA608Decoder()
+        doubledControl(d, 0x14, 0x20); doubledControl(d, 0x14, 0x2E); doubledControl(d, 0x14, 0x60)
+        _ = text(d, "CC")
+        doubledControl(d, 0x14, 0x2B)   // RTD: the text service T1
+        _ = text(d, "QXV")
+        doubledControl(d, 0x14, 0x2D)   // a CR of the text service, not of the captions
+        _ = d.feed(parity(0x14), parity(0x20))
+        _ = text(d, " 1")
+        let actions = doubledControl(d, 0x14, 0x2F)
+        #expect(actions == [.display("CC 1")])
+    }
 }
