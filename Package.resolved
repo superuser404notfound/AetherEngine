@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/superuser404notfound/FFmpegBuild",
       "state" : {
-        "revision" : "d445e6daa180db73f12d47606a00c914f682e278",
-        "version" : "3.15.0"
+        "revision" : "7de456f9b6efea4d6c8c6617cc77e7c79cb1e280",
+        "version" : "3.16.0"
       }
     },
     {

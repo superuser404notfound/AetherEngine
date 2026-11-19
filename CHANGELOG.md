@@ -96,6 +96,11 @@ the public-API contract.
   descriptor, so libavformat tries to identify it from its content and holds every packet behind it,
   the video's too, until 50 MiB have queued. Such a track now sits out the stream analysis, and the
   open finishes as soon as the video is known (AE#1087, thanks @sunnierseattle).
+- **A live recording of a Dolby Vision channel plays back as Dolby Vision (FFmpegBuild 3.16.0).** A recording
+  copies the stream into MPEG-TS, and FFmpeg's mpegts muxer kept every RPU but never wrote the Dolby Vision
+  descriptors. Played back, Profile 8.1 came out as HDR10, 8.4 as HLG and Profile 5 as HDR10 with the wrong
+  colours. FFmpegBuild 3.16.0 writes them for every stream whose configuration declares a base layer
+  (FFmpegBuild#11, thanks @MistyKuu).
 - **Seeking keeps working after an audio switch on the software path.** The rebuild forgot that the
   source can seek, so `canSeek` stayed false until the next load and a host hid its scrubber. The
   native path already learned it again from its new session (AE#1086).
@@ -106,8 +111,8 @@ the public-API contract.
   that has no complete `sidx` by reading every `moof` before the open returns, one request each: a 4 minute,
   96 fragment file took 24 s to its first frame on a 19 Mbps origin, and a 2 hour file would need about 2,800
   requests. When the file ends in an `mfra`, `AVIOReader` now fetches the `moof` headers it lists side by side
-  and answers the walk from them (2.5 s to the first frame on the same file). With an FFmpegBuild that has
-  movdec's `lazy_frag_index`, the walk is skipped: the demuxer reads the first and last fragments, the segment
+  and answers the walk from them (2.5 s to the first frame on the same file). With FFmpegBuild 3.16.0, which
+  has movdec's `lazy_frag_index`, the walk is skipped: the demuxer reads the first and last fragments, the segment
   plan takes its keyframes from the `mfra` once they agree with those fragments, and the open needs a few extra
   requests whatever the file's length (0.6 to 1.4 s to open on a WAN origin, the same plan and seek landings as the full
   index; a 2 hour file of 2,770 fragments opened in 1.0 s with 5 requests instead of 17.4 s with 2,768 through the
