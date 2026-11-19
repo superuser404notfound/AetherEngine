@@ -72,7 +72,7 @@ func printUsage() {
       aetherctl swdecode [--frames N] <url>
       aetherctl bench [--iterations N] [--json out.json] [--baseline base.json] [--tolerance PCT]
       aetherctl bench --compare <base.json> <new.json> [--tolerance PCT]
-      aetherctl play [--fel [--fel-output]] [--upscale [--line-art]] [--tone-map NITS] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
+      aetherctl play [--fel [--fel-output]] [--upscale [--line-art]] [--tone-map NITS] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--live-join-at-start] [--dvr-window N] [--subs <codec-or-lang>]
                  [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
@@ -868,6 +868,9 @@ if first == "play" {
     let liveStartImmediately = playLiveStartImmediately ? true : !playNoLiveStartImmediately
     // LoadOptions.liveEdgeCushionSeconds: how far behind the live edge the session plays.
     let liveCushion = takeDoubleFlag("--live-cushion", from: &rest)
+    // AE#1090: LoadOptions.liveJoinsAtPlaylistStart, "start from the beginning" on a recording in
+    // progress. Pair with `hlsfixture --recording-backlog N`.
+    let liveJoinAtStart = takeFlag("--live-join-at-start", from: &rest)
     let dvrWindow = takeDoubleFlag("--dvr-window", from: &rest)
     let subsPick = takeStringFlag("--subs", from: &rest)
     let hostCalls = takeStringFlag("--host-calls", from: &rest).map { $0.split(separator: ",").map(String.init) } ?? []
@@ -1242,7 +1245,7 @@ if first == "play" {
         }
         done.wait()
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, liveCushion: liveCushion, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, liveCushion: liveCushion, liveJoinAtStart: liveJoinAtStart, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, servedURL: servedURL, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, nativeVideoFrameDiagnostics: nativeVideoFrameDiagnostics, nativeVideoFrameRecovery: nativeVideoFrameRecovery, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,

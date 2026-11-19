@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Added
 
+- **`LoadOptions.liveJoinsAtPlaylistStart` starts a recording in progress from its beginning.** A live HLS
+  ingest used to join near the edge even when the playlist listed every segment since the recording began
+  (Plex's `offset=0`). With the flag it joins at the oldest listed segment, delivers the usual few seconds at
+  once and fetches the rest at 1x, so the first picture comes as fast as on any channel and the rewind window
+  grows from the start of the recording. `aetherctl play --live-join-at-start` and `hlsfixture
+  --recording-backlog N` drive it (AE#1090, thanks @l984-451).
 - **`seekEvents` says when a seek came from a remote command, and where it started.** A skip from Control
   Center, the iPhone Remote or AirPods that the engine carries out itself now has origin `.remoteCommand`
   instead of `.programmatic`, and a skip button in the software route's PiP window has `.pictureInPicture`.

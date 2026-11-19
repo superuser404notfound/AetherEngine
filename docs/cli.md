@@ -584,6 +584,7 @@ Other lines `play` prints:
 | `--native-hls` | `LoadOptions.nativeRemoteHLS`. | off |
 | `--standard-join`, `--fast-zap`, `--live-cushion SECONDS` | Live join profile and cushion. See [Shared flags](#shared-flags). | `.fastZap`, engine default |
 | `--live-start-immediately` / `--no-live-start-immediately` | `LoadOptions.liveJoinStartsImmediately` (AE#440). | on |
+| `--live-join-at-start` | `LoadOptions.liveJoinsAtPlaylistStart` (AE#1090): joins at the oldest listed segment. Pair with [`hlsfixture --recording-backlog`](#a-recording-in-progress---recording-backlog). | off |
 | `--header "Name: Value"` | `LoadOptions.httpHeaders`, repeatable. | none |
 | `--trust-any-certificate` | Answers `EngineTLS.serverTrustEvaluator` for every origin (AE#495). | off |
 | `--record <path>` | Records the live source to a file (AE#560). | off |
@@ -1776,6 +1777,7 @@ It prints the entry URL: `/media.m3u8`, `/master.m3u8` with `--master`, or `/ent
 | `--redirect-host H` | Host name for the redirect target. | `localhost` |
 | `--redirect-port N` | Port for the redirect target. | the fixture's bound port |
 | `--media-origin H:P` | Master's variants point at a second origin absolutely. | off |
+| `--recording-backlog N` | A recording in progress: the playlist lists every segment from 0 and grows, N segments deep at start. `--window` is ignored. See [below](#a-recording-in-progress---recording-backlog). | off |
 
 **Exit codes**
 
@@ -1794,6 +1796,18 @@ ffmpeg -i in.ts -c copy -f hls -hls_time 4 -hls_flags independent_segments -hls_
 Byte slicing is not keyframe-aligned, so segments start mid-GOP and the decoder logs parameter-set errors on the rerouted ingest. That is fine for routing and plumbing questions ("did it route"), but useless for "did it play": the run rebuffers forever because nothing decodes. Use the directory whenever the question is playthrough.
 
 **`--codecs` / `--resolution`.** Without them AVFoundation reports no `videoAttributes` for the variants. Everything that reads master evidence (the #168 watchdog, the #293 probe gate) then sees a master advertising no video at all, and the fixture quietly stops carrying the case under test.
+
+### A recording in progress (`--recording-backlog`)
+
+`--recording-backlog N` serves the shape a DVR gives for a recording that is still running: `#EXT-X-MEDIA-SEQUENCE:0`, every segment since the start, no `#EXT-X-ENDLIST`, and one more segment per `--segment-seconds`. It is the origin for `play --live-join-at-start` (AE#1090):
+
+```bash
+aetherctl hlsfixture --segments-dir ./segs --segment-seconds 2 --recording-backlog 150 --port 8091
+aetherctl play --live --live-ingest --live-join-at-start --dvr-window 3600 --seconds 50 \
+  --seek-every 30 --seek-count 1 --seek-pattern 1 http://127.0.0.1:8091/media.m3u8
+```
+
+What to read off the run: the `[HLSIngest] AE#1090: joined at the playlist start` line says how much was delivered at once, the fixture's `REQ /segN.ts` lines start at `seg0` and then come one per segment duration, and `src=` starts near 0. Measured on 2 s H.264 and MPEG-2 segments with a 5 minute backlog: first picture within a second on both routes, 27 segments fetched in 46 s, and a seek back to 1 s landing in 105 ms with the edge still moving at 1x.
 
 ### TARGETDURATION and window depth (`--target-duration`, `--window`)
 

@@ -382,7 +382,8 @@ On-demand MPEG-DASH (AE#859): one static Period, each representation a single `S
 | --- | --- |
 | `HLSLiveIngestReader.swift` | Public forward-only `IOReader` that ingests a live HLS upstream (resolver, playlist poller, segment fetcher, companion audio-rendition reader). |
 | `HLSPlaylist.swift` | Line-based parser for a subset of RFC 8216 (master / media playlists). |
-| `HLSPlaylistTracker.swift` | Pure segment cursor: duration-capped edge join, window-slide rejoin, stall budget. |
+| `HLSPlaylistTracker.swift` | Pure segment cursor: duration-capped edge join (or a join at the playlist start or a resume sequence, AE#1090), window-slide rejoin, stall budget. |
+| `LiveBacklogPacer.swift` | Release schedule for a join behind the live edge: the join's burst at once, every later segment at 1x (AE#1090). |
 | `HLSSegmentDecryptor.swift` | AES-128-CBC clear-key segment decryption (key fetch and memo, PKCS7), plus head-only decryption for the carriage probe (AE#1089). |
 | `PackedAudioSegments.swift` | Packed-audio rendition support: `LiveSegmentFormat` classification and ID3 PRIV timestamp parser (raw ADTS segments). |
 | `ByteFIFO.swift` | Bounded blocking byte queue between the fetch loop and the demux thread. Empty writes do nothing, invalid read lengths return an error, and only a finished, drained queue returns EOF. |

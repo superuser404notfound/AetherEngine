@@ -5015,6 +5015,7 @@ public final class AetherEngine: ObservableObject {
                 options.maxConcurrentSourceRequests, for: ingest.budgetOriginURL)
             if options.isLive {
                 ingest.setJoinCushion(LiveEdgePolicy.edgeCushion(options.liveEdgeCushionSeconds))
+                ingest.setJoinsAtPlaylistStart(options.liveJoinsAtPlaylistStart)
             }
         }
         // #170: the carryover is consumed by THIS load only (registration site below, or never on
