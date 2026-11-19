@@ -2626,8 +2626,8 @@ public final class Demuxer: @unchecked Sendable {
     /// Lazy fragment index: the video keyframes of a lazily indexed fragmented MP4, from
     /// its mfra, in the form `indexedKeyframeEntries` gives them, so the keyframe-aligned plan is
     /// the one a full index builds. nil unless the stream is the mfra's track in its time scale and
-    /// the mfra agrees with every keyframe the demuxer has indexed so far (the first fragment, and
-    /// the last one it read for the durations): a tfra time there that is not an indexed keyframe,
+    /// the mfra agrees with every keyframe the demuxer has indexed so far (the first fragment; the
+    /// probe has checked a few more entries against their moof): a tfra time there that is not an indexed keyframe,
     /// or an indexed keyframe outside the tfra's span, means the two do not describe one axis.
     /// `pos` is the fragment's `moof` offset, close enough for the peak bit rate it feeds.
     func lazyFragmentKeyframeEntries(streamIndex: Int32) -> [(pts: Int64, pos: Int64)]? {

@@ -131,14 +131,28 @@ private func fragmentedMoov() -> Data {
         + box("mvex", fullBox("trex", version: 0, Data(count: 20))))
 }
 
-@Test func theProbeReadsAFragmentedFilesMfra() throws {
-    let media = box("moof", Data(count: 64)) + box("mdat", Data(count: 4_000))
-    let index = tfra(track: 1, version: 1, entries: [(512, 1_000), (12_800, 5_000)])
+/// Two fragments whose tfra entries point at their moofs; `secondStarts` is the flags of the
+/// second fragment's first sample.
+private func fragmentedFile(secondStarts: UInt32) -> Data {
+    let first = moof(track: 1, perSample: [sync, nonSync]) + box("mdat", Data(count: 4_000))
+    let second = moof(track: 1, perSample: [secondStarts, nonSync]) + box("mdat", Data(count: 4_000))
+    let head = ftyp + fragmentedMoov()
+    let index = tfra(track: 1, version: 1, entries: [(512, Int64(head.count)), (12_800, Int64(head.count + first.count))])
     let mfraBody = index + fullBox("mfro", version: 0, be32(index.count + 8 + 16))
-    let file = ftyp + fragmentedMoov() + media + media + box("mfra", mfraBody)
-    let (result, _) = try probe(file)
+    return head + first + second + box("mfra", mfraBody)
+}
+
+@Test func theProbeReadsAFragmentedFilesMfra() throws {
+    let (result, _) = try probe(fragmentedFile(secondStarts: sync))
     guard case .usable(let access) = result else { Issue.record("expected usable, got \(result)"); return }
     #expect(access.trackID == 1 && access.timescale == 12288 && access.times == [512, 12_800])
+}
+
+/// ffmpeg's mfra for -frag_duration without frag_keyframe: an entry per fragment start, sync or not.
+@Test func anMfraThatNamesAPredictedFrameIsNotUsedForThePlan() throws {
+    let (result, _) = try probe(fragmentedFile(secondStarts: nonSync))
+    guard case .unusable(let reason) = result else { Issue.record("expected unusable, got \(result)"); return }
+    #expect(reason.contains("not a sync sample"), "\(reason)")
 }
 
 @Test func aFragmentedFileWithoutMfraIsIndexedInFull() throws {
@@ -156,3 +170,83 @@ private func fragmentedMoov() -> Data {
     #expect(result == .notFragmented)
     #expect(seeks.allSatisfy { $0 <= Int64(ftyp.count) }, "seeks: \(seeks)")
 }
+
+// MARK: tfra entries against their moof
+
+/// A moof with one traf for `track`: tfhd with optional default flags, one trun with optional
+/// first-sample flags and per-sample flags.
+private func moof(track: Int, tfhdDefault: UInt32? = nil, first: UInt32? = nil, perSample: [UInt32]? = nil,
+                  samples: Int = 3) -> Data {
+    let tfhdFlags = tfhdDefault == nil ? 0x020000 : 0x020020        // default-base-is-moof
+    let tfhd = box("tfhd", be32(tfhdFlags) + be32(track) + (tfhdDefault.map { be32(Int($0)) } ?? Data()))
+    var trunFlags = 0x001
+    if first != nil { trunFlags |= 0x004 }
+    if perSample != nil { trunFlags |= 0x400 | 0x200 }
+    var body = be32(trunFlags) + be32(perSample?.count ?? samples) + be32(0)
+    if let first { body += be32(Int(first)) }
+    for f in perSample ?? [] { body += be32(100) + be32(Int(f)) }
+    let trun = box("trun", body)
+    return box("moof", fullBox("mfhd", version: 0, be32(1)) + box("traf", tfhd + trun))
+}
+
+private let sync: UInt32 = 0x0200_0000          // depends on nothing
+private let nonSync: UInt32 = 0x0101_0000       // depends on others, sample_is_non_sync_sample
+
+@Test func firstSampleFlagsDecideTheFirstSample() {
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: moof(track: 1, tfhdDefault: nonSync, first: sync),
+                                                   trackID: 1, trunNumber: 1, sampleNumber: 1, defaultFlags: nil) == true)
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: moof(track: 1, tfhdDefault: nonSync, first: sync),
+                                                   trackID: 1, trunNumber: 1, sampleNumber: 2, defaultFlags: nil) == false)
+    // first_sample_flags override the run's own entry for sample 1
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: moof(track: 1, first: sync, perSample: [nonSync, nonSync]),
+                                                   trackID: 1, trunNumber: 1, sampleNumber: 1, defaultFlags: nil) == true)
+}
+
+@Test func aFragmentThatStartsOnAPredictedFrameIsNoSyncSample() {
+    // ffmpeg's -frag_duration without frag_keyframe: the run starts mid-GOP, its flags say so
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: moof(track: 1, perSample: [nonSync, sync, nonSync]),
+                                                   trackID: 1, trunNumber: 1, sampleNumber: 1, defaultFlags: nil) == false)
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: moof(track: 1, perSample: [nonSync, sync, nonSync]),
+                                                   trackID: 1, trunNumber: 1, sampleNumber: 2, defaultFlags: nil) == true)
+}
+
+@Test func trexFlagsApplyWhenTheMoofSetsNone() {
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: moof(track: 1), trackID: 1, trunNumber: 1,
+                                                   sampleNumber: 1, defaultFlags: nonSync) == false)
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: moof(track: 1), trackID: 1, trunNumber: 1,
+                                                   sampleNumber: 1, defaultFlags: sync) == true)
+    // no flags anywhere: unknown
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: moof(track: 1), trackID: 1, trunNumber: 1,
+                                                   sampleNumber: 1, defaultFlags: nil) == nil)
+}
+
+@Test func anEntryTheMoofDoesNotHaveIsUnknown() {
+    let m = moof(track: 1, tfhdDefault: sync, samples: 3)
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: m, trackID: 2, trunNumber: 1, sampleNumber: 1, defaultFlags: nil) == nil)
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: m, trackID: 1, trunNumber: 2, sampleNumber: 1, defaultFlags: nil) == nil)
+    #expect(FragmentedMP4RandomAccess.sampleIsSync(moof: m, trackID: 1, trunNumber: 1, sampleNumber: 4, defaultFlags: nil) == nil)
+}
+
+@Test func trexDefaultFlagsAreReadPerTrack() {
+    let trex = { (id: Int, flags: UInt32) in fullBox("trex", version: 0, be32(id) + be32(1) + be32(0) + be32(0) + be32(Int(flags))) }
+    let moov = box("moov", fullBox("mvhd", version: 0, Data(count: 96)) + box("mvex", trex(2, sync) + trex(1, nonSync)))
+    #expect(FragmentedMP4RandomAccess.defaultSampleFlags(moov: moov, trackID: 1) == nonSync)
+    #expect(FragmentedMP4RandomAccess.defaultSampleFlags(moov: moov, trackID: 2) == sync)
+    #expect(FragmentedMP4RandomAccess.defaultSampleFlags(moov: moov, trackID: 3) == nil)
+}
+
+@Test func tfraEntriesCarryTheirRunAndSampleNumbers() {
+    let mfra = box("mfra", tfra(track: 1, version: 1, entries: [(512, 3232), (35328, 640_000)]))
+    let entries = FragmentedMP4RandomAccess.tfraEntries(mfra: mfra, trackID: 1)
+    #expect(entries?.map(\.trun) == [1, 1])
+    #expect(entries?.map(\.sample) == [1, 1])
+}
+
+@Test func theCheckedEntriesAreSpreadOverTheFile() {
+    #expect(FragmentedMP4RandomAccess.sampleIndices(count: 1) == [])
+    #expect(FragmentedMP4RandomAccess.sampleIndices(count: 2) == [1])
+    #expect(FragmentedMP4RandomAccess.sampleIndices(count: 3) == [1, 2])
+    #expect(FragmentedMP4RandomAccess.sampleIndices(count: 93) == [23, 46, 69, 92])
+    #expect(FragmentedMP4RandomAccess.sampleIndices(count: 2770).last == 2769)
+}
+

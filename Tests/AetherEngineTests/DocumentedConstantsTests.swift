@@ -33,6 +33,11 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("to the other readers of the same source for 60 s", docs)
     }
 
+    func testLazyFragmentProbeCheckMatchesDocumentation() throws {
+        XCTAssertEqual(FragmentedMP4RandomAccess.checkedEntries, 4)
+        assertDocumented("the probe reads up to four of the `moof`s the entries name", try documentation())
+    }
+
     func testLiveReplayQuarantineBoundsMatchDocumentation() throws {
         XCTAssertEqual(LivePacketReplayGuard.maximumPendingBytes, 96 * 1_024 * 1_024)
         XCTAssertEqual(LivePacketReplayGuard.maximumPendingPackets, 10_000)

@@ -108,9 +108,12 @@ the public-API contract.
   requests. When the file ends in an `mfra`, `AVIOReader` now fetches the `moof` headers it lists side by side
   and answers the walk from them (2.5 s to the first frame on the same file). With an FFmpegBuild that has
   movdec's `lazy_frag_index`, the walk is skipped: the demuxer reads the first and last fragments, the segment
-  plan takes its keyframes from the `mfra` once they agree with those fragments, and the open needs one extra
-  request whatever the file's length (0.6 to 1.4 s to open on a WAN origin, the same plan and seek landings as the full
-  index). `AETHER_NO_FRAGMENT_HEADERS=1` and `AETHER_NO_LAZY_FRAGMENTS=1` turn either off.
+  plan takes its keyframes from the `mfra` once they agree with those fragments, and the open needs a few extra
+  requests whatever the file's length (0.6 to 1.4 s to open on a WAN origin, the same plan and seek landings as the full
+  index; a 2 hour file of 2,770 fragments opened in 1.0 s with 5 requests instead of 17.4 s with 2,768 through the
+  header fetch alone, at 35 ms per request). Before it trusts the `mfra`, the probe checks that up to four of its
+  entries name a sync sample in their `moof`: ffmpeg writes every fragment start into it, sync or not, and a file
+  cut at fixed durations would otherwise get a plan between keyframes and seeks up to 4 s off. `AETHER_NO_FRAGMENT_HEADERS=1` and `AETHER_NO_LAZY_FRAGMENTS=1` turn either off. (AE#1092, thanks @hp561)
 
 ## [7.70.0] - 2026-11-17
 

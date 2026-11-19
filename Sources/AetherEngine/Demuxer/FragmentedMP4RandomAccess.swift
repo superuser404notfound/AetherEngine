@@ -41,6 +41,10 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
 
     static let maximumMoovBytes = 4 << 20
     static let maximumMfraBytes = 16 << 20
+    static let maximumMoofBytes = 4 << 20
+    /// How many tfra entries the probe checks against their moof, spread over the file. Each is one
+    /// side request of about 32 KB through the reader.
+    static let checkedEntries = 4
 
     // MARK: Reading through AVIO
 
@@ -105,6 +109,29 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
             return .unusable("the mfra has no tfra for the video track")
         }
         guard entries.count >= 2 else { return .unusable("the video tfra lists \(entries.count) entry") }
+        // A tfra entry is meant to be a sync sample, but ffmpeg's mp4 muxer writes the first sample
+        // of every fragment, sync or not. A file cut at fixed durations (-frag_duration without
+        // frag_keyframe) then lists a "keyframe" every fragment, the plan cuts between real ones and
+        // seeks land seconds off. The lazy index has read only the first fragment, so nothing else
+        // would catch it: look at a few of the fragments the entries name.
+        let trexFlags = defaultSampleFlags(moov: moovBytes, trackID: video.trackID)
+        for i in sampleIndices(count: entries.count) {
+            let entry = entries[i]
+            guard let head = read(entry.moofOffset, 8), let box = boxHeader(head, at: 0, available: 8),
+                  box.type == "moof", box.size >= 16, box.size <= Int64(maximumMoofBytes),
+                  let moof = read(entry.moofOffset, Int(box.size)) else {
+                return .unusable("tfra entry \(i) does not point at a moof")
+            }
+            switch sampleIsSync(moof: moof, trackID: video.trackID, trunNumber: entry.trun,
+                                sampleNumber: entry.sample, defaultFlags: trexFlags) {
+            case true?:
+                continue
+            case false?:
+                return .unusable("tfra entry \(i) (moof at \(entry.moofOffset)) names a sample that is not a sync sample")
+            case nil:
+                return .unusable("tfra entry \(i) names a sample its moof does not have")
+            }
+        }
         return .usable(FragmentedMP4RandomAccess(trackID: video.trackID, timescale: video.timescale,
                                                  times: entries.map(\.time), moofOffsets: entries.map(\.moofOffset)))
     }
@@ -113,7 +140,8 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
     /// describe the same keyframes. A tfra time is the sync sample's presentation time; the mov
     /// index holds decode times, so the two differ by the encoder's reorder delay (512 ticks on a
     /// 1/12288 B-frame file). The first indexed keyframe sets the shift. The lazy index holds the
-    /// fragments it has read (the first, and the last for the durations), and every tfra entry
+    /// fragments it has read (at the open only the first: the last is parsed for the durations but
+    /// not indexed, which is why `probe` checks a few entries against their moof), and every tfra entry
     /// whose fragment was read (an indexed keyframe falls between it and the next entry) must,
     /// shifted, be an indexed keyframe: a delay that changes along the file fails here. Extra
     /// indexed keyframes inside a fragment are fine, a tfra may list only the first of each.
@@ -209,7 +237,8 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
     /// The `tfra` entries of one track in an `mfra` (the whole box, header included): ascending in
     /// time, repeats dropped. nil when the track has no `tfra`, the box does not parse in full or
     /// its times go backwards.
-    static func tfraEntries(mfra: Data, trackID: UInt32) -> [(time: Int64, moofOffset: Int64)]? {
+    static func tfraEntries(mfra: Data, trackID: UInt32)
+        -> [(time: Int64, moofOffset: Int64, trun: Int, sample: Int)]? {
         guard let header = boxHeader(mfra, at: 0, available: Int64(mfra.count)), header.type == "mfra" else { return nil }
         for box in children(mfra, from: header.headerSize, to: mfra.count) where box.type == "tfra" {
             let p = box.payload.lowerBound, end = box.payload.upperBound
@@ -221,22 +250,111 @@ struct FragmentedMP4RandomAccess: Equatable, Sendable {
             let count = Int(be32(mfra, p + 12))
             let entryBytes = (version == 1 ? 16 : 8) + trafBytes + trunBytes + sampleBytes
             guard count >= 0, count <= (end - p - 16) / max(entryBytes, 1) else { return nil }
-            var entries: [(time: Int64, moofOffset: Int64)] = []
+            var entries: [(time: Int64, moofOffset: Int64, trun: Int, sample: Int)] = []
             entries.reserveCapacity(count)
             var at = p + 16
             for _ in 0..<count {
                 let time = version == 1 ? be64(mfra, at) : be32(mfra, at)
                 let moof = version == 1 ? be64(mfra, at + 8) : be32(mfra, at + 4)
+                let numbers = at + (version == 1 ? 16 : 8) + trafBytes
+                let trun = Int(beN(mfra, numbers, trunBytes))
+                let sample = Int(beN(mfra, numbers + trunBytes, sampleBytes))
                 at += entryBytes
                 if let last = entries.last {
                     guard time >= last.time else { return nil }   // out of order: not trusted for a plan
                     if time == last.time { continue }
                 }
-                entries.append((time, moof))
+                entries.append((time, moof, trun, sample))
             }
             return entries
         }
         return nil
+    }
+
+    /// The entries the probe checks: up to `checkedEntries`, spread from the second to the last
+    /// (the first fragment is the one the lazy index reads anyway).
+    static func sampleIndices(count: Int) -> [Int] {
+        guard count >= 2 else { return [] }
+        let n = min(checkedEntries, count - 1)
+        return Array(Set((1...n).map { 1 + ($0 * (count - 2)) / n })).sorted()
+    }
+
+    /// trex's default_sample_flags for the track, from the moov (the whole box).
+    static func defaultSampleFlags(moov: Data, trackID: UInt32) -> UInt32? {
+        guard let header = boxHeader(moov, at: 0, available: Int64(moov.count)), header.type == "moov" else { return nil }
+        for mvex in children(moov, from: header.headerSize, to: moov.count) where mvex.type == "mvex" {
+            for trex in children(moov, from: mvex.payload.lowerBound, to: mvex.payload.upperBound) where trex.type == "trex" {
+                let p = trex.payload.lowerBound
+                guard p + 24 <= trex.payload.upperBound, UInt32(be32(moov, p + 4)) == trackID else { continue }
+                return UInt32(be32(moov, p + 20))
+            }
+        }
+        return nil
+    }
+
+    /// Whether sample `sampleNumber` of run `trunNumber` (both from 1) in the track's traf of this
+    /// moof (the whole box) is a sync sample, nil when the moof has no such sample. The flags are
+    /// the run's first-sample flags for its first sample, else the sample's own, else the traf's
+    /// default, else trex's; sample_is_non_sync_sample is bit 16.
+    static func sampleIsSync(moof: Data, trackID: UInt32, trunNumber: Int, sampleNumber: Int,
+                             defaultFlags: UInt32?) -> Bool? {
+        guard trunNumber >= 1, sampleNumber >= 1,
+              let header = boxHeader(moof, at: 0, available: Int64(moof.count)), header.type == "moof" else { return nil }
+        for traf in children(moof, from: header.headerSize, to: moof.count) where traf.type == "traf" {
+            let boxes = children(moof, from: traf.payload.lowerBound, to: traf.payload.upperBound)
+            guard let tfhd = boxes.first(where: { $0.type == "tfhd" }), tfhd.payload.count >= 8,
+                  UInt32(be32(moof, tfhd.payload.lowerBound + 4)) == trackID else { continue }
+            let tfhdFlags = UInt32(be32(moof, tfhd.payload.lowerBound) & 0xFFFFFF)
+            var trafFlags = defaultFlags
+            if tfhdFlags & 0x20 != 0 {
+                var at = tfhd.payload.lowerBound + 8
+                if tfhdFlags & 0x01 != 0 { at += 8 }
+                if tfhdFlags & 0x02 != 0 { at += 4 }
+                if tfhdFlags & 0x08 != 0 { at += 4 }
+                if tfhdFlags & 0x10 != 0 { at += 4 }
+                guard at + 4 <= tfhd.payload.upperBound else { return nil }
+                trafFlags = UInt32(be32(moof, at))
+            }
+            let runs = boxes.filter { $0.type == "trun" }
+            guard trunNumber <= runs.count else { return nil }
+            let trun = runs[trunNumber - 1]
+            let p = trun.payload.lowerBound
+            guard p + 8 <= trun.payload.upperBound else { return nil }
+            let flags = UInt32(be32(moof, p) & 0xFFFFFF)
+            let count = Int(be32(moof, p + 4))
+            guard sampleNumber <= count else { return nil }
+            var at = p + 8
+            if flags & 0x001 != 0 { at += 4 }
+            var firstFlags: UInt32?
+            if flags & 0x004 != 0 {
+                guard at + 4 <= trun.payload.upperBound else { return nil }
+                firstFlags = UInt32(be32(moof, at))
+                at += 4
+            }
+            var sampleFlags: UInt32?
+            if sampleNumber == 1, let firstFlags {
+                sampleFlags = firstFlags        // overrides the run's own first entry (8.8.8.2)
+            } else if flags & 0x400 != 0 {
+                var offset = 0
+                if flags & 0x100 != 0 { offset += 4 }
+                if flags & 0x200 != 0 { offset += 4 }
+                let entry = offset + 4 + (flags & 0x800 != 0 ? 4 : 0)
+                let flagsAt = at + (sampleNumber - 1) * entry + offset
+                guard flagsAt + 4 <= trun.payload.upperBound else { return nil }
+                sampleFlags = UInt32(be32(moof, flagsAt))
+            } else {
+                sampleFlags = trafFlags
+            }
+            guard let sampleFlags else { return nil }
+            return sampleFlags & 0x0001_0000 == 0
+        }
+        return nil
+    }
+
+    private static func beN(_ d: Data, _ at: Int, _ n: Int) -> Int64 {
+        var v: Int64 = 0
+        for i in 0..<n { v = v << 8 | Int64(d[d.startIndex + at + i]) }
+        return v
     }
 
     private static func be32(_ d: Data, _ at: Int) -> Int64 {
