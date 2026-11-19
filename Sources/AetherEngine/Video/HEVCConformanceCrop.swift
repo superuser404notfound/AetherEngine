@@ -10,8 +10,34 @@ import Foundation
 /// gone the decoder hands out all 2176 lines, so the muxer crops the 16 padding lines in the container
 /// instead (a `clap` box, which the same device also played).
 ///
-/// Only that one geometry is rewritten. Every other SPS passes through byte for byte.
+/// Only that one geometry is rewritten, and only on the Apple TV generation that restarts on it
+/// (`modelNeedsCropFreeSPS`). Every other SPS passes through byte for byte.
 enum HEVCConformanceCrop {
+
+    /// The first Apple TV generation whose hardware decoder restarts the device on the window. Only
+    /// AppleTV18,1 was seen doing it; an AppleTV14,1 plays the window and crops it correctly.
+    static let firstRestartingAppleTVGeneration = 18
+
+    /// Whether a device of this hardware model (`uname`'s machine, e.g. "AppleTV18,1") gets the
+    /// crop-free SPS. The `clap` that replaces the window is not a full substitute. For PQ HDR, tvOS
+    /// shows all 2176 lines squeezed into the 2160-line aperture instead of cropping (AE#1094,
+    /// measured on an AppleTV14,1 with tvOS 27.2 over HLS, either offset sign). So a model that plays
+    /// the window keeps it, and only the restarting generation and later ones get the rewrite. A
+    /// simulator or anything that is not an Apple TV keeps the window too.
+    static func modelNeedsCropFreeSPS(_ machine: String) -> Bool {
+        guard machine.hasPrefix("AppleTV"),
+              let generation = Int(machine.dropFirst("AppleTV".count).prefix(while: \.isNumber)) else { return false }
+        return generation >= firstRestartingAppleTVGeneration
+    }
+
+    /// `uname`'s hardware model of this device.
+    static func hardwareModel() -> String {
+        var info = utsname()
+        uname(&info)
+        return withUnsafeBytes(of: &info.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
 
     /// The SPS with its conformance window offsets set to zero, or nil when the NAL is not a base-layer
     /// SPS of exactly this geometry. `nal` is the raw NAL unit: header first, emulation prevention in
