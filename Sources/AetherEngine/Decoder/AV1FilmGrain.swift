@@ -42,9 +42,10 @@ import AetherLibavutil
 ///
 /// They are built once per frame on the decoder's thread, so the loops run over raw pointers with
 /// `while`: in a debug build (the package unoptimised, as a host's Debug configuration compiles it)
-/// every `Array` subscript and every `for ... in` step is a call, and the same arithmetic took 41 ms a
-/// frame on an M1 and on an Apple TV 4K (A15), the whole frame interval at 23.976 fps. Written this way
-/// the tables take about 3 ms unoptimised and under 1 ms optimised (see measurements.md).
+/// every `Array` subscript and every `for ... in` step is a call, and the same arithmetic took 40.8 ms
+/// a frame on an M1. On an Apple TV 4K (A15) the encode around it took 40 to 44 ms, the whole frame
+/// interval at 23.976 fps. Written this way the tables take well under 2 ms unoptimised
+/// and under 1 ms optimised on the M1 (see measurements.md).
 struct AV1FilmGrainTables {
 
     /// `GRAIN_WIDTH` x `GRAIN_HEIGHT`: the luma template.
@@ -147,19 +148,20 @@ struct AV1FilmGrainTables {
         let arShift = Int(aom.ar_coeff_shift)
 
         let luma = Self.lumaTemplate(seed: seed, shift: shift, lag: lag, coeffs: arY, arShift: arShift)
-        lumaGrain = luma.map { Int16($0) }
+        var lumaOut = [Int16](repeating: 0, count: luma.count)
+        Self.narrow(luma, into: &lumaOut)
+        lumaGrain = lumaOut
         var chroma = [Int16](repeating: 0, count: 2 * Self.chromaWidth * Self.chromaHeight)
         let hasLuma = aom.num_y_points > 0
         if u.applyCb != 0 {
             let cb = Self.chromaTemplate(seed: seed ^ 0xB524, shift: shift, lag: lag, coeffs: arCb,
                                          arShift: arShift, luma: luma, addsLuma: hasLuma)
-            for i in 0..<cb.count { chroma[i] = Int16(cb[i]) }
+            Self.narrow(cb, into: &chroma)
         }
         if u.applyCr != 0 {
             let cr = Self.chromaTemplate(seed: seed ^ 0x49D8, shift: shift, lag: lag, coeffs: arCr,
                                          arShift: arShift, luma: luma, addsLuma: hasLuma)
-            let base = Self.chromaWidth * Self.chromaHeight
-            for i in 0..<cr.count { chroma[base + i] = Int16(cr[i]) }
+            Self.narrow(cr, into: &chroma, at: Self.chromaWidth * Self.chromaHeight)
         }
         chromaGrain = chroma
 
@@ -335,44 +337,92 @@ struct AV1FilmGrainTables {
         return buf
     }
 
+    /// `values` into `destination` from `offset` on, narrowed to 16 bits (a template stays within the
+    /// 10-bit grain range). A pointer loop, for the reason the type's comment gives.
+    static func narrow(_ values: [Int], into destination: inout [Int16], at offset: Int = 0) {
+        values.withUnsafeBufferPointer { sp in
+        destination.withUnsafeMutableBufferPointer { dp in
+            guard let s = sp.baseAddress, let d = dp.baseAddress, offset >= 0, offset + sp.count <= dp.count else { return }
+            var i = 0
+            while i < sp.count {
+                d[offset + i] = Int16(truncatingIfNeeded: s[i])
+                i += 1
+            }
+        }}
+    }
+
     /// `generate_scaling` at 10 bits: the piecewise-linear function over the 8-bit points, then each
-    /// step of four filled in between.
+    /// step of four filled in between. Written over a pointer, for the reason the type's comment gives.
     static func fillScaling(_ tables: inout [UInt8], table: Int, points: [(x: Int, y: Int)]) {
         let shiftX = bitDepth - 8
         let size = scalingSize
-        let base = table * size
-        guard let first = points.first, let last = points.last else { return }
+        guard let first = points.first, let last = points.last, table >= 0, (table + 1) * size <= tables.count
+        else { return }
+        let xs = points.map(\.x), ys = points.map(\.y)
+        let segments = points.count - 1
         var s = [Int](repeating: 0, count: size)
-        for i in 0..<min(first.x << shiftX, size) { s[i] = first.y }
-        for i in 0..<(points.count - 1) {
-            let bx = points[i].x, by = points[i].y
-            let dx = points[i + 1].x - bx, dy = points[i + 1].y - by
-            guard dx > 0 else { continue }
-            let delta = dy * ((0x10000 + (dx >> 1)) / dx)
-            var d = 0x8000
-            for x in 0..<dx {
-                s[(bx + x) << shiftX] = (by + (d >> 16)) & 0xFF
-                d += delta
+        s.withUnsafeMutableBufferPointer { sp in
+            let v = sp.baseAddress!
+            // Up to the first point: its value.
+            let firstEnd = min(first.x << shiftX, size)
+            var i = 0
+            while i < firstEnd {
+                v[i] = first.y
+                i += 1
             }
-        }
-        let n = last.x << shiftX
-        for i in n..<size { s[i] = last.y }
-        let pad = 1 << shiftX, rnd = pad >> 1
-        for i in 0..<(points.count - 1) {
-            let bx = points[i].x << shiftX
-            let dx = (points[i + 1].x << shiftX) - bx
-            var x = 0
-            while x < dx {
-                let range = s[bx + x + pad] - s[bx + x]
-                var r = rnd
-                for n in 1..<pad {
-                    r += range
-                    s[bx + x + n] = (s[bx + x] + (r >> shiftX)) & 0xFF
+            // Between points: the line through them, every fourth entry.
+            var p = 0
+            while p < segments {
+                let bx = xs[p], by = ys[p]
+                let dx = xs[p + 1] - bx, dy = ys[p + 1] - by
+                if dx > 0 {
+                    let delta = dy * ((0x10000 + (dx >> 1)) / dx)
+                    var d = 0x8000
+                    var x = 0
+                    while x < dx {
+                        v[(bx + x) << shiftX] = (by + (d >> 16)) & 0xFF
+                        d += delta
+                        x += 1
+                    }
                 }
-                x += pad
+                p += 1
+            }
+            // From the last point on: its value.
+            i = last.x << shiftX
+            while i < size {
+                v[i] = last.y
+                i += 1
+            }
+            // The three entries between each pair of those.
+            let pad = 1 << shiftX, rnd = pad >> 1
+            p = 0
+            while p < segments {
+                let bx = xs[p] << shiftX
+                let dx = (xs[p + 1] << shiftX) - bx
+                var x = 0
+                while x < dx {
+                    let range = v[bx + x + pad] - v[bx + x]
+                    var r = rnd
+                    var k = 1
+                    while k < pad {
+                        r += range
+                        v[bx + x + k] = (v[bx + x] + (r >> shiftX)) & 0xFF
+                        k += 1
+                    }
+                    x += pad
+                }
+                p += 1
             }
         }
-        for i in 0..<size { tables[base + i] = UInt8(s[i]) }
+        s.withUnsafeBufferPointer { sp in
+        tables.withUnsafeMutableBufferPointer { tp in
+            let v = sp.baseAddress!, t = tp.baseAddress! + table * size
+            var i = 0
+            while i < size {
+                t[i] = UInt8(truncatingIfNeeded: v[i])
+                i += 1
+            }
+        }}
     }
 
     // MARK: - Reading the C tuples

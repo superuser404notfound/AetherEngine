@@ -70,6 +70,78 @@ struct AV1FilmGrainTablesMatchTheReferenceArithmeticTests {
         }
     }
 
+    /// `generate_scaling` as plainly as it reads, for comparison.
+    static func referenceScaling(_ points: [(x: Int, y: Int)]) -> [UInt8] {
+        let shiftX = Tables.bitDepth - 8, size = Tables.scalingSize
+        guard let first = points.first, let last = points.last else { return [UInt8](repeating: 0, count: size) }
+        var s = [Int](repeating: 0, count: size)
+        for i in 0..<min(first.x << shiftX, size) { s[i] = first.y }
+        for i in 0..<(points.count - 1) {
+            let bx = points[i].x, by = points[i].y
+            let dx = points[i + 1].x - bx, dy = points[i + 1].y - by
+            guard dx > 0 else { continue }
+            let delta = dy * ((0x10000 + (dx >> 1)) / dx)
+            var d = 0x8000
+            for x in 0..<dx {
+                s[(bx + x) << shiftX] = (by + (d >> 16)) & 0xFF
+                d += delta
+            }
+        }
+        for i in (last.x << shiftX)..<size { s[i] = last.y }
+        let pad = 1 << shiftX, rnd = pad >> 1
+        for i in 0..<(points.count - 1) {
+            let bx = points[i].x << shiftX
+            let dx = (points[i + 1].x << shiftX) - bx
+            var x = 0
+            while x < dx {
+                let range = s[bx + x + pad] - s[bx + x]
+                var r = rnd
+                for n in 1..<pad {
+                    r += range
+                    s[bx + x + n] = (s[bx + x] + (r >> shiftX)) & 0xFF
+                }
+                x += pad
+            }
+        }
+        return s.map { UInt8($0) }
+    }
+
+    /// The scaling functions, written over a pointer, against the plain version: the reference test's
+    /// point sets, one point, a step back down, two points at one place, and the full range.
+    @Test func scalingFunctions() {
+        let sets: [[(x: Int, y: Int)]] = [
+            [(0, 20), (64, 40), (128, 60), (255, 30)],
+            [(0, 30), (255, 50)],
+            [(16, 10), (128, 45), (240, 20)],
+            [(0, 64), (255, 96)],
+            [(32, 80), (160, 50), (224, 100)],
+            [(100, 200)],
+            [(10, 255), (20, 0), (30, 255)],
+            [(50, 10), (50, 90), (200, 40)],
+            [(0, 0), (255, 255)],
+        ]
+        for (n, points) in sets.enumerated() {
+            for table in 0..<3 {
+                var tables = [UInt8](repeating: 7, count: 3 * Tables.scalingSize)
+                Tables.fillScaling(&tables, table: table, points: points)
+                let slice = Array(tables[(table * Tables.scalingSize)..<((table + 1) * Tables.scalingSize)])
+                #expect(slice == Self.referenceScaling(points), "set \(n), table \(table)")
+                // The other two tables are left as they were.
+                let others = tables.enumerated().filter { $0.offset / Tables.scalingSize != table }.map(\.element)
+                #expect(others.allSatisfy { $0 == 7 }, "set \(n), table \(table): another table written")
+            }
+        }
+    }
+
+    /// Narrowing a template to the 16 bits the GPU reads, at an offset into a larger buffer.
+    @Test func narrowing() {
+        let values = (0..<300).map { ($0 * 37 % 1023) - 511 }
+        var out = [Int16](repeating: 99, count: 700)
+        Tables.narrow(values, into: &out, at: 200)
+        #expect(Array(out[200..<500]) == values.map { Int16($0) })
+        #expect(out[0..<200].allSatisfy { $0 == 99 } && out[500...].allSatisfy { $0 == 99 })
+    }
+
     /// One 8-bit draw per 32x32 block, each block row from its own seed.
     @Test func blockOffsets() {
         let width = 1920, height = 1080
