@@ -1730,6 +1730,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         var keyframeBytePositions: [Int64: Int64] = [:]
         planKeyframeAdvanceTicks = 0
         unindexedSource = nil
+        adoptedParkedSegments = false
         // AE#1095: taken before the prewarm, whose cap a parked session may already have paid, and
         // before the free space is read. A parked session this one does not match is deleted here,
         // so its bytes do not shrink the budget; one it does match is counted back in, because its
