@@ -78,9 +78,14 @@ struct VODSeekCapabilityTests {
         options.suppressDisplayCriteria = true
         try await engine.load(url: URL(string: "http://127.0.0.1:\(origin.port)/two-audio.mkv")!, options: options)
         try await waitFor { engine.canSeek && engine.currentTime > 0.5 }
+        // The clip is 6 s and plays in real time. On a starved CI pool the switch took long enough for
+        // it to reach .ended, which refuses the seek for a reason this test is not about. Paused, it
+        // cannot run out.
+        engine.pause()
+        try await waitFor { engine.state == .paused }
         let other = try #require(engine.audioTracks.first { $0.id != engine.activeAudioTrackIndex })
         engine.selectAudioTrack(index: other.id)
-        try await waitFor { engine.activeAudioTrackIndex == other.id && engine.isSessionReady && engine.currentTime > 1 }
+        try await waitFor { engine.activeAudioTrackIndex == other.id && engine.isSessionReady }
         #expect(engine.isSourceSeekable == true)
         #expect(engine.canSeek)
         await engine.seek(to: 4)
