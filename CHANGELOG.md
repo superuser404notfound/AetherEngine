@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.71.1] - 2026-11-20
+
 ### Fixed
 
 - **A software-path video now turns its audio on after the TV has switched modes.** The software path
