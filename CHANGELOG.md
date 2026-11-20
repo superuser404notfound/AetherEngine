@@ -12,6 +12,15 @@ the public-API contract.
 
 ### Fixed
 
+- **A software-path video now turns its audio on after the TV has switched modes.** The software path
+  activated the audio session before it built its host, while the panel could still be switching refresh
+  rate or dynamic range for that load, so the HDMI audio link was negotiated mid-switch. It now activates
+  after the play gate and before the first `play()`, the way AVKit does on the native path, and the silent
+  Atmos stream for a receiver's Atmos indicator waits for the same point. A reporter with an Atmos receiver
+  saw some whole sessions stay silent on mode-changing AV1 loads; that this ordering caused them is not
+  proven yet. The start costs one activation round trip (about 14 ms) that used to overlap the host build
+  (AE#1099, reported by @nulltuple).
+
 - **A Resume of a file without a keyframe index no longer pays the 10 s index scan again.** On an MKV
   without Cues the start scans the file for keyframes until a 10 s cap, then falls back to a fixed segment
   grid. With `retainsSessionCacheAfterStop` the kept session now remembers that, and the next load of the

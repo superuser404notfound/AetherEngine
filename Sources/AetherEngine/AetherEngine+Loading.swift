@@ -2028,6 +2028,9 @@ extension AetherEngine {
     /// in #114 and the teardown deactivation in #215. Only the track lookup, which reads published state, stays here.
     func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) async {
         guard rendererAudioSessionActivationEnabled else { return }
+        #if DEBUG
+        rendererAudioActivationForTesting?()
+        #endif
         #if os(iOS) || os(tvOS)
         // Resolve the active audio track's channel count from the already-published track list.
         // so the HDMI / AirPlay link negotiates at the correct channel count.
@@ -2065,6 +2068,27 @@ extension AetherEngine {
     }
     #endif
 
+    /// AE#1099: a fresh software load starts its audio output after the display play gate, the way AVKit
+    /// does on the native path, where the session goes active at `play()`. Activated before the host was
+    /// built, it negotiated the HDMI audio link while the panel was still switching modes for this load,
+    /// and a reporter's Atmos chain then stayed silent for some whole sessions. The Atmos activator waits
+    /// too: its looping player activates the session on its own.
+    ///
+    /// The session is still active before the first audio sample: the host enqueues nothing until its
+    /// loops start in `play()` / `pause()`, and both come after this. Activating over a filled queue would
+    /// let a route change flush it (AE#549). Costs one activation round trip (about 14 ms measured by the
+    /// reporter) that used to overlap the host build. A reload has no play gate and keeps the early start
+    /// inside `loadSoftware`.
+    func startSoftwareAudioOutputAfterPlayGate(audioSourceStreamIndex: Int32?, gateHeldMs: Int) async {
+        if rendererAudioSessionActivationEnabled {
+            EngineLog.emit(
+                "[AetherEngine] AE#1099: software load activates the renderer audio session after the "
+                + "play gate (gate held \(gateHeldMs)ms)",
+                category: .engine)
+        }
+        await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+    }
+
     func loadSoftware(
         url: URL,
         sourceHTTPHeaders: [String: String] = [:],
@@ -2076,7 +2100,8 @@ extension AetherEngine {
         requiresDeinterlaceWarmup: Bool,
         autostarts: Bool,
         generation: UInt64,
-        elType: String? = nil
+        elType: String? = nil,
+        audioOutputWaitsForPlayGate: Bool = false
     ) async throws {
         try checkLoadCurrent(generation)
         sessionCacheStatusToken &+= 1
@@ -2101,8 +2126,10 @@ extension AetherEngine {
             }
         }
 
-        await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
-        try checkLoadCurrent(generation)
+        if !audioOutputWaitsForPlayGate {
+            await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+            try checkLoadCurrent(generation)
+        }
         // Drop the previous session's sinks BEFORE anything wires this one's. Standing further down,
         // between two groups of `.store(in:)` calls, this cancelled everything wired above it: the
         // SW-PiP cue mirror never delivered a cue after the frame compositor was armed. Both halves
@@ -2339,7 +2366,7 @@ extension AetherEngine {
         if let status = processingRebuild.status { activeVideoProcessing = status }
         wireVideoProcessingStatus(from: host)
         // The audio route is settled by `load`: an object-audio one keeps the HDMI link in Atmos.
-        followAtmosOutput()
+        if !audioOutputWaitsForPlayGate { followAtmosOutput() }
     }
 
     /// Open `AudioPlaybackHost` for an audio-only source. No HLS pipeline, display layer, or display-criteria handshake. Same lifecycle as `loadSoftware`.

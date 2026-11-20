@@ -2355,6 +2355,8 @@ final class SoftwarePlaybackHost {
     var recoveryPendingForTesting: Bool { flushRecoveryPending }
     func setRepositionBackoffForTesting(_ seconds: Double) { repositionBackoffSeconds = seconds }
     var audioAutomaticFlushCountForTesting: Int? { audioOutput?.automaticFlushCount }
+    /// AE#1099: whether the loops that feed the renderers have started; nothing is enqueued before.
+    var loopsStartedForTesting: Bool { demuxLoopStarted }
     /// A session the system has invalidated and whose rebuild is owed, as `handleVideoSessionLost()` leaves it.
     func setVideoSessionRecoveryOwedForTesting() { videoSessionRecoveryOwed = true }
     func keyframeWhileSessionLostForTesting() { handleKeyframeWhileSessionLost() }

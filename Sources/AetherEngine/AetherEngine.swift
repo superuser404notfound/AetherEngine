@@ -1688,6 +1688,9 @@ public final class AetherEngine: ObservableObject {
     /// AE#973: runs on a software host that has loaded and not yet started its loops. A paused mount
     /// starts them for the first frame, so a hook installed after `load` returns can miss it.
     var softwareHostLoadedForTesting: (@MainActor (SoftwarePlaybackHost) -> Void)?
+    /// AE#1099: runs where a renderer path asks for its audio session, on every platform, so the order
+    /// against the software host build and the play gate is observable without a session.
+    var rendererAudioActivationForTesting: (@MainActor () -> Void)?
     /// AE#628: lets a test drive the drain tick with a real decoder but no playback session.
     var subtitleDrainDecoderFactoryForTesting: ((Int32) -> EmbeddedSubtitleDecoder?)?
     #endif
@@ -6421,7 +6424,8 @@ public final class AetherEngine: ObservableObject {
                     requiresDeinterlaceWarmup: requiresDeinterlaceWarmup,
                     autostarts: Self.loadPerformsAutostart(options),
                     generation: gen,
-                    elType: elType
+                    elType: elType,
+                    audioOutputWaitsForPlayGate: true
                 )
                 playbackBackend = .software
                 lastRequiresDeinterlaceWarmup = requiresDeinterlaceWarmup
@@ -6454,6 +6458,7 @@ public final class AetherEngine: ObservableObject {
                 // so without this the host starts playing into a dark panel. There is no AVPlayerItem here
                 // for AVKit to read criteria from, so a host that leaves the write to AVKit expects no
                 // inbound write.
+                let playGateEntry = DispatchTime.now()
                 await awaitingDisplaySwitch(generation: gen) {
                     await displayCriteria.waitForSwitch(
                         startGrace: Self.playGateGrace(
@@ -6468,6 +6473,14 @@ public final class AetherEngine: ObservableObject {
                         isCurrent: { self.loadGeneration == gen })
                 }
                 try checkLoadCurrent(gen)
+                // AE#1099: the audio output starts here, after the panel's switch, for a playing and a
+                // paused mount alike, so a later play() finds an active session.
+                await startSoftwareAudioOutputAfterPlayGate(
+                    audioSourceStreamIndex: selectedAudio,
+                    gateHeldMs: Int((DispatchTime.now().uptimeNanoseconds
+                                     - playGateEntry.uptimeNanoseconds) / 1_000_000))
+                try checkLoadCurrent(gen)
+                followAtmosOutput()
                 // #124: a paused mount skips autostart; loadSoftware's host.$isReady settles .paused.
                 if Self.loadPerformsAutostart(options) {
                     softwareHost?.play()
