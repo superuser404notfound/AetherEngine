@@ -19,6 +19,7 @@ struct Issue1099SoftwareAudioAfterPlayGateTests {
             let host = engine?.softwareHost
             journal.update {
                 $0.append("activation host=\(host != nil) playing=\(host?.isPlaying ?? false) "
+                          + "loops=\(host?.loopsStartedForTesting ?? false) "
                           + "gate=\(engine?.isAwaitingDisplaySwitch ?? false)")
             }
         }
@@ -35,7 +36,7 @@ struct Issue1099SoftwareAudioAfterPlayGateTests {
         let (engine, journal) = try await load(autoplay: true)
         defer { engine.stop() }
 
-        #expect(journal == ["host loaded", "activation host=true playing=false gate=false"])
+        #expect(journal == ["host loaded", "activation host=true playing=false loops=false gate=false"])
         #expect(engine.softwareHost?.isPlaying == true)
     }
 
@@ -44,8 +45,9 @@ struct Issue1099SoftwareAudioAfterPlayGateTests {
         let (engine, journal) = try await load(autoplay: false)
         defer { engine.stop() }
 
-        #expect(journal == ["host loaded", "activation host=true playing=false gate=false"])
+        #expect(journal == ["host loaded", "activation host=true playing=false loops=false gate=false"])
         #expect(engine.softwareHost?.isPlaying == false)
+        #expect(engine.softwareHost?.loopsStartedForTesting == true)
     }
 
     @Test("A host that owns the session sees no activation from the engine")
