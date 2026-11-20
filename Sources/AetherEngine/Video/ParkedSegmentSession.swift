@@ -42,6 +42,21 @@ final class ParkedSegmentSession: @unchecked Sendable {
     /// there was missing (measured: none between the resume point and the pump's start). In RAM
     /// while parked; text tracks are kilobytes, bitmap tracks stay under the store's own caps.
     let subtitles: SubtitlePacketStore
+    /// Set when the parked session's cue prewarm ran into its cap and its plan fell back to the
+    /// uniform stride. The next load of the same file skips that prewarm, because it would end the
+    /// same way: on a remote MKV without Cues it cost the whole 10 s cap before every Resume.
+    let unindexedSource: UnindexedSource?
+
+    /// The file a capped prewarm was measured on. A different size or duration under the same URL is
+    /// a different file, and that load runs its prewarm again.
+    struct UnindexedSource: Equatable, Sendable {
+        let byteSize: Int64
+        let durationSeconds: Double
+
+        func describes(byteSize: Int64?, durationSeconds: Double) -> Bool {
+            byteSize == self.byteSize && durationSeconds == self.durationSeconds
+        }
+    }
 
     private let lock = NSLock()
     private var markerFD: Int32
@@ -49,13 +64,14 @@ final class ParkedSegmentSession: @unchecked Sendable {
 
     init(key: Key, plan: [HLSVideoEngine.Segment], segments: SegmentCache.ParkedSegments,
          epochAxis: EpochAxisTable, playlistShiftSeconds: Double, subtitles: SubtitlePacketStore,
-         markerFD: Int32) {
+         unindexedSource: UnindexedSource? = nil, markerFD: Int32) {
         self.key = key
         self.plan = plan
         self.segments = segments
         self.epochAxis = epochAxis
         self.playlistShiftSeconds = playlistShiftSeconds
         self.subtitles = subtitles
+        self.unindexedSource = unindexedSource
         self.markerFD = markerFD
     }
 

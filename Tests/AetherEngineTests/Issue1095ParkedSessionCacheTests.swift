@@ -231,6 +231,17 @@ struct Issue1095ParkedSessionCacheTests {
                 == "session output configuration")
     }
 
+    @Test("a capped prewarm is skipped only for the same file", .timeLimit(.minutes(3)))
+    func unindexedSourceMatchesByteSizeAndDuration() {
+        let measured = ParkedSegmentSession.UnindexedSource(byteSize: 54_325_786, durationSeconds: 300.025)
+        #expect(measured.describes(byteSize: 54_325_786, durationSeconds: 300.025))
+        // Same URL, other bytes: a replaced file runs its prewarm again.
+        #expect(!measured.describes(byteSize: 54_325_787, durationSeconds: 300.025))
+        #expect(!measured.describes(byteSize: 54_325_786, durationSeconds: 300.0))
+        // An origin that never said how large the file is proves nothing.
+        #expect(!measured.describes(byteSize: nil, durationSeconds: 300.025))
+    }
+
     // MARK: - Two real sessions
 
     @Test("a resume adopts what the stopped session cut and starts its producer after it",
@@ -250,6 +261,8 @@ struct Issue1095ParkedSessionCacheTests {
         for index in 0..<planCount { cut[index] = firstProvider.mediaSegment(at: index) }
         try #require(cut.count == planCount)
         let firstPlaylist = try String(contentsOf: try #require(first.mediaPlaylistURL), encoding: .utf8)
+        // An MP4 carries its index, so the prewarm is never capped and the next load runs it again.
+        #expect(first.unindexedSource == nil)
 
         first.parksSegmentsAtStop = true
         first.stop()
@@ -266,6 +279,8 @@ struct Issue1095ParkedSessionCacheTests {
             #expect(second.cache?.peek(index: index) == cut[index], "seg\(index) is not the parked one")
             #expect(secondProvider.mediaSegment(at: index) == cut[index])
         }
+        // The adopting session positions its demuxer on the pump thread, so this segment is only
+        // there when that late seek ran before the pump's first read.
         #expect(secondProvider.mediaSegment(at: planCount - 1) != nil)
         let secondPlaylist = try String(contentsOf: try #require(second.mediaPlaylistURL), encoding: .utf8)
         #expect(secondPlaylist == firstPlaylist)

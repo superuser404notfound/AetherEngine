@@ -239,6 +239,11 @@ A restart is the expensive path: it re-seeks the demuxer, which is slow on remot
 
 The key that decides reuse is the URL, the options without the diagnostics label, the session's own derived output configuration (`ParkingOutputConfiguration`) and the segment plan.
 
+Two things keep a Resume of a file without a keyframe index from paying the index work again:
+
+- The candidate is taken before the cue prewarm. When the parked session's prewarm hit its cap and its plan fell back to the uniform stride (`ParkedSegmentSession.UnindexedSource`, the file's byte size and duration), a load of the same file skips the prewarm. On a remote MKV without Cues that was the whole 10 s cap before every Resume.
+- A session that adopted segments seeks its first producer on the pump thread (`HLSSegmentProducer.positionBeforeFirstRead`) instead of in `prepare()`. Without an index that seek is a linear read up to the frontier, and the playhead has the adopted span to play meanwhile. A restart that meets the pump still in it takes the wedged-read path (fresh demuxer after 5 s).
+
 **Whole-source prefetch (opt-in).** A forward window larger than that is an explicit host opt-in through `LoadOptions.forwardBufferSegments` (up to 2700 segments, ~3 h, #207). It drops the budget's 2 GiB default cap but keeps the quarter-of-free-space clamp.
 
 The producer parks once the segments it has written ahead of the consumer target fill that budget, and resumes as eviction behind the playhead frees room (`PrefetchDiskBudget`). So an opt-in prefetch follows the disk budget, not the source length.
