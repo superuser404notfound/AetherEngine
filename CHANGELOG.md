@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A Dolby Vision live recording reads back as HEVC again, not as `DOVI`.** FFmpegBuild 3.16.1 brings the
+  mpegts Dolby Vision patch in line with its upstream review (FFmpeg PR 26097). The `DOVI` registration
+  descriptor now precedes the `HEVC` one, and since the demuxer keeps the last registration as the codec
+  tag, a recording reports `HEVC` again. The `DOVI` registration is also written only for Profile 5
+  (compatibility ID 0), as Dolby's TS spec asks, and a base layer whose RPU was stripped is no longer
+  announced as Dolby Vision. The configuration record itself is unchanged.
+
 - **A live source that answers every request with a few bytes no longer gets asked hundreds of times a
   second.** A channel that is still starting can answer each request with HTTP 200 and a short body such as
   `Channel starting.`. Sent as `text/plain` with a length, 7.53.0 already reads that as a refusal (AE#925).
