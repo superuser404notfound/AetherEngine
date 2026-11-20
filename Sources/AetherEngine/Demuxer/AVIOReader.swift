@@ -2729,8 +2729,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // `.reconnecting`, bounded give-up. Planned ends stay here — a completed range
             // (connEndedAtRangeEnd) and a hard-cap end delivered their bytes, and any
             // generation that delivered at least one byte keeps the fast path.
-            let endedInError = connEnded && !connEndedAtRangeEnd && !connEndedByBackpressure
-                && !connFirstDataSeen
+            //
+            // Except on live, where nothing ends a connection on plan: a live generation that
+            // ended within `liveTextNoticeMaxBytes` is charged like an error end. A channel still
+            // spinning up answered every request 200 with "Channel starting.\n" as TS (no AE#925
+            // suspect), and each 18 B answer took this branch: 46,000 requests in 40 s on
+            // loopback (StreamX, 4,330 in 19 s in the field). A live source that ends its
+            // connections after real data, even a low-bitrate one closing every few hundred KB,
+            // still reconnects here, unpaced and off the books.
+            let endedUnplanned = connEnded && !connEndedAtRangeEnd && !connEndedByBackpressure
+            let endedInError = endedUnplanned
+                && (!connFirstDataSeen || (isLive && genDeliveredBytes <= Self.liveTextNoticeMaxBytes))
             if activeTransfer == nil, !connEndedByBackpressure, !windowCanServe, !endedInError {
                 let target = position
                 winCond.unlock()
@@ -2855,7 +2864,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // storm held streak=1 across 4 MB of served reads, and the bounded give-up and the
                 // re-resolve rung were both unreachable until the window hit empty).
                 if connFirstDataSeen {
-                    unproductiveReconnects = 0      // real progress
+                    // On live a generation's first bytes are not progress yet: a source answering
+                    // every request with 18 B cleared the streak on each serve and was retried at
+                    // backoff zero forever. `recordReconnectAndShouldGiveUp` resets it once a
+                    // reconnect has really delivered.
+                    if !isLive || genDeliveredBytes > Self.liveTextNoticeMaxBytes {
+                        unproductiveReconnects = 0  // real progress
+                    }
                     rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
                     credentialRefusalStreak = 0     // and the credential one (#792)
                     rateLimitStreakStartedAt = nil
@@ -3086,9 +3101,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if now == 0 && isHardError {
             return unproductiveReconnects > 1
         }
-        // Dead-on-arrival sources (never produced data) get a reduced budget;
-        // sources that ever produced data keep the full budget for mid-stream resilience.
-        let cap = now == 0
+        // Dead-on-arrival sources get a reduced budget; sources that ever produced data keep the
+        // full budget for mid-stream resilience. A few bytes are not data: a channel answering
+        // "Channel starting.\n" to every request had delivered something, and got the full twelve.
+        let cap = now < Self.minReconnectProgress
             ? Self.reconnectMaxUnproductiveNeverProductive
             : Self.reconnectMaxUnproductive
         return unproductiveReconnects > cap

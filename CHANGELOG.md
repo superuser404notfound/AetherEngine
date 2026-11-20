@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A live source that answers every request with a few bytes no longer gets asked hundreds of times a
+  second.** A channel that is still starting can answer each request with HTTP 200 and a short body such as
+  `Channel starting.`. Sent as `text/plain` with a length, 7.53.0 already reads that as a refusal (AE#925).
+  Labelled as TS or sent without a length, the reader counted the bytes as progress, reset its reconnect
+  streak and asked again at once: 46,000 requests in 40 s against a loopback origin, 4,330 in 19 s in the
+  field. Now a live connection that ends with 64 KiB or less delivered goes through the reconnect ladder
+  with backoff, and a source that never delivered 512 KB in total gets the short never-productive budget. The
+  same origin now sees five requests over about 15 s, then the load fails with `.liveSourceUnavailable`.
+  A live source that delivers real data before ending its connection still reconnects at once. The short
+  budget now also applies to a VOD source that failed before delivering 512 KB, which used to get the full
+  twelve attempts (reported by StreamX).
 
 ## [7.71.1] - 2026-11-20
 
