@@ -51,7 +51,7 @@ AetherEngine is a video and audio player engine for iOS, tvOS, macOS and visionO
 Add the package:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.71.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.71.2")
 ```
 
 Play a video:

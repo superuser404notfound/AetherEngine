@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.71.2] - 2026-11-20
+
 ### Fixed
 
 - **A Dolby Vision live recording reads back as HEVC again, not as `DOVI`.** FFmpegBuild 3.16.1 brings the
