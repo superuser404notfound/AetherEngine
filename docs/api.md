@@ -137,6 +137,7 @@ How these kinds arrived in earlier releases is in [measurements.md › API histo
 - **A plain-URL live open** (`isLive`) that the origin answers with a status fails the same way (#796). A 500 or 502 is asked once more first. A 2xx answer with a short text notice instead of media fails the same way too: that is how an Xtream panel at its connection cap answers, and it publishes `.sourceRateLimited` with 509 (#925).
 - **A TLS trust refusal** on either publishes `.sourceCertificateRejected`.
 - **Only a live open that reaches nothing** publishes `.liveSourceUnavailable`. The reconnect ladder first tries to ride out a transport failure. When the start gives up, the last connection's URL error domain and code are in `underlyingDomain` / `underlyingCode`. A transport failure does not prove that the media format is unsupported.
+- **A live open that gets only a few bytes per request** publishes `.liveSourceUnavailable` too. Some panels answer a channel that is still starting with a short body labelled as TS, or with text and no length. Under half a megabyte per connection does not count as delivering, so the open retries on the never-productive ladder (five requests, about 15 s) and then fails.
 
 #### Origin refusals: `.sourceRefused` and `.sourceRateLimited`
 

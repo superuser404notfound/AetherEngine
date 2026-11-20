@@ -154,6 +154,7 @@ How to use all of this: [guide.md › Live TV and DVR](guide.md#live-tv-and-dvr)
 **Streaming.**
 
 - One long-lived forward-streaming connection, reconnected when it drops. It rides out CDN stutter.
+- A reconnect that brings back only a few bytes is not counted as progress. A live source that answers every request with a short notice ("Channel starting.") gets five requests over about 15 s, then the open fails, instead of being asked again hundreds of times a second.
 - Optional open-time probe budget (`LoadOptions.probesize` / `maxAnalyzeDuration`): how much the engine reads to analyse a file before playing. A smaller budget cuts first-frame latency on sparse remote remuxes.
 - Configurable forward buffer (`LoadOptions.forwardBufferSegments`): from the 40 s default up to an opt-in whole-source pre-buffer. That pre-buffer is bounded in bytes by the session's disk budget, not in segments.
 
