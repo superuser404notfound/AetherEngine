@@ -418,6 +418,13 @@ public final class Demuxer: @unchecked Sendable {
         return avioProvider?.resolvedByteSize != nil
     }
 
+    /// The source's size in bytes as the reader resolved it, nil when the origin never said.
+    var resolvedSourceByteSize: Int64? {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return avioProvider?.resolvedByteSize
+    }
+
     /// Number of attached-picture (cover-art) streams reclassified to ATTACHMENT before
     /// stream-info probing on the most recent open. See `reclassifyAttachedPictures`. (#75)
     private(set) var attachedPictureStreamsReclassified: Int = 0

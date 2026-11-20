@@ -2405,6 +2405,10 @@ Measured with `aetherctl play --host-calls stopreopen@25` on a 1080p MKV from an
 
 The new session takes the kept segments below the first one missing at or after its start position, and its producer starts there. Its first segment lands at once, and so does its clock.
 
+**A per-play id in the URL or the headers defeats it.** The URL is compared with every query item, and the options with every header in `httpHeaders`. A server API that puts a fresh session id into each play request (a `PlaySessionId` query item, a session header) makes every reopen a different source, and the log says `discarded the parked session … a load of another source` (or `the next load differs in its load options` for a header). For a Resume of the same item and version, hand the engine the URL and headers of the previous load, and keep the fresh id for the progress reports.
+
+**A file without a keyframe index.** On an MKV without Cues the start scans for keyframes until a 10 s cap and then cuts on a fixed grid. The kept session remembers that it hit the cap, and the next load of the same file (same byte size and duration) skips the scan instead of paying it again. The segment plan is still compared, so a file replaced under the same URL is caught there.
+
 **When it is deleted.**
 
 - A `load()` of any other source, or a load without the option.

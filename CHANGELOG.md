@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A Resume of a file without a keyframe index no longer pays the 10 s index scan again.** On an MKV
+  without Cues the start scans the file for keyframes until a 10 s cap, then falls back to a fixed segment
+  grid. With `retainsSessionCacheAfterStop` the kept session now remembers that, and the next load of the
+  same file (same size and duration) skips the scan. The first producer of a session that adopted kept
+  segments also positions itself on its own thread, so the load no longer waits for a linear seek past
+  them. Measured on a 300 s cue-less MKV from an origin with 150 ms per response and 2 MB/s: the clock moved
+  0.9 to 1.0 s after the reopen instead of 15.7 s (AE#1095, reported with device numbers by @samimt55).
+
 - **A software-path video no longer waits on low-priority work to start.** Every load waits for its packet
   cache setup, and that setup ran at utility priority. Since the move to `BlockingWork` (7.31.2) an await no
   longer raised it, so on a busy CPU the start waited behind everything else. In a full test run the load

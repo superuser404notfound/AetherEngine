@@ -958,6 +958,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var parksSegmentsAtStop = false
     /// A parked session this one matched on its key, until the segment plan decides.
     private var parkedCandidate: ParkedSegmentSession?
+    /// AE#1095: this session's file when its cue prewarm hit the cap (or was skipped on a parked
+    /// session's word) and the plan fell back to the uniform stride. Travels with a park.
+    private(set) var unindexedSource: ParkedSegmentSession.UnindexedSource?
+    /// AE#1095: this session's first segments came from a parked session, so its first producer
+    /// may position the demuxer on its own thread instead of inside `prepare()`.
+    private var adoptedParkedSegments = false
     /// The slot this session parks into and adopts from. Tests give each session a store of its
     /// own, so a parallel suite's session start cannot discard what they parked.
     var parkingStore: ParkedSegmentSessionStore = .shared
@@ -1723,6 +1729,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
         var plan: [Segment]
         var keyframeBytePositions: [Int64: Int64] = [:]
         planKeyframeAdvanceTicks = 0
+        unindexedSource = nil
+        adoptedParkedSegments = false
+        // AE#1095: taken before the prewarm, whose cap a parked session may already have paid, and
+        // before the free space is read. A parked session this one does not match is deleted here,
+        // so its bytes do not shrink the budget; one it does match is counted back in, because its
+        // bytes move into this session's own ledger.
+        if let key = parkingKey {
+            parkedCandidate = parkingStore.take(matching: key)
+        } else {
+            parkingStore.discard(
+                reason: isLiveSession ? "a live session started" : "a session without the option started")
+        }
         if isLiveSession {
             sourceBitrate = dem.bitRate
             self.firstKeyframePts = 0
@@ -1761,7 +1779,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // A lazily indexed fragmented MP4 is the DASH case here too. The seek would read
             // one fragment at the midpoint and the plan comes from the mfra instead.
             let lazyFragments = !dem.lazyFragmentRandomAccessStartsSeconds.isEmpty
-            if !Self.cuePrewarmMayRun(hasSegmentedReader: dem.timeSeekableReader != nil,
+            // Whether the plan below may record this file as one without a usable index.
+            var prewarmFoundNoIndex = false
+            if let parked = parkedCandidate?.unindexedSource,
+               parked.describes(byteSize: dem.resolvedSourceByteSize, durationSeconds: durationSeconds) {
+                // The parked plan is still compared below, so a file that changed without changing
+                // its size and duration is caught there and costs only this reuse.
+                prewarmFoundNoIndex = true
+                EngineLog.emit(
+                    "[HLSVideoEngine] cue prewarm: skipped, the parked session of this file hit the cap "
+                    + "and fell back to the uniform stride (\(parked.byteSize) bytes, AE#1095)")
+            } else if !Self.cuePrewarmMayRun(hasSegmentedReader: dem.timeSeekableReader != nil,
                                       isSourceSeekable: dem.isSourceSeekable,
                                       isDASHSource: dem.isDASHSource || lazyFragments) {
                 EngineLog.emit(
@@ -1781,6 +1809,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 if prewarmOK {
                     EngineLog.emit("[HLSVideoEngine] cue prewarm: seek to \(String(format: "%.1f", durationSeconds * 0.5))s took \(String(format: "%.1f", prewarmMs))ms")
                 } else {
+                    prewarmFoundNoIndex = true
                     EngineLog.emit("[HLSVideoEngine] cue prewarm: capped at \(String(format: "%.1f", prewarmMs))ms (no usable Cues index, index points past EOF or is absent); building plan from whatever keyframes were scanned")
                 }
             }
@@ -1921,6 +1950,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 )
                 self.firstKeyframePts = anchorPts
                 self.firstKeyframeSeconds = Double(anchorPts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
+                if prewarmFoundNoIndex, let byteSize = dem.resolvedSourceByteSize {
+                    unindexedSource = .init(byteSize: byteSize, durationSeconds: durationSeconds)
+                }
                 // A sparse/clustered index (MPEG-TS / M2TS: no Cues, only what find_stream_info + the
                 // mid-file seek scanned) would otherwise build a multi-thousand-second first segment that
                 // the frag_custom muxer buffers whole in RAM (#64). A bunched index (remote MKV whose Cues
@@ -2070,16 +2102,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
             if dem.isSourceSeekable { dem.notePlaybackRepositioned() }
         }
         demuxerAtInitialProducerStart = false
-
-        // AE#1095: taken before the free space is read. A parked session this one does not match
-        // is deleted here, so its bytes do not shrink the budget; one it does match is counted back
-        // in, because its bytes move into this session's own ledger.
-        if let key = parkingKey {
-            parkedCandidate = parkingStore.take(matching: key)
-        } else {
-            parkingStore.discard(
-                reason: isLiveSession ? "a live session started" : "a session without the option started")
-        }
 
         // volumeAvailableCapacityForImportantUsage is unavailable on tvOS; the plain capacity key
         // exists on every platform and is close enough for the quarter-of-free-space clamp.
@@ -2717,8 +2739,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // leaving the producer to scan a whole GOP over the origin before writing anything (#191).
         // The DTS:X verdict may already have put the cursor there and peeked from it (#744); a
         // second seek would drop those packets and read the same bytes again.
-        if !demuxerAtInitialProducerStart {
-            seekToInitialProducerStart(dem)
+        if !demuxerAtInitialProducerStart, let seek = initialProducerSeek() {
+            if adoptedParkedSegments {
+                prod.positionBeforeFirstRead = { seek(dem) }
+            } else {
+                seek(dem)
+            }
         }
         // #416: the pump harvests every subtitle packet it demuxes, so where it OPENS is where its
         // coverage of the source begins. The subtitle drain reads "nothing between this set and the
@@ -5736,13 +5762,22 @@ extension HLSVideoEngine {
     /// the previous sync point in a multi-stream MP4, leaving the producer to scan a whole GOP over
     /// the origin before writing anything (#191).
     func seekToInitialProducerStart(_ dem: Demuxer) {
+        initialProducerSeek()?(dem)
+    }
+
+    /// The seek `seekToInitialProducerStart` runs, nil at segment 0. Built from the session's state
+    /// now, so it can run later on the pump thread (AE#1095).
+    func initialProducerSeek() -> (@Sendable (Demuxer) -> Void)? {
         let plan = segmentPlan
-        guard initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count else { return }
+        guard initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count else { return nil }
         let targetPts = plan[initialProducerBaseIndex].startPts
-        // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
-        if dem.isDiscSource || !dem.seek(to: targetPts, streamIndex: videoStreamIndex) {
-            let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
-            dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
+        let streamIndex = videoStreamIndex
+        let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
+        return { dem in
+            // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
+            if dem.isDiscSource || !dem.seek(to: targetPts, streamIndex: streamIndex) {
+                dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
+            }
         }
     }
 }
@@ -5786,6 +5821,7 @@ extension HLSVideoEngine {
         let epochAxis: EpochAxisTable
         let playlistShiftSeconds: Double
         let subtitles: SubtitlePacketStore
+        let unindexedSource: ParkedSegmentSession.UnindexedSource?
         let store: ParkedSegmentSessionStore
         let storeLook: UInt64
     }
@@ -5801,7 +5837,8 @@ extension HLSVideoEngine {
         anchorShiftLock.unlock()
         return ParkingSnapshot(key: key, plan: plan, epochAxis: axis,
                                playlistShiftSeconds: playlistShiftSeconds,
-                               subtitles: subtitlePacketStore, store: parkingStore,
+                               subtitles: subtitlePacketStore, unindexedSource: unindexedSource,
+                               store: parkingStore,
                                storeLook: parkingStore.lookCount)
     }
 
@@ -5819,7 +5856,8 @@ extension HLSVideoEngine {
         snapshot.store.park(ParkedSegmentSession(
             key: snapshot.key, plan: snapshot.plan, segments: segments,
             epochAxis: snapshot.epochAxis, playlistShiftSeconds: snapshot.playlistShiftSeconds,
-            subtitles: snapshot.subtitles, markerFD: directory.markerFD),
+            subtitles: snapshot.subtitles, unindexedSource: snapshot.unindexedSource,
+            markerFD: directory.markerFD),
             ifNoLookSince: snapshot.storeLook)
     }
 
@@ -5856,6 +5894,7 @@ extension HLSVideoEngine {
         setPlaylistShiftSeconds(parked.playlistShiftSeconds)
         subtitlePacketStore.adoptContents(of: parked.subtitles)
         initialProducerBaseIndex = frontier
+        adoptedParkedSegments = true
         parked.finishAdoption(segments: adopted.segments, bytes: adopted.bytes, frontier: frontier)
     }
 }

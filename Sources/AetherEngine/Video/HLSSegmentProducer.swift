@@ -2894,6 +2894,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     // MARK: - Public API
 
+    /// AE#1095: runs on the pump thread before its first read. Set before `start()`. A session that
+    /// adopted parked segments positions the demuxer here, because on a file without an index that
+    /// seek is a linear scan (6.5 s on a 2 MB/s origin), and the load does not need to wait for it
+    /// while its first segments are already on disk.
+    var positionBeforeFirstRead: (@Sendable () -> Void)?
+
     func start() {
         assert(!isLive || onLiveSegmentFinalized != nil,
                "a live producer started without its provider reports cuts segments no playlist lists (audit HLS-101)")
@@ -3567,6 +3573,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         )
         if restartTargetVideoPts > Int64.min {
             bumpRestartCount()
+        }
+        if let position = positionBeforeFirstRead {
+            positionBeforeFirstRead = nil
+            if !checkShouldStop() { position() }
         }
         // #240: a running pump is pulling from the source. Claimed for the whole loop and released
         // on every exit path; the two park helpers hand it back for the duration of their wait.
