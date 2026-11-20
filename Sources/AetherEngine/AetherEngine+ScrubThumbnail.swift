@@ -103,7 +103,9 @@ extension AetherEngine {
         let output = live ? seconds - liveShift
             : sourceTarget - session.firstKeyframeSeconds
         let planOrigin = session.firstKeyframeSeconds - origin
-        let source = await BlockingWork.detached(priority: .utility) { [session] in
+        // A finger on the scrubber waits for these three, so they run at `.userInitiated`. A BlockingWork job
+        // keeps the priority it was enqueued with; at `.utility` a busy CPU left the still behind everything else.
+        let source = await BlockingWork.detached(priority: .userInitiated) { [session] in
             session.scrubThumbnailSource(atSeconds: output)
         }.value
         guard gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
@@ -124,7 +126,7 @@ extension AetherEngine {
                 await extractor.residentPreview(rawTarget: rawTarget, refined: refined, maxWidth: maxWidth,
                                                 isCancelled: isCancelled)
             }) else { return nil }
-        let stillOwned = await BlockingWork.detached(priority: .utility) { [session] in
+        let stillOwned = await BlockingWork.detached(priority: .userInitiated) { [session] in
             guard let current = session.scrubThumbnailSource(atSeconds: output) else { return false }
             return current.identity == source.identity && current.carriedOffset == source.carriedOffset
         }.value
@@ -143,7 +145,7 @@ extension AetherEngine {
     private func ladderPreviewFrame(session: HLSVideoEngine, outputSeconds: Double, planOrigin: Double,
                                     maxWidth: Int, generation gen: UInt64,
                                     isCancelled: @escaping @Sendable () -> Bool) async -> ScrubFrame? {
-        let rung = await BlockingWork.detached(priority: .utility) { [session] in
+        let rung = await BlockingWork.detached(priority: .userInitiated) { [session] in
             session.stillLadderFrame(atSeconds: outputSeconds)
         }.value
         guard let rung, gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }

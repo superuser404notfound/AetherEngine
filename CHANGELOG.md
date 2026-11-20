@@ -17,6 +17,10 @@ the public-API contract.
   longer raised it, so on a busy CPU the start waited behind everything else. In a full test run the load
   took 11.7 s before and 4.4 s after; a device under load was not measured. It also was what pushed the
   AE#1023 paused-seek test over its CI time limit.
+- **A scrub preview no longer waits on low-priority work either.** Three lookups each preview still waits
+  for (the segment that holds the position, whether it is still the same one after the decode, and the
+  keyframe ladder's rung) ran at utility priority the same way. They now run at the priority of the finger on
+  the scrubber. Not measured separately; the cause is the one above.
 
 ## [7.71.0] - 2026-11-19
 
