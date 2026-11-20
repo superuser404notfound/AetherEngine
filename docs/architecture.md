@@ -255,6 +255,7 @@ What stays the same: per-origin caps, FIFO ordering, pacing, cancellation drains
 
 - The task prefers `BlockingExecutor`, which runs its jobs on GCD's global queues. GCD adds a thread when one blocks.
 - Otherwise the task behaves like any detached task: it awaits, hops to the main actor, and can be cancelled.
+- **Its priority is fixed when it is enqueued.** The job lands on the global queue of that QoS, and a caller that awaits it later does not raise it, unlike a plain `Task.detached`. So work a caller waits for gets the caller's priority. The software host's load waited 11.7 s on a `.utility` packet cache setup in a busy test run, and 4.4 s at `.userInitiated`.
 - `BlockingWorkTests` pins both halves, and a test fails the build if a `Task.detached` comes back into `Sources/AetherEngine`.
 
 **Testing it.** `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1` narrows the pool to one thread and reproduces pool exhaustion on any Mac. The full suite has to pass under it. How CI found the problem: [measurements.md, Cooperative pool exhaustion on CI](measurements.md#cooperative-pool-exhaustion-on-ci).

@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A software-path video no longer waits on low-priority work to start.** Every load waits for its packet
+  cache setup, and that setup ran at utility priority. Since the move to `BlockingWork` (7.31.2) an await no
+  longer raised it, so on a busy CPU the start waited behind everything else. In a full test run the load
+  took 11.7 s before and 4.4 s after; a device under load was not measured. It also was what pushed the
+  AE#1023 paused-seek test over its CI time limit.
 
 ## [7.71.0] - 2026-11-19
 

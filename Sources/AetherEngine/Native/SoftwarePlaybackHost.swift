@@ -1752,7 +1752,10 @@ final class SoftwarePlaybackHost {
             let initialSourceClock = initialClockTime.seconds
             let videoReorderDepth = Self.presentationReorderDepth(codecID: vCodecID)
             let anchorsOnLastKeyframe = snapsSeeksToKeyframes
-            let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
+            // The load waits for this, so it runs at the load's priority. At `.utility` it sat on the
+            // utility GCD queue, where the await's priority escalation never reaches a job that
+            // BlockingWork already enqueued: on a saturated CPU this step took 11.7 s of an 11.7 s load.
+            let cacheResult = await BlockingWork.detached(priority: .userInitiated) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
                 let segments = HLSVideoEngine.clampedForwardWindow(forwardBufferSegments)
                 guard let (fifo, bytes, claim) = try Self.makePacketStore(
                     storage: packetCacheStorage, forwardSegments: segments,
