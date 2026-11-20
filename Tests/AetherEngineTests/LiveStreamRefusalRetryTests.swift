@@ -402,7 +402,8 @@ struct LiveStreamRefusalRetryTests {
 
     @Test("a live source that ends every connection after real data keeps playing at full pace")
     func healthyShortConnectionsStayOffTheLadder() throws {
-        let chunk = Self.streamBytes(count: 3_000)   // 564 KB, past minReconnectProgress
+        // 128 KB: past what any notice is, short of minReconnectProgress, the low-bitrate shape.
+        let chunk = Self.streamBytes(count: 700)
         let origin = try #require(ScriptedOrigin { _ in .init(status: 200, body: chunk) })
         defer { origin.stop() }
         // The real backoff: a charged reconnect would cost seconds, not milliseconds.
@@ -411,11 +412,13 @@ struct LiveStreamRefusalRetryTests {
         try reader.open()
 
         let started = DispatchTime.now()
-        let drained = Self.drain(reader, expectedBytes: chunk.count * 4)
+        let drained = Self.drain(reader, expectedBytes: chunk.count * 16)
         let spent = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1e9
 
+        // Sixteen connections: past the never-productive cap and past the full twelve, so a charged
+        // ladder would have given up, not just slowed down.
         #expect(drained.failure == nil)
-        #expect(drained.bytes == chunk.count * 4)
-        #expect(spent < 1, "four connections took \(spent) s")
+        #expect(drained.bytes == chunk.count * 16)
+        #expect(spent < 2, "sixteen connections took \(spent) s")
     }
 }

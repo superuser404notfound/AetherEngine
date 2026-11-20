@@ -2731,14 +2731,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // generation that delivered at least one byte keeps the fast path.
             //
             // Except on live, where nothing ends a connection on plan: a live generation that
-            // ended short of `minReconnectProgress` is charged like an error end. A channel still
+            // ended within `liveTextNoticeMaxBytes` is charged like an error end. A channel still
             // spinning up answered every request 200 with "Channel starting.\n" as TS (no AE#925
             // suspect), and each 18 B answer took this branch: 46,000 requests in 40 s on
             // loopback (StreamX, 4,330 in 19 s in the field). A live source that ends its
-            // connections after real data still reconnects here, unpaced and off the books.
+            // connections after real data, even a low-bitrate one closing every few hundred KB,
+            // still reconnects here, unpaced and off the books.
             let endedUnplanned = connEnded && !connEndedAtRangeEnd && !connEndedByBackpressure
             let endedInError = endedUnplanned
-                && (!connFirstDataSeen || (isLive && genDeliveredBytes < Self.minReconnectProgress))
+                && (!connFirstDataSeen || (isLive && genDeliveredBytes <= Self.liveTextNoticeMaxBytes))
             if activeTransfer == nil, !connEndedByBackpressure, !windowCanServe, !endedInError {
                 let target = position
                 winCond.unlock()
@@ -2867,7 +2868,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     // every request with 18 B cleared the streak on each serve and was retried at
                     // backoff zero forever. `recordReconnectAndShouldGiveUp` resets it once a
                     // reconnect has really delivered.
-                    if !isLive || genDeliveredBytes >= Self.minReconnectProgress {
+                    if !isLive || genDeliveredBytes > Self.liveTextNoticeMaxBytes {
                         unproductiveReconnects = 0  // real progress
                     }
                     rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
