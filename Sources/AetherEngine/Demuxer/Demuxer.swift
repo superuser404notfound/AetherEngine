@@ -1979,7 +1979,7 @@ public final class Demuxer: @unchecked Sendable {
                     + "trc=\(label(av_color_transfer_name(declared.transfer), Int32(declared.transfer.rawValue))) "
                     + "matrix=\(label(av_color_space_name(declared.matrix), Int32(declared.matrix.rawValue)))"
             } else {
-                reason = "the stream is \(reading.depth)-bit"
+                reason = reading.depth > 0 ? "the stream is \(reading.depth)-bit" : "the stream's bit depth is unknown"
             }
             EngineLog.emit("[Demuxer] AE#1103 stream=\(index): untaggedVideoColor=\(name) not applied, \(reason)",
                            category: .demux, level: reading.hasRecord ? .info : .verbose)
