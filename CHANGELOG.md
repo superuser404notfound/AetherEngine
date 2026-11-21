@@ -21,12 +21,16 @@ the public-API contract.
 
 ### Changed
 
-- **The GPU deinterlacer is bwdif now, the same algorithm as the CPU fallback (AE#1102).** With an
-  FFmpegBuild that carries `bwdif_videotoolbox`, `DeinterlaceMode.auto` builds it in place of
+- **The GPU deinterlacer is bwdif now, the same algorithm as the CPU fallback (AE#1102).** With
+  FFmpegBuild 3.17.0, which carries `bwdif_videotoolbox`, `DeinterlaceMode.auto` builds it in place of
   `yadif_videotoolbox`, so the GPU path and the CPU fallback use one algorithm. bwdif reconstructs
   fine detail and slow pans better (luma PSNR +0.8 to +1.2 dB on film material, about +5.7 dB on a smooth
   pan) for about 15% more GPU time per field. `yadif_videotoolbox` takes over when bwdif's graph does not
   build. `$sourceVideoStreamFormat`'s `deinterlace.filter` reads `bwdif_videotoolbox` on such sessions.
+- **GPU deinterlacing waits on the GPU once per frame instead of once per plane (AE#1101).** FFmpegBuild
+  3.17.0's `yadif_videotoolbox` submits both planes of an NV12 or P010 frame in one command buffer, with the
+  same output. A 1080p59.94 field went from 2.34 to 1.86 ms on an M1; most of it was the decode thread
+  waiting. `bwdif_videotoolbox` submits the same way.
 - **An audio-track switch on a software live session no longer reopens the source (AE#1100).** A session on
   the software path with a packet ring (`dvrWindowSeconds` or the live edge cushion) now stores every audio
   track of the source in it, and a pick switches in place: new decoder, feeder reseeded at the playhead. The
