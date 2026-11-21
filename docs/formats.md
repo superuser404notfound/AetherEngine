@@ -797,6 +797,8 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 - **Why `dialoguenhance`.** It beat a mid/side lift, measured on a mix of centred speech and wide music: at +6 dB the mid/side lift gained 2.0 dB against the wide music, `dialoguenhance` 5.1 to 7.2 dB. Neither separates speech from music mixed to the centre itself (0 to 1.2 dB); no stereo method can.
 - A mono source is left alone.
 
+**The decoder does not compress.** AC-3 and E-AC-3 reach this graph with their full dynamics. The engine opens FFmpeg's Dolby decoders with `drc_scale` 0, as Apple's decoder plays them on the native path. Night mode below is the one place dynamics get compressed. See [architecture-software.md › Audio on the software host](architecture-software.md#audio-on-the-software-host).
+
 **Night mode (`compressor`).** libavfilter's `acompressor`, peak detection, one gain for all channels so the image does not move. The `night` preset compresses everything above -30 dBFS 4:1 and adds 10 dB. Measured on a steady 1 kHz tone: 0 dBFS in comes out at -12.2 dBFS, -20 at -17.2, -40 at -30.0.
 
 **Plain gain.** A compressor with `ratio: 1` compresses nothing, so `AudioShaping(compressor: .init(thresholdDB: 0, ratio: 1, makeupGainDB: g))` is a plain gain of `g` dB (up to 24) into the limiter. This is a supported use. Measured on a steady 997 Hz tone: -20 dBFS at +6 dB comes out at -14.0 dBFS, 0 dBFS at +12 dB stays at the -1 dBFS ceiling. A fixed gain is the same for every film; the loudness target below adapts it per film.

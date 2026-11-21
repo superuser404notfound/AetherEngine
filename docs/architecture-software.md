@@ -438,10 +438,11 @@ One table, kept with the native side, shows how each audio route sits on this ho
 
 The channel layout and timestamp rules of the PCM decode are under [Audio channel layout and timestamps](#audio-channel-layout-and-timestamps).
 
-**AC-3 and E-AC-3 play with their full dynamics.** FFmpeg's Dolby decoders apply the stream's dynamic range compression unless told otherwise. Apple's decoder on the native path does not (unless the viewer turns on Reduce Loud Sounds). So every FFmpeg decoder whose output is heard opens through `AudioDecoderOptions` with `drc_scale` 0. That covers this host's `AudioDecoder`, the `AudioBridge` decode and the audio tap.
+**AC-3 and E-AC-3 play with their full dynamics.** FFmpeg's Dolby decoders apply the stream's dynamic range compression unless told otherwise. Apple's decoder on the native path does not (unless the viewer turns on Reduce Loud Sounds). So every FFmpeg decoder whose output is heard opens through `AudioDecoderOptions` with `drc_scale` 0. That covers `AudioDecoder` (this host, the audio-only host and the lazy tap use it), the `AudioBridge` decode and `AudioTapDecoder`. Apple's decoder ignores dialnorm just like FFmpeg's, measured on AC-3 encoded at dialnorm -31 and -20. Both decoders put out the same level for both.
 
 - Before, a session that moved here (for example for upscaling) played quieter than the same title on the native path. On an E-AC-3 5.1 film it was -18.6 LUFS against Apple's -16.8, with peaks 1.5 dB lower, and -16.6 LUFS once the compression was off.
 - A host that wants a compressed sound sets it with `AudioShaping`, the same on both paths.
+- E-AC-3 JOC on this host goes through Apple's converter (`SoftwareEAC3AtmosDecoder`) or stays compressed, so it was never affected.
 
 ## Audio tap
 
