@@ -705,6 +705,8 @@ So where the ledger has heard from a reader, it is the whole answer, both for a 
 
 So a reset also asks the ledger about the stretch from its window start (clamped at 0, like every reader's read start) to the first entry. Unread means the tick decodes nothing, leaves the cursor at the window start and waits there, under the same rules as any other wait. Without a ledger the reset decodes as before, since order has nothing to compare at a window boundary.
 
+One case is still open. A first entry that is already due (within the release lead of the playhead) decodes at once, so the landing line is never held back. If the ground in front of it is unread, a cue that starts there and is still on screen at the landing arrives behind the cursor and is not shown. That takes a short backward seek into a stretch the session never read. A cursor that steps back for packets stored behind it would close it.
+
 On a link near the media bitrate, two more rules make this work:
 
 - **No reach claim during a seek.** The pump's reach claim ("it rendered the playhead, so it read up to there") is not made while a seek is in flight. `sourceTime` still reports the frame the seek is leaving while the producer is already re-anchored behind it, so the claim would stretch the fresh run across exactly the skipped ground.

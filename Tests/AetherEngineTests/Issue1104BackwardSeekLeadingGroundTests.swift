@@ -38,7 +38,7 @@ struct Issue1104BackwardSeekLeadingGroundTests {
         let pts: [Double] = [27.5, 29.4, 35, 38, 43.4, 48.85, 52.95]
         let step = SubtitleOverlayDrainer.harvestGapStep(
             count: pts.count, ptsAt: { pts[$0] }, sequenceAt: { UInt64($0 + 1) },
-            held: nil, resumeFrom: (110, 40), isReset: true, windowFrom: -15,
+            held: nil, resumeFrom: (110, 40), resetFrom: -15,
             releaseAt: 0 + Self.release, isRead: check(ledgerAfterSeek()))
         #expect(step.decodeEnd == 0)
         #expect(step.hold == .init(at: 0, sequence: 0),
@@ -53,7 +53,7 @@ struct Issue1104BackwardSeekLeadingGroundTests {
         let pts: [Double] = [7.25, 11.8, 27.5, 29.4]
         let step = SubtitleOverlayDrainer.harvestGapStep(
             count: pts.count, ptsAt: { pts[$0] }, sequenceAt: { UInt64($0 + 50) },
-            held: .init(at: 0, sequence: 0), resumeFrom: (-15, 0), isReset: false,
+            held: .init(at: 0, sequence: 0), resumeFrom: (-15, 0), resetFrom: nil,
             releaseAt: 0.5 + Self.release, isRead: check(coverage))
         #expect(step.decodeEnd == 2, "7.25 and 11.8 decode, the stretch from 12 s to the island is still unread")
         #expect(step.hold?.at == 11.8)
@@ -67,7 +67,7 @@ struct Issue1104BackwardSeekLeadingGroundTests {
         let pts: [Double] = [7.25, 11.8, 18]
         let step = SubtitleOverlayDrainer.harvestGapStep(
             count: pts.count, ptsAt: { pts[$0] }, sequenceAt: { UInt64($0 + 1) },
-            held: nil, resumeFrom: nil, isReset: true, windowFrom: -15,
+            held: nil, resumeFrom: nil, resetFrom: -15,
             releaseAt: 0 + Self.release, isRead: check(coverage))
         #expect(step.decodeEnd == pts.count)
         #expect(step.hold == nil)
@@ -78,7 +78,7 @@ struct Issue1104BackwardSeekLeadingGroundTests {
         let pts: [Double] = [27.5, 29.4]
         let step = SubtitleOverlayDrainer.harvestGapStep(
             count: pts.count, ptsAt: { pts[$0] }, sequenceAt: { UInt64($0 + 1) },
-            held: nil, resumeFrom: nil, isReset: true, windowFrom: 12,
+            held: nil, resumeFrom: nil, resetFrom: 12,
             releaseAt: 27 + Self.release, isRead: check(ledgerAfterSeek()))
         #expect(step.decodeEnd == pts.count, "the landing line is never held")
     }
@@ -88,7 +88,7 @@ struct Issue1104BackwardSeekLeadingGroundTests {
         let pts: [Double] = [27.5, 29.4]
         let step = SubtitleOverlayDrainer.harvestGapStep(
             count: pts.count, ptsAt: { pts[$0] }, sequenceAt: { UInt64($0 + 1) },
-            held: nil, resumeFrom: nil, isReset: true, windowFrom: -15,
+            held: nil, resumeFrom: nil, resetFrom: -15,
             releaseAt: 0 + Self.release, isRead: nil)
         #expect(step.decodeEnd == pts.count, "harvest order has no pair to compare at a window boundary")
     }

@@ -46,7 +46,7 @@ struct Issue1021LedgerReadPairTests {
         let step = SubtitleOverlayDrainer.harvestGapStep(
             count: window.count, ptsAt: { window[$0].ptsSeconds },
             sequenceAt: { window[$0].sequence },
-            held: nil, resumeFrom: (cursor.ptsSeconds, cursor.sequence), isReset: false,
+            held: nil, resumeFrom: (cursor.ptsSeconds, cursor.sequence), resetFrom: nil,
             releaseAt: 0.73 + AetherEngine.subtitleDrainHarvestGapReleaseLeadSeconds,
             isRead: store.harvestReadCheck())
         #expect(step.decodeEnd == window.count)
@@ -61,7 +61,7 @@ struct Issue1021LedgerReadPairTests {
         let step = SubtitleOverlayDrainer.harvestGapStep(
             count: window.count, ptsAt: { window[$0].ptsSeconds },
             sequenceAt: { window[$0].sequence },
-            held: held, resumeFrom: (7.0, 18), isReset: false,
+            held: held, resumeFrom: (7.0, 18), resetFrom: nil,
             releaseAt: 0.73 + AetherEngine.subtitleDrainHarvestGapReleaseLeadSeconds,
             isRead: store.harvestReadCheck())
         #expect(step.decodeEnd == window.count)
