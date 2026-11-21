@@ -971,6 +971,8 @@ The object presentation is decoded without matrix interpolation. LibTrueHD 3.2.0
 
 So each output takes from the bed exactly the part of it that belongs to the elements the layout places there. No element is reconstructed from the bed or mixed into an output.
 
+**Cost.** Each hop runs through Accelerate. Per band, the statistics are one matrix product of the spectra with the conjugated bed, and the weights are interpolated across the bins with `vDSP_vlint`. On an M1, 16 elements into 9.1.6 take about 53 ms of CPU per second of audio, and about 90 ms in a host's Debug build, which compiles the package without optimisation. With the earlier per-bin Swift loops a Debug build took 5.8 s per second of audio and stalled playback (AE#1106). Numbers: [measurements.md › Bed regression in a Debug build](measurements.md#bed-regression-in-a-debug-build-ae1106).
+
 **Energy bound.** Per band the output carries 0.9 to 1.6 times the bed's energy (a constant-power layout over Dolby's 7.1, whose objects measure 0.7 to 1.0 in power, lands inside). An element the decode got wrong can misplace energy but not add or remove it, and the output cannot click. The LFE is the bed's own.
 
 **Accuracy.** Compared against the exact decode and mix of earlier releases, on 30 windows of ten films plus Dolby's Unfold demo:

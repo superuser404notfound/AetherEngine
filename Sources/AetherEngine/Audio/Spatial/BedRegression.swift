@@ -66,8 +66,6 @@ final class BedRegression {
     /// Empty without folds.
     private let foldGains: [Float]
     private let bounds: ClosedRange<Double>
-    private let bandOfBin: [Int]
-    private let bandCenters: [Float]
     private let bands: Int
     private let scale: Float
 
@@ -93,22 +91,47 @@ final class BedRegression {
     private var gainRingNewest = 0
     private var gainRingCount = 0
 
-    /// Per band: bed covariance (nb × nb) and element-bed cross-spectra (elementCount × nb).
-    private var covRe: [Double], covIm: [Double]
-    private var crossRe: [Double] = [], crossIm: [Double] = []
+    /// Per band one `rows` × nb block, `rows` = nb + elementCount: the bed covariance (b_i · conj(b_j))
+    /// in the first nb rows, then each element's cross-spectrum with the bed.
+    private var stat: SplitBuffer<Double>
 
     // MARK: Scratch
+    //
+    // The hop runs through Accelerate end to end: a host's Debug build compiles this package
+    // without optimisation, and the per-bin loops this replaced ran at 0.2x real time there (AE#1106).
 
     private let window: [Float]
     private let forward: vDSP_DFT_Setup
     private let inverse: vDSP_DFT_Setup
     private var frameBuf: [Float]
     private var evenBuf: [Float], oddBuf: [Float], specRe: [Float], specIm: [Float]
-    private var bedRe: [Float], bedIm: [Float]
+    /// Spectra, `rows` × bins: the regressed bed planes, then the elements (zero while unplaced).
+    private var spectra: SplitBuffer<Float>
     private var lfeRe: [Float], lfeIm: [Float]
-    private var elemRe: [Float] = [], elemIm: [Float] = []
     private var active: [Bool] = []
-    private var weightRe: [Float], weightIm: [Float]
+    /// The spectra in double, then regrouped per band (`rows` × that band's bins, band after band),
+    /// and the bed conjugated, bin-major (bins × nb), so each band's statistics are one matrix product.
+    private var spectraD: SplitBuffer<Double>
+    private var banded: SplitBuffer<Double>
+    private let bedConj: SplitBuffer<Double>
+    private var bandedIndex: UnsafeMutablePointer<Double>
+    private let bedConjIndex: UnsafeMutablePointer<Double>
+    private var product: SplitBuffer<Double>
+    private let bandEdges: [Int]
+    /// Per bin, its place between band centres as `vDSP_vlint` reads it: lower band + fraction.
+    private let bandPosition: [Float]
+    /// Weights per (output, bed plane) row, `bands + 1` entries (the last repeats the top band, so
+    /// the interpolation can always read one past).
+    private let weights: SplitBuffer<Float>
+    private let interpolated: SplitBuffer<Float>
+    /// Layout gains of the placed elements (outputs × elementCount, LFE row zero), plus folds.
+    private var elementGains: UnsafeMutablePointer<Double>
+    /// `fallback` in double with the LFE row zero: the D of the fold mode.
+    private let bedFallback: UnsafeMutablePointer<Double>
+    private let cholesky: SplitBuffer<Double>, inverseL: SplitBuffer<Double>, inverseLH: SplitBuffer<Double>
+    private let inverseM: SplitBuffer<Double>
+    private var regression: SplitBuffer<Double>
+    private let mix: SplitBuffer<Double>, mixCov: SplitBuffer<Double>
     private var outRe: [Float], outIm: [Float]
     private var timeBuf: [Float]
 
@@ -158,14 +181,23 @@ final class BedRegression {
         }
         if edges.last! < bins { edges.append(bins) }
         bands = edges.count - 1
-        var bandOfBin = [Int](repeating: 0, count: bins)
+        bandEdges = edges
         var centers = [Float](repeating: 0, count: bands)
-        for b in 0..<bands {
-            for k in edges[b]..<edges[b + 1] { bandOfBin[k] = b }
-            centers[b] = Float(edges[b] + edges[b + 1] - 1) / 2
+        for b in 0..<bands { centers[b] = Float(edges[b] + edges[b + 1] - 1) / 2 }
+        // W between band centres, linear: below the first and above the last centre a band's own.
+        var position = [Float](repeating: 0, count: bins)
+        var lower = 0
+        for k in 0..<bins {
+            let fk = Float(k)
+            while lower + 1 < bands, centers[lower + 1] <= fk { lower += 1 }
+            let upper = min(lower + 1, bands - 1)
+            var t: Float = 0
+            if upper != lower, fk > centers[lower] {
+                t = min(1, (fk - centers[lower]) / (centers[upper] - centers[lower]))
+            }
+            position[k] = Float(lower) + t
         }
-        self.bandOfBin = bandOfBin
-        bandCenters = centers
+        bandPosition = position
 
         // Periodic Hann, square-rooted for analysis and synthesis: four frames per sample sum to 2.
         // vDSP's packed real DFT scales a forward and inverse round trip by 2n.
@@ -175,7 +207,7 @@ final class BedRegression {
         forward = vDSP_DFT_zrop_CreateSetup(nil, vDSP_Length(size), .FORWARD)!
         inverse = vDSP_DFT_zrop_CreateSetup(forward, vDSP_Length(size), .INVERSE)!
 
-        let nb = bedInputs.count
+        let nb = bedInputs.count, outputs = layout.channelCount
         bedHistory = [Float](repeating: 0, count: bedRoles.count * n)
         bedHop = [Float](repeating: 0, count: bedRoles.count * h)
         accumulators = [Float](repeating: 0, count: outputs * n)
@@ -183,17 +215,42 @@ final class BedRegression {
         frameBuf = [Float](repeating: 0, count: n)
         evenBuf = [Float](repeating: 0, count: n / 2)
         oddBuf = evenBuf; specRe = evenBuf; specIm = evenBuf
-        bedRe = [Float](repeating: 0, count: nb * bins); bedIm = bedRe
         lfeRe = [Float](repeating: 0, count: bins); lfeIm = lfeRe
-        covRe = [Double](repeating: 0, count: bands * nb * nb); covIm = covRe
-        weightRe = [Float](repeating: 0, count: bands * outputs * nb); weightIm = weightRe
+        stat = SplitBuffer(bands * nb * nb)
+        spectra = SplitBuffer(nb * bins)
+        spectraD = SplitBuffer(nb * bins)
+        banded = SplitBuffer(nb * bins)
+        bedConj = SplitBuffer(bins * nb)
+        bandedIndex = .allocate(capacity: 1)
+        bedConjIndex = .allocate(capacity: max(1, bins * nb))
+        for k in 0..<bins { for j in 0..<nb { bedConjIndex[k * nb + j] = Double(j * bins + k) } }
+        product = SplitBuffer(bands * nb * nb)
+        weights = SplitBuffer(outputs * nb * (bands + 1))
+        interpolated = SplitBuffer(bins)
+        elementGains = .allocate(capacity: 1)
+        bedFallback = .allocate(capacity: max(1, outputs * nb))
+        for o in 0..<outputs {
+            for j in 0..<nb { bedFallback[o * nb + j] = o == lfeOutput ? 0 : Double(fallback[o * nb + j]) }
+        }
+        cholesky = SplitBuffer(nb * nb); inverseL = SplitBuffer(nb * nb); inverseLH = SplitBuffer(nb * nb)
+        inverseM = SplitBuffer(nb * nb)
+        regression = SplitBuffer(0)
+        mix = SplitBuffer(outputs * nb); mixCov = SplitBuffer(outputs * nb)
         outRe = [Float](repeating: 0, count: outputs * bins); outIm = outRe
         timeBuf = [Float](repeating: 0, count: n)
+        rebuildBandedIndex()
     }
 
     deinit {
         vDSP_DFT_DestroySetup(forward)
         vDSP_DFT_DestroySetup(inverse)
+        bandedIndex.deallocate()
+        bedConjIndex.deallocate()
+        elementGains.deallocate()
+        bedFallback.deallocate()
+        for buffer in [stat, spectraD, banded, bedConj, product, cholesky, inverseL, inverseLH, inverseM,
+                       regression, mix, mixCov] { buffer.deallocate() }
+        for buffer in [spectra, weights, interpolated] { buffer.deallocate() }
     }
 
     /// Frames taken in that have not come out yet.
@@ -204,8 +261,7 @@ final class BedRegression {
         for i in bedHistory.indices { bedHistory[i] = 0 }
         for i in accumulators.indices { accumulators[i] = 0 }
         for i in ready.indices { ready[i] = 0 }
-        for i in covRe.indices { covRe[i] = 0; covIm[i] = 0 }
-        for i in crossRe.indices { crossRe[i] = 0; crossIm[i] = 0 }
+        stat.clear()
         gainRingCount = 0
         hasSnapshot = false
         filled = 0
@@ -285,14 +341,40 @@ final class BedRegression {
     }
 
     private func resizeElements(_ count: Int) {
+        let nb = bedInputs.count, oldRows = nb + elementCount, rows = nb + count
         elementCount = count
         elementHistory = [Float](repeating: 0, count: count * n)
         elementHop = [Float](repeating: 0, count: count * h)
-        elemRe = [Float](repeating: 0, count: count * bins); elemIm = elemRe
         active = [Bool](repeating: false, count: count)
-        crossRe = [Double](repeating: 0, count: bands * count * bedInputs.count); crossIm = crossRe
         for i in gainRing.indices { gainRing[i] = [Float](repeating: 0, count: count * outputs) }
         gainRingCount = 0
+        // The bed covariance carries over, the cross-spectra start from zero.
+        let resized = SplitBuffer<Double>(bands * rows * nb)
+        for b in 0..<bands {
+            resized.copy(from: stat, at: b * oldRows * nb, to: b * rows * nb, count: nb * nb)
+        }
+        stat.deallocate(); stat = resized
+        for buffer in [spectraD, banded, product, regression] { buffer.deallocate() }
+        spectra.deallocate(); spectra = SplitBuffer(rows * bins)
+        spectraD = SplitBuffer(rows * bins)
+        banded = SplitBuffer(rows * bins)
+        product = SplitBuffer(bands * rows * nb)
+        regression = SplitBuffer(count * nb)
+        elementGains.deallocate(); elementGains = .allocate(capacity: max(1, outputs * count))
+        rebuildBandedIndex()
+    }
+
+    /// Where each entry of the per-band regrouping comes from in the spectra.
+    private func rebuildBandedIndex() {
+        let rows = bedInputs.count + elementCount
+        bandedIndex.deallocate()
+        bandedIndex = .allocate(capacity: max(1, rows * bins))
+        for b in 0..<bands {
+            let e0 = bandEdges[b], m = bandEdges[b + 1] - e0
+            for r in 0..<rows {
+                for k in 0..<m { bandedIndex[rows * e0 + r * m + k] = Double(r * bins + e0 + k) }
+            }
+        }
     }
 
     // MARK: - Hop
@@ -366,14 +448,10 @@ final class BedRegression {
     }
 
     private func transformInputs() {
-        let bins = self.bins
+        let bins = self.bins, nb = bedInputs.count
         bedHistory.withUnsafeBufferPointer { hist in
-            bedRe.withUnsafeMutableBufferPointer { re in
-                bedIm.withUnsafeMutableBufferPointer { im in
-                    for (j, plane) in bedInputs.enumerated() {
-                        spectrum(hist.baseAddress! + plane * n, re: re.baseAddress! + j * bins, im: im.baseAddress! + j * bins)
-                    }
-                }
+            for (j, plane) in bedInputs.enumerated() {
+                spectrum(hist.baseAddress! + plane * n, re: spectra.re + j * bins, im: spectra.im + j * bins)
             }
             if let bedLFE {
                 lfeRe.withUnsafeMutableBufferPointer { re in
@@ -385,217 +463,213 @@ final class BedRegression {
         }
         let ring = gainRingCount > 0 ? gainRing[(gainRingNewest + 3 - (gainRingCount - 1)) % 3] : nil
         elementHistory.withUnsafeBufferPointer { hist in
-            elemRe.withUnsafeMutableBufferPointer { re in
-                elemIm.withUnsafeMutableBufferPointer { im in
-                    for k in 0..<elementCount {
-                        var placed = false
-                        if let ring { for c in 0..<outputs where ring[k * outputs + c] != 0 { placed = true; break } }
-                        active[k] = placed
-                        guard placed else { continue }
-                        spectrum(hist.baseAddress! + k * n, re: re.baseAddress! + k * bins, im: im.baseAddress! + k * bins)
-                    }
+            for k in 0..<elementCount {
+                var placed = false
+                if let ring { for c in 0..<outputs where ring[k * outputs + c] != 0 { placed = true; break } }
+                active[k] = placed
+                let row = (nb + k) * bins
+                // An unplaced element adds nothing to its cross-spectra, which then only decay.
+                guard placed else {
+                    vDSP_vclr(spectra.re + row, 1, vDSP_Length(bins))
+                    vDSP_vclr(spectra.im + row, 1, vDSP_Length(bins))
+                    continue
                 }
+                spectrum(hist.baseAddress! + k * n, re: spectra.re + row, im: spectra.im + row)
             }
         }
     }
 
-    /// Recursive band statistics: covariance of the bed, cross-spectra of every placed element with it.
+    /// Recursive band statistics: covariance of the bed, cross-spectra of every placed element with
+    /// it. Per band that is one matrix product, (bed and elements) times the conjugated bed.
     private func accumulateStatistics() {
-        let nb = bedInputs.count, K = elementCount, bins = self.bins
-        let a = Self.smoothing, w = 1 - a
-        for i in covRe.indices { covRe[i] *= a; covIm[i] *= a }
-        for i in crossRe.indices { crossRe[i] *= a; crossIm[i] *= a }
-        bedRe.withUnsafeBufferPointer { br in
-        bedIm.withUnsafeBufferPointer { bi in
-        elemRe.withUnsafeBufferPointer { er in
-        elemIm.withUnsafeBufferPointer { ei in
-        covRe.withUnsafeMutableBufferPointer { cr in
-        covIm.withUnsafeMutableBufferPointer { ci in
-        crossRe.withUnsafeMutableBufferPointer { xr in
-        crossIm.withUnsafeMutableBufferPointer { xi in
-            for k in 0..<bins {
-                let band = bandOfBin[k]
-                let cBase = band * nb * nb
-                for i in 0..<nb {
-                    let ar = Double(br[i * bins + k]), ai = Double(bi[i * bins + k])
-                    for j in i..<nb {
-                        let cr2 = Double(br[j * bins + k]), ci2 = Double(bi[j * bins + k])
-                        // b_i · conj(b_j)
-                        cr[cBase + i * nb + j] += w * (ar * cr2 + ai * ci2)
-                        ci[cBase + i * nb + j] += w * (ai * cr2 - ar * ci2)
-                    }
-                }
-                let xBase = band * K * nb
-                for e in 0..<K where active[e] {
-                    let sr = Double(er[e * bins + k]), si = Double(ei[e * bins + k])
-                    for j in 0..<nb {
-                        let cr2 = Double(br[j * bins + k]), ci2 = Double(bi[j * bins + k])
-                        xr[xBase + e * nb + j] += w * (sr * cr2 + si * ci2)
-                        xi[xBase + e * nb + j] += w * (si * cr2 - sr * ci2)
-                    }
-                }
-            }
-        }}}}}}}}
+        let nb = bedInputs.count, rows = nb + elementCount, bins = self.bins
+        guard nb > 0 else { return }
+        let total = vDSP_Length(rows * bins)
+        vDSP_vspdp(spectra.re, 1, spectraD.re, 1, total)
+        vDSP_vspdp(spectra.im, 1, spectraD.im, 1, total)
+        vDSP_vindexD(spectraD.re, bandedIndex, 1, banded.re, 1, total)
+        vDSP_vindexD(spectraD.im, bandedIndex, 1, banded.im, 1, total)
+        let bedCount = vDSP_Length(bins * nb)
+        var w = 1 - Self.smoothing, minusW = -w
+        vDSP_vindexD(spectraD.re, bedConjIndex, 1, bedConj.re, 1, bedCount)
+        vDSP_vindexD(spectraD.im, bedConjIndex, 1, bedConj.im, 1, bedCount)
+        vDSP_vsmulD(bedConj.re, 1, &w, bedConj.re, 1, bedCount)
+        vDSP_vsmulD(bedConj.im, 1, &minusW, bedConj.im, 1, bedCount)
+        var b = 0
+        while b < bands {
+            let e0 = bandEdges[b], m = bandEdges[b + 1] - e0
+            var a = banded.split(at: rows * e0)
+            var c = bedConj.split(at: e0 * nb)
+            var p = product.split(at: b * rows * nb)
+            vDSP_zmmulD(&a, 1, &c, 1, &p, 1, vDSP_Length(rows), vDSP_Length(nb), vDSP_Length(m))
+            b += 1
+        }
+        var smoothing = Self.smoothing
+        let count = vDSP_Length(bands * rows * nb)
+        vDSP_vsmaD(stat.re, 1, &smoothing, product.re, 1, stat.re, 1, count)
+        vDSP_vsmaD(stat.im, 1, &smoothing, product.im, 1, stat.im, 1, count)
     }
 
-    /// Per band: A = cross · (cov + reg)⁻¹ by Cholesky, W = R · A, then the energy bound.
+    /// Per band: A = cross · (cov + reg)⁻¹ through a Cholesky factor, W = R · A, then the energy bound.
     private func solveWeights(gains: [Float]?) {
-        let nb = bedInputs.count, K = elementCount, O = outputs
-        for i in weightRe.indices { weightRe[i] = 0; weightIm[i] = 0 }
+        let nb = bedInputs.count, K = elementCount, O = outputs, rows = nb + K, stride = bands + 1
+        weights.clear()
         guard nb > 0 else { return }
         guard let gains, active.contains(true) else {
-            for band in 0..<bands {
-                for i in 0..<(O * nb) { weightRe[band * O * nb + i] = fallback[i] }
+            for r in 0..<(O * nb) {
+                var value = fallback[r]
+                vDSP_vfill(&value, weights.re + r * stride, 1, vDSP_Length(stride))
             }
             return
         }
-        var mr = [Double](repeating: 0, count: nb * nb), mi = mr   // Hermitian matrix, then its Cholesky factor L
-        var yr = [Double](repeating: 0, count: nb), yi = yr
-        var ar = [Double](repeating: 0, count: K * nb), ai = ar
-        var wr = [Double](repeating: 0, count: O * nb), wi = wr
-        for band in 0..<bands {
-            let cBase = band * nb * nb
+        let folded = !foldGains.isEmpty
+        for o in 0..<O {
+            for e in 0..<K {
+                var g = 0.0
+                if o != lfeOutput, active[e] {
+                    g = Double(gains[e * O + o])
+                    if folded, e * O + o < foldGains.count { g += Double(foldGains[e * O + o]) }
+                }
+                elementGains[o * K + e] = g
+            }
+        }
+        let L = cholesky, Z = inverseL, ZH = inverseLH
+        var b = 0
+        while b < bands {
+            defer { b += 1 }
+            let base = b * rows * nb
+            let cr = stat.re + base, ci = stat.im + base
             var trace = 0.0
-            for i in 0..<nb { trace += covRe[cBase + i * nb + i] }
+            var i = 0
+            while i < nb { trace += cr[i * nb + i]; i += 1 }
             guard trace > 1e-12 else { continue }
             let reg = Self.regularization * trace / Double(nb) + 1e-15
-            for i in 0..<nb {
-                for j in 0..<nb {
-                    if j >= i { mr[i * nb + j] = covRe[cBase + i * nb + j]; mi[i * nb + j] = covIm[cBase + i * nb + j] }
-                    else { mr[i * nb + j] = covRe[cBase + j * nb + i]; mi[i * nb + j] = -covIm[cBase + j * nb + i] }
-                }
-                mr[i * nb + i] += reg
-            }
-            // Cholesky M = L Lᴴ, L lower, stored in place.
-            var ok = true
-            for j in 0..<nb {
-                var d = mr[j * nb + j]
-                for k in 0..<j { d -= mr[j * nb + k] * mr[j * nb + k] + mi[j * nb + k] * mi[j * nb + k] }
-                guard d > 0 else { ok = false; break }
-                let l = d.squareRoot()
-                mr[j * nb + j] = l; mi[j * nb + j] = 0
-                for i in (j + 1)..<max(j + 1, nb) {
-                    // L[i][j] = (M[i][j] − Σ L[i][k] conj(L[j][k])) / L[j][j]
-                    var sr = mr[i * nb + j], si = mi[i * nb + j]
-                    for k in 0..<j {
-                        let pr = mr[i * nb + k], pi = mi[i * nb + k], qr = mr[j * nb + k], qi = mi[j * nb + k]
-                        sr -= pr * qr + pi * qi
-                        si -= pi * qr - pr * qi
-                    }
-                    mr[i * nb + j] = sr / l; mi[i * nb + j] = si / l
-                }
-            }
-            guard ok else { continue }
-            // Row a of A solves a · M = x, i.e. M aᴴ = xᴴ (M Hermitian).
-            let xBase = band * K * nb
-            for e in 0..<K {
-                guard active[e] else { for j in 0..<nb { ar[e * nb + j] = 0; ai[e * nb + j] = 0 }; continue }
-                // forward: L y = xᴴ
-                for i in 0..<nb {
-                    var sr = crossRe[xBase + e * nb + i], si = -crossIm[xBase + e * nb + i]
-                    for k in 0..<i {
-                        let lr = mr[i * nb + k], li = mi[i * nb + k]
-                        sr -= lr * yr[k] - li * yi[k]
-                        si -= lr * yi[k] + li * yr[k]
-                    }
-                    let l = mr[i * nb + i]
-                    yr[i] = sr / l; yi[i] = si / l
-                }
-                // back: Lᴴ z = y, then a = zᴴ
-                for i in stride(from: nb - 1, through: 0, by: -1) {
-                    var sr = yr[i], si = yi[i]
-                    for k in (i + 1)..<max(i + 1, nb) {
-                        // Lᴴ[i][k] = conj(L[k][i])
-                        let lr = mr[k * nb + i], li = -mi[k * nb + i]
-                        let zr = ar[e * nb + k], zi = -ai[e * nb + k]
-                        sr -= lr * zr - li * zi
-                        si -= lr * zi + li * zr
-                    }
-                    let l = mr[i * nb + i]
-                    ar[e * nb + i] = sr / l; ai[e * nb + i] = -(si / l)
-                }
-            }
-            // W = R · A, or with folds D + (R − D · F) · A
-            let folded = !foldGains.isEmpty
-            for o in 0..<O {
-                for j in 0..<nb {
-                    wr[o * nb + j] = folded ? Double(fallback[o * nb + j]) : 0
-                    wi[o * nb + j] = 0
-                }
-                guard o != lfeOutput else { continue }
-                for e in 0..<K where active[e] {
-                    var g = Double(gains[e * O + o])
-                    if folded, e * O + o < foldGains.count { g += Double(foldGains[e * O + o]) }
-                    guard g != 0 else { continue }
-                    for j in 0..<nb { wr[o * nb + j] += g * ar[e * nb + j]; wi[o * nb + j] += g * ai[e * nb + j] }
-                }
-            }
-            // Energy bound: trace(W C Wᴴ) against trace(C).
-            var eo = 0.0
-            for o in 0..<O where o != lfeOutput {
-                for i in 0..<nb {
-                    // (W C)[o][i] = Σ_j W[o][j] C[j][i]
-                    var tr = 0.0, ti = 0.0
-                    for j in 0..<nb {
-                        let cr = j <= i ? covRe[cBase + j * nb + i] : covRe[cBase + i * nb + j]
-                        let ci = j <= i ? covIm[cBase + j * nb + i] : -covIm[cBase + i * nb + j]
-                        tr += wr[o * nb + j] * cr - wi[o * nb + j] * ci
-                        ti += wr[o * nb + j] * ci + wi[o * nb + j] * cr
-                    }
-                    // · conj(W[o][i])
-                    eo += tr * wr[o * nb + i] + ti * wi[o * nb + i]
-                }
-            }
+            guard factor(cr, ci, reg: reg, into: L, nb: nb) else { continue }
+            invertLower(L, into: Z, adjoint: ZH, nb: nb)
+            // M⁻¹ = L⁻ᴴ L⁻¹, and each element's row a = x · M⁻¹.
+            var zh = ZH.split(at: 0), z = Z.split(at: 0), mInv = inverseM.split(at: 0)
+            vDSP_zmmulD(&zh, 1, &z, 1, &mInv, 1, vDSP_Length(nb), vDSP_Length(nb), vDSP_Length(nb))
+            var cross = stat.split(at: base + nb * nb), a = regression.split(at: 0)
+            vDSP_zmmulD(&cross, 1, &mInv, 1, &a, 1, vDSP_Length(K), vDSP_Length(nb), vDSP_Length(nb))
+            // W = R · A (real gains), or with folds D + (R − D · F) · A
+            vDSP_mmulD(elementGains, 1, regression.re, 1, mix.re, 1, vDSP_Length(O), vDSP_Length(nb), vDSP_Length(K))
+            vDSP_mmulD(elementGains, 1, regression.im, 1, mix.im, 1, vDSP_Length(O), vDSP_Length(nb), vDSP_Length(K))
+            if folded { vDSP_vaddD(mix.re, 1, bedFallback, 1, mix.re, 1, vDSP_Length(O * nb)) }
+            // Energy bound: trace(W C Wᴴ) against trace(C), the LFE row being zero.
+            var w = mix.split(at: 0), cov = stat.split(at: base), wc = mixCov.split(at: 0)
+            vDSP_zmmulD(&w, 1, &cov, 1, &wc, 1, vDSP_Length(O), vDSP_Length(nb), vDSP_Length(nb))
+            var eoRe = 0.0, eoIm = 0.0
+            vDSP_dotprD(mixCov.re, 1, mix.re, 1, &eoRe, vDSP_Length(O * nb))
+            vDSP_dotprD(mixCov.im, 1, mix.im, 1, &eoIm, vDSP_Length(O * nb))
+            let eo = eoRe + eoIm
             var g = 1.0
             if eo > 1e-15 {
                 let r = eo / trace
                 if r > bounds.upperBound { g = (bounds.upperBound / r).squareRoot() }
                 else if r < bounds.lowerBound { g = (bounds.lowerBound / r).squareRoot() }
             }
-            let wBase = band * O * nb
-            for i in 0..<(O * nb) { weightRe[wBase + i] = Float(wr[i] * g); weightIm[wBase + i] = Float(wi[i] * g) }
+            vDSP_vsmulD(mix.re, 1, &g, mix.re, 1, vDSP_Length(O * nb))
+            vDSP_vsmulD(mix.im, 1, &g, mix.im, 1, vDSP_Length(O * nb))
+            vDSP_vdpsp(mix.re, 1, weights.re + b, stride, vDSP_Length(O * nb))
+            vDSP_vdpsp(mix.im, 1, weights.im + b, stride, vDSP_Length(O * nb))
+        }
+        var one: Float = 1
+        vDSP_vsmul(weights.re + bands - 1, stride, &one, weights.re + bands, stride, vDSP_Length(O * nb))
+        vDSP_vsmul(weights.im + bands - 1, stride, &one, weights.im + bands, stride, vDSP_Length(O * nb))
+    }
+
+    /// Cholesky factor L (lower) of the band's covariance plus `reg` on the diagonal: M = L Lᴴ.
+    private func factor(_ cr: UnsafePointer<Double>, _ ci: UnsafePointer<Double>, reg: Double,
+                        into L: SplitBuffer<Double>, nb: Int) -> Bool {
+        let lr = L.re, li = L.im
+        var j = 0
+        while j < nb {
+            var d = cr[j * nb + j] + reg
+            var k = 0
+            while k < j { d -= lr[j * nb + k] * lr[j * nb + k] + li[j * nb + k] * li[j * nb + k]; k += 1 }
+            guard d > 0 else { return false }
+            let l = d.squareRoot()
+            lr[j * nb + j] = l; li[j * nb + j] = 0
+            var i = j + 1
+            while i < nb {
+                // L[i][j] = (M[i][j] − Σ L[i][k] conj(L[j][k])) / L[j][j]
+                var sr = cr[i * nb + j], si = ci[i * nb + j]
+                k = 0
+                while k < j {
+                    let pr = lr[i * nb + k], pi = li[i * nb + k], qr = lr[j * nb + k], qi = li[j * nb + k]
+                    sr -= pr * qr + pi * qi
+                    si -= pi * qr - pr * qi
+                    k += 1
+                }
+                lr[i * nb + j] = sr / l; li[i * nb + j] = si / l
+                i += 1
+            }
+            j += 1
+        }
+        return true
+    }
+
+    /// Z = L⁻¹ (lower) by forward substitution, and Zᴴ beside it.
+    private func invertLower(_ L: SplitBuffer<Double>, into Z: SplitBuffer<Double>, adjoint ZH: SplitBuffer<Double>, nb: Int) {
+        let lr = L.re, li = L.im, zr = Z.re, zi = Z.im
+        Z.clear()
+        var c = 0
+        while c < nb {
+            zr[c * nb + c] = 1 / lr[c * nb + c]
+            var i = c + 1
+            while i < nb {
+                var sr = 0.0, si = 0.0
+                var k = c
+                while k < i {
+                    let ar = lr[i * nb + k], ai = li[i * nb + k], br = zr[k * nb + c], bi = zi[k * nb + c]
+                    sr -= ar * br - ai * bi
+                    si -= ar * bi + ai * br
+                    k += 1
+                }
+                let d = lr[i * nb + i]
+                zr[i * nb + c] = sr / d; zi[i * nb + c] = si / d
+                i += 1
+            }
+            c += 1
+        }
+        var r = 0
+        while r < nb {
+            var col = 0
+            while col < nb {
+                ZH.re[r * nb + col] = zr[col * nb + r]
+                ZH.im[r * nb + col] = -zi[col * nb + r]
+                col += 1
+            }
+            r += 1
         }
     }
 
     /// Output spectra: W interpolated linearly between band centres, times the bed; the LFE is the bed's.
     private func applyWeights() {
-        let nb = bedInputs.count, O = outputs, bins = self.bins
-        for i in outRe.indices { outRe[i] = 0; outIm[i] = 0 }
-        weightRe.withUnsafeBufferPointer { wr in
-        weightIm.withUnsafeBufferPointer { wi in
-        bedRe.withUnsafeBufferPointer { br in
-        bedIm.withUnsafeBufferPointer { bi in
+        let nb = bedInputs.count, O = outputs, bins = self.bins, stride = bands + 1
+        let count = vDSP_Length(bins)
         outRe.withUnsafeMutableBufferPointer { orr in
         outIm.withUnsafeMutableBufferPointer { oi in
-            var lower = 0
-            for k in 0..<bins {
-                let fk = Float(k)
-                while lower + 1 < bands, bandCenters[lower + 1] <= fk { lower += 1 }
-                let upper = min(lower + 1, bands - 1)
-                var t: Float = 0
-                if upper != lower, fk > bandCenters[lower] {
-                    t = min(1, (fk - bandCenters[lower]) / (bandCenters[upper] - bandCenters[lower]))
-                }
-                let l0 = lower * O * nb, u0 = upper * O * nb
+            vDSP_vclr(orr.baseAddress!, 1, vDSP_Length(O * bins))
+            vDSP_vclr(oi.baseAddress!, 1, vDSP_Length(O * bins))
+            bandPosition.withUnsafeBufferPointer { position in
+                var w = interpolated.split(at: 0)
                 for o in 0..<O where o != lfeOutput {
-                    var sr: Float = 0, si: Float = 0
+                    var out = DSPSplitComplex(realp: orr.baseAddress! + o * bins, imagp: oi.baseAddress! + o * bins)
                     for j in 0..<nb {
-                        let w1r = wr[l0 + o * nb + j], w1i = wi[l0 + o * nb + j]
-                        let cr = w1r + (wr[u0 + o * nb + j] - w1r) * t
-                        let ci = w1i + (wi[u0 + o * nb + j] - w1i) * t
-                        let xr = br[j * bins + k], xi = bi[j * bins + k]
-                        sr += cr * xr - ci * xi
-                        si += cr * xi + ci * xr
+                        let row = (o * nb + j) * stride
+                        vDSP_vlint(weights.re + row, position.baseAddress!, 1, interpolated.re, 1, count, vDSP_Length(stride))
+                        vDSP_vlint(weights.im + row, position.baseAddress!, 1, interpolated.im, 1, count, vDSP_Length(stride))
+                        var x = spectra.split(at: j * bins)
+                        vDSP_zvma(&w, 1, &x, 1, &out, 1, &out, 1, count)
                     }
-                    orr[o * bins + k] = sr
-                    oi[o * bins + k] = si
                 }
             }
-        }}}}}}
-        if bedLFE != nil {
-            outRe.withUnsafeMutableBufferPointer { o in (o.baseAddress! + lfeOutput * bins).update(from: lfeRe, count: bins) }
-            outIm.withUnsafeMutableBufferPointer { o in (o.baseAddress! + lfeOutput * bins).update(from: lfeIm, count: bins) }
-        }
+            if bedLFE != nil {
+                (orr.baseAddress! + lfeOutput * bins).update(from: lfeRe, count: bins)
+                (oi.baseAddress! + lfeOutput * bins).update(from: lfeIm, count: bins)
+            }
+        }}
     }
 
     /// Inverse transforms, synthesis window, overlap-add; the completed hop moves to `ready`.
@@ -635,5 +709,39 @@ final class BedRegression {
             }
         }
     }
+}
+
+/// A split-complex buffer that lives as long as the regression: raw memory, so the hop's
+/// Accelerate calls take it without an `Array` access in between.
+final class SplitBuffer<T: FloatingPoint> {
+    let re: UnsafeMutablePointer<T>
+    let im: UnsafeMutablePointer<T>
+    let count: Int
+
+    init(_ count: Int) {
+        self.count = count
+        re = .allocate(capacity: max(1, count)); re.initialize(repeating: 0, count: max(1, count))
+        im = .allocate(capacity: max(1, count)); im.initialize(repeating: 0, count: max(1, count))
+    }
+
+    func deallocate() { re.deallocate(); im.deallocate() }
+
+    func clear() {
+        re.update(repeating: 0, count: max(1, count))
+        im.update(repeating: 0, count: max(1, count))
+    }
+
+    func copy(from other: SplitBuffer<T>, at source: Int, to destination: Int, count: Int) {
+        (re + destination).update(from: other.re + source, count: count)
+        (im + destination).update(from: other.im + source, count: count)
+    }
+}
+
+extension SplitBuffer where T == Float {
+    func split(at offset: Int) -> DSPSplitComplex { DSPSplitComplex(realp: re + offset, imagp: im + offset) }
+}
+
+extension SplitBuffer where T == Double {
+    func split(at offset: Int) -> DSPDoubleSplitComplex { DSPDoubleSplitComplex(realp: re + offset, imagp: im + offset) }
 }
 #endif

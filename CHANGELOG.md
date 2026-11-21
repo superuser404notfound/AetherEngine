@@ -58,6 +58,13 @@ the public-API contract.
 
 ### Fixed
 
+- **TrueHD Atmos and DTS:X keep up in a host's Debug build (AE#1106).** The bed regression computed its band
+  statistics, its weights and its mix in per-bin Swift loops. A host's Debug build compiles the package without
+  optimisation, and there the regression ran at 0.2x real time, so a TrueHD Atmos session stalled on every
+  segment. The three steps now run through Accelerate (one matrix product per band, the weights interpolated
+  with `vDSP_vlint`). On an M1, 16 elements into 9.1.6 went from 5.8 s to 0.09 s of CPU per second of audio
+  in a debug build, and from 112 ms to 53 ms optimised. The output matches the old code within float rounding.
+
 - **Subtitles before a session's start position come back after a backward seek on the software path
   (AE#1104).** A file opened at 46.2 s and then sought to 0 showed no subtitles until 27.5 s. The store held
   only what the load had read, from 27.5 s on, and the seek decoded that first. The drain cursor then sat

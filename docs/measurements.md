@@ -605,6 +605,23 @@ The band is the outer 8 output samples on every side (4 in chroma), rewritten as
 - The micro benchmark of the loop alone (M1, same sizes) read 18.8 ms unoptimised and 0.18 ms optimised before, 1.9 ms and 0.14 ms after, with identical output. `edgeBandIsABilinearScaleOfTheSource` holds the band to a plain bilinear reference in both planes.
 - Not measured: a 59.94 fps source on the device with the fix. The test server has no such title, and its "720p" NDR channel turned out to be 1080p.
 
+### Bed regression in a Debug build (AE#1106)
+
+Measured on an M1 on 2026-11-21. The answer first: **with per-bin Swift loops the bed regression ran at 0.2x real time in an unoptimised build, so a host's Debug build stalled TrueHD Atmos on every segment. Through Accelerate it runs at 11x there, and twice as fast optimised.**
+
+The benchmark feeds `BedRegression` a 7.1 bed and 16 placed elements (noise) into 9.1.6, in 40-frame blocks as TrueHD delivers them. CPU per second of audio:
+
+| Stage | Per-bin loops, debug | Per-bin loops, optimised | Accelerate, debug | Accelerate, optimised |
+|---|---|---|---|---|
+| Statistics (covariance, cross-spectra) | 1987 ms | 30 ms | 17 ms | 16 ms |
+| Solve (Cholesky, `W = R · A`, energy bound) | 2176 ms | 40 ms | 35 ms | 20 ms |
+| Apply (`W · bed` per bin) | 1623 ms | 38 ms | 11 ms | 9 ms |
+| Whole hop, FFTs included | 5816 ms | 112 ms | 91 ms | 53 ms |
+
+- The output is the same within float rounding: 118 dB signal to difference against the old code for 1, 12 and 16 elements, and 130 dB in the DTS:X fold mode.
+- End to end, `aetherctl play --atmos-bed 9.1.6` in a debug build played The Matrix (UHD remux, TrueHD Atmos with 11 objects) for 60 s from 10:00, switching to the Atmos track 2 s in. The clock reached 10:56.85, the buffer ran 60 s ahead, and the 30 s `cpuprobe` put the pump at 69% of a core. Before, a debug build rendered Unfold at about a fifth of real time and ended in `VERDICT: clock did not advance`.
+- The reporter's Time Profiler run on an Apple TV 4K (A15) put `BedRegression.processHop` at 74% of the segment pump's samples, with `applyWeights`, `accumulateStatistics` and `solveWeights` the three largest parts. Those are the three stages above.
+
 ### Software channel layout mismatch
 
 Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.
