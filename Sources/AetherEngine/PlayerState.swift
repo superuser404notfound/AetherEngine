@@ -348,8 +348,9 @@ public struct DisplayCapabilities: Sendable, Equatable {
 /// interlaced H.264, which routes software because AVPlayer does not deinterlace, #107 /
 /// `VideoRoutingPolicy`).
 public enum DeinterlaceMode: String, Sendable, Equatable {
-    /// yadif_videotoolbox (Metal compute over VideoToolbox frames) when the linked FFmpeg build
-    /// ships it AND a Metal device exists at runtime; otherwise falls back to software bwdif.
+    /// A Metal deinterlacer over VideoToolbox frames when the linked FFmpeg build ships one AND a
+    /// Metal device exists at runtime: bwdif_videotoolbox, whose picture equals software bwdif
+    /// (AE#1102), else yadif_videotoolbox. Otherwise falls back to software bwdif.
     /// The hardware path also skips the sws_scale copy: the filter sink emits IOSurface-backed
     /// CVPixelBuffers that go straight to the renderer.
     case auto

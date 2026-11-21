@@ -4,18 +4,21 @@ import AetherLibavutil
 import AetherLibavfilter
 @testable import AetherEngine
 
-/// yadif_videotoolbox hardware path (FFmpegBuild >= 2.1): the graph engages, emits
+/// GPU deinterlace path (bwdif_videotoolbox, else yadif_videotoolbox): the graph engages, emits
 /// AV_PIX_FMT_VIDEOTOOLBOX frames wrapping CVPixelBuffers, and mode=send_field doubles the
 /// output cadence on the sink's time_base.
 ///
-/// The three tests are reported as skipped (not passed) when the linked build has no
-/// yadif_videotoolbox or the machine has no Metal device (CI VMs): the engine then falls back to
+/// The tests are reported as skipped (not passed) when the linked build has no GPU
+/// deinterlacer or the machine has no Metal device (CI VMs): the engine then falls back to
 /// .software, and the fallback itself is covered by the software tests.
 struct DeinterlaceHardwareTests {
 
     /// Built once: the probe stands up and tears down a whole filter graph.
     private static let hardwareAvailable = DeinterlaceFilter.prewarmHardwarePipeline()
-    private static let needsHardware: Comment = "needs yadif_videotoolbox and a Metal device"
+    private static let needsHardware: Comment = "needs a GPU deinterlacer and a Metal device"
+    /// AE#1102: both GPU filters in the linked build, so the preference and the hand-over show.
+    private static let bothFiltersLinked = hardwareAvailable
+        && DeinterlaceFilter.linkedHardwareFilters == DeinterlaceFilter.hardwareFilterNames
 
     private func makeFrame(pts: Int64) -> UnsafeMutablePointer<AVFrame> {
         let f = av_frame_alloc()!
@@ -132,6 +135,33 @@ struct DeinterlaceHardwareTests {
             #expect(s <= maxInput + streamTBSeconds,
                     "output PTS \(s)s exceeds source range (\(maxInput)s)")
         }
+    }
+
+    @Test("bwdif_videotoolbox is preferred, and a graph error hands over to yadif_videotoolbox",
+          .enabled(if: DeinterlaceHardwareTests.bothFiltersLinked, "needs both GPU deinterlacers and a Metal device"))
+    func bwdifPreferredThenYadif() throws {
+        let filter = DeinterlaceFilter()
+        filter.config = DeinterlaceConfig(mode: .auto, fieldRate: .field)
+        defer { filter.teardown() }
+        let timeBase = AVRational(num: 1, den: 30)
+        var frame: UnsafeMutablePointer<AVFrame>? = makeFrame(pts: 0)
+        defer { av_frame_free(&frame) }
+
+        try #require(filter.ensureGraph(frame: frame!, timeBase: timeBase))
+        #expect(filter.activeDeinterlace?.filter == "bwdif_videotoolbox")
+        #expect(filter.activeDeinterlace?.isHardware == true)
+
+        // A latched filter error drops the graph; the rebuild takes the next GPU filter, not software.
+        #expect(filter.noteGraphError(afterPull: FFmpegErr.eio))
+        #expect(filter.failedHardwareFilters == ["bwdif_videotoolbox"])
+        try #require(filter.ensureGraph(frame: frame!, timeBase: timeBase))
+        #expect(filter.activeDeinterlace?.filter == "yadif_videotoolbox")
+        #expect(filter.engine == .hardware)
+
+        // With both GPU filters spent, software takes over.
+        #expect(filter.noteGraphError(afterPull: FFmpegErr.eio))
+        try #require(filter.ensureGraph(frame: frame!, timeBase: timeBase))
+        #expect(filter.engine == .software)
     }
 
     @Test("warm-up releases its temporary graph and a fresh hardware graph remains usable",

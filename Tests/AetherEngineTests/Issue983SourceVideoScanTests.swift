@@ -111,7 +111,7 @@ struct Issue983SourceVideoScanTests {
     }
 
     @Test("the hardware graph reports the field rate it was configured with",
-          .enabled(if: DeinterlaceFilter.prewarmHardwarePipeline(), "needs yadif_videotoolbox and a Metal device"))
+          .enabled(if: DeinterlaceFilter.prewarmHardwarePipeline(), "needs a GPU deinterlacer and a Metal device"))
     func hardwareGraphReport() throws {
         let filter = DeinterlaceFilter()
         filter.config = DeinterlaceConfig(mode: .auto, fieldRate: .field)
@@ -120,7 +120,7 @@ struct Issue983SourceVideoScanTests {
         defer { av_frame_free(&frame) }
         try #require(filter.ensureGraph(frame: frame!, timeBase: AVRational(num: 1, den: 25)))
         #expect(filter.activeDeinterlace == VideoDeinterlace(
-            filter: "yadif_videotoolbox", isHardware: true, fieldRate: .field))
+            filter: DeinterlaceFilter.linkedHardwareFilters[0], isHardware: true, fieldRate: .field))
         #expect(filter.activeDeinterlace?.outputFramesPerSourceFrame == 2)
     }
 }
