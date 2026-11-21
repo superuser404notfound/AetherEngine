@@ -15,12 +15,13 @@ struct DeinterlaceConfig: Sendable, Equatable {
 ///
 /// Two engines:
 /// - HARDWARE (`config.mode == .auto`, default): `format=nv12,hwupload,bwdif_videotoolbox`, bwdif
-///   as a Metal compute shader over VideoToolbox frames, whose output equals the CPU bwdif of the
-///   software engine (AE#1102). `yadif_videotoolbox` takes over when the linked FFmpeg build has
-///   no bwdif_videotoolbox or its graph fails. The sink emits `AV_PIX_FMT_VIDEOTOOLBOX` frames
+///   as a Metal compute shader over VideoToolbox frames, the same algorithm as the software engine
+///   (AE#1102). `yadif_videotoolbox` takes over when the linked FFmpeg build has no
+///   bwdif_videotoolbox or its graph fails to build. The sink emits `AV_PIX_FMT_VIDEOTOOLBOX` frames
 ///   wrapping IOSurface-backed CVPixelBuffers (`frame.data[3]`) that go straight to the renderer,
 ///   skipping the sws_scale copy. Runs at field rate by default (`config.fieldRate`). Needs a
-///   Metal device; when every GPU filter has failed, hw stays off for the session.
+///   Metal device; when every GPU filter has failed to build, or a GPU graph errors while
+///   running, hw stays off for the session.
 /// - SOFTWARE (fallback, or `config.mode == .software`): CPU bwdif (yadif for older linked
 ///   frameworks), always `mode=send_frame`, field rate without the GPU is the wrong cost trade.
 ///
@@ -64,11 +65,10 @@ final class DeinterlaceFilter {
     static let hardwareFilterNames = ["bwdif_videotoolbox", "yadif_videotoolbox"]
 
     /// The GPU filters the linked FFmpeg build carries, in preference order.
-    static var linkedHardwareFilters: [String] {
+    static let linkedHardwareFilters: [String] =
         hardwareFilterNames.filter { avfilter_get_by_name($0) != nil }
-    }
 
-    /// GPU filters whose graph failed to build or errored in this session; the next one takes over.
+    /// GPU filters whose graph failed to build in this session; the next one takes over.
     private(set) var failedHardwareFilters: Set<String> = []
 
     /// VideoToolbox hw device, created lazily for the hardware graph and kept across seek
@@ -150,7 +150,8 @@ final class DeinterlaceFilter {
                 failedHardwareFilters.insert(name)
             }
             // One-shot fallback: whatever failed (no Metal device, hwframes alloc) will keep
-            // failing; don't retry per geometry change.
+            // failing; don't retry per geometry change. The prewarm ran this same order, so the
+            // filter that builds here had its Metal pipeline compiled already.
             hwDisabled = true
             EngineLog.emit(
                 "[Deinterlace] hardware graph unavailable; falling back to software",
@@ -164,7 +165,7 @@ final class DeinterlaceFilter {
         frame: UnsafeMutablePointer<AVFrame>,
         timeBase: AVRational,
         engine wanted: Engine,
-        hardwareFilter: String = "yadif_videotoolbox"
+        hardwareFilter: String? = nil
     ) -> Bool {
         // AE#492: the build cost belongs on the line that reports the build. A seek tears the graph
         // down, so this is paid per seek on interlaced sources and never on progressive ones, and
@@ -173,7 +174,7 @@ final class DeinterlaceFilter {
         // Engine-specific preconditions.
         switch wanted {
         case .hardware:
-            guard ensureHWDevice() else { return false }
+            guard hardwareFilter != nil, ensureHWDevice() else { return false }
         case .software:
             guard avfilter_get_by_name("bwdif") != nil || avfilter_get_by_name("yadif") != nil else {
                 if !loggedUnavailable {
@@ -242,6 +243,7 @@ final class DeinterlaceFilter {
             let swFmt = is10Bit(frame.pointee.format) ? "p010le" : "nv12"
             let mode = config.fieldRate == .field ? "send_field" : "send_frame"
             let deintOpts = "mode=\(mode):parity=auto:deint=interlaced"
+            let hardwareFilter = hardwareFilter ?? ""
             chain = "format=\(swFmt),hwupload,\(hardwareFilter)=\(deintOpts)"
 
             guard let formatFilter = avfilter_get_by_name("format"),
@@ -381,10 +383,12 @@ final class DeinterlaceFilter {
     func noteGraphError(afterPull code: Int32) -> Bool {
         guard code < 0, code != FFmpegErr.eagain, code != FFmpegErr.eof else { return false }
         graphErrorCount += 1
-        let failedHardwareFilter = engine == .hardware ? builtFilterName : nil
+        let wasHardware = engine == .hardware
         teardown()
-        // The next GPU filter gets the rebuild; once none is left, software does.
-        if let failedHardwareFilter { failedHardwareFilters.insert(failedHardwareFilter) }
+        // A running GPU graph that errors goes straight to software, not to the next GPU filter:
+        // the cause is usually the device (hwupload ENOMEM, IOSurface pressure) and would hit the
+        // next filter too, and only the first filter's pipeline was warmed.
+        if wasHardware { hwDisabled = true }
         if graphErrorCount >= Self.maxGraphErrors { passthroughLatched = true }
         EngineLog.emit(
             "[Deinterlace] graph error \(FFmpegErr.text(for: code)), graph dropped "

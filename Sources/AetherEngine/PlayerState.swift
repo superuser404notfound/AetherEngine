@@ -349,8 +349,8 @@ public struct DisplayCapabilities: Sendable, Equatable {
 /// `VideoRoutingPolicy`).
 public enum DeinterlaceMode: String, Sendable, Equatable {
     /// A Metal deinterlacer over VideoToolbox frames when the linked FFmpeg build ships one AND a
-    /// Metal device exists at runtime: bwdif_videotoolbox, whose picture equals software bwdif
-    /// (AE#1102), else yadif_videotoolbox. Otherwise falls back to software bwdif.
+    /// Metal device exists at runtime: bwdif_videotoolbox, the software path's algorithm on the
+    /// GPU (AE#1102), else yadif_videotoolbox. Otherwise falls back to software bwdif.
     /// The hardware path also skips the sws_scale copy: the filter sink emits IOSurface-backed
     /// CVPixelBuffers that go straight to the renderer.
     case auto

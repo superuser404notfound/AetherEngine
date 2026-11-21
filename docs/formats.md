@@ -329,7 +329,9 @@ This covers H.264 that carries both stereo views inside one track. That is how a
 
 Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent filter graph. By default it runs on the GPU at field rate, with CPU bwdif (yadif on older builds) as the fallback. It engages on the first interlaced frame and costs nothing on progressive content.
 
-The GPU filter is `bwdif_videotoolbox`, a Metal port of bwdif from FFmpegBuild. Its picture is the same as the CPU fallback's, bit for bit, so a session looks the same whichever path it gets (AE#1102). When the linked FFmpegBuild has no `bwdif_videotoolbox`, or its graph fails, the engine uses FFmpeg's `yadif_videotoolbox` instead. `$sourceVideoStreamFormat`'s `deinterlace.filter` names the one that runs.
+The GPU filter is `bwdif_videotoolbox`, a Metal port of bwdif from FFmpegBuild, so the GPU path and the CPU fallback deinterlace with the same algorithm (AE#1102). Given the same frames, the GPU filter's output equals CPU bwdif's sample for sample. The two paths still differ in cadence (the GPU runs at field rate by default, the CPU at frame rate) and the GPU path converts to 4:2:0 first.
+
+When the linked FFmpegBuild has no `bwdif_videotoolbox`, or its graph fails to build, the engine uses FFmpeg's `yadif_videotoolbox` instead. A GPU graph that errors while it runs falls back to the CPU. `$sourceVideoStreamFormat`'s `deinterlace.filter` names the one that runs.
 
 `AetherEngine.load` decides the route (`VideoRoutingPolicy`), per source, from `VTCapabilityProbe`, the codec id, the declared field order, and on VOD the decode sample that verifies it.
 
