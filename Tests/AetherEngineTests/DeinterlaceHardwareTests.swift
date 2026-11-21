@@ -4,23 +4,26 @@ import AetherLibavutil
 import AetherLibavfilter
 @testable import AetherEngine
 
-/// yadif_videotoolbox hardware path (FFmpegBuild >= 2.1): the graph engages, emits
+/// GPU deinterlace path (bwdif_videotoolbox, else yadif_videotoolbox): the graph engages, emits
 /// AV_PIX_FMT_VIDEOTOOLBOX frames wrapping CVPixelBuffers, and mode=send_field doubles the
 /// output cadence on the sink's time_base.
 ///
-/// The three tests are reported as skipped (not passed) when the linked build has no
-/// yadif_videotoolbox or the machine has no Metal device (CI VMs): the engine then falls back to
+/// The tests are reported as skipped (not passed) when the linked build has no GPU
+/// deinterlacer or the machine has no Metal device (CI VMs): the engine then falls back to
 /// .software, and the fallback itself is covered by the software tests.
 struct DeinterlaceHardwareTests {
 
     /// Built once: the probe stands up and tears down a whole filter graph.
     private static let hardwareAvailable = DeinterlaceFilter.prewarmHardwarePipeline()
-    private static let needsHardware: Comment = "needs yadif_videotoolbox and a Metal device"
+    private static let needsHardware: Comment = "needs a GPU deinterlacer and a Metal device"
+    /// AE#1102: both GPU filters in the linked build, so the preference and the hand-over show.
+    private static let bothFiltersLinked = hardwareAvailable
+        && DeinterlaceFilter.linkedHardwareFilters == DeinterlaceFilter.hardwareFilterNames
 
-    private func makeFrame(pts: Int64) -> UnsafeMutablePointer<AVFrame> {
+    private func makeFrame(pts: Int64, height: Int32 = 64) -> UnsafeMutablePointer<AVFrame> {
         let f = av_frame_alloc()!
         f.pointee.width = 64
-        f.pointee.height = 64
+        f.pointee.height = height
         f.pointee.format = AV_PIX_FMT_YUV420P.rawValue
         f.pointee.pts = pts
         f.pointee.flags |= (1 << 3)  // AV_FRAME_FLAG_INTERLACED
@@ -132,6 +135,49 @@ struct DeinterlaceHardwareTests {
             #expect(s <= maxInput + streamTBSeconds,
                     "output PTS \(s)s exceeds source range (\(maxInput)s)")
         }
+    }
+
+    @Test("bwdif_videotoolbox is preferred, one that fails to build hands over to yadif_videotoolbox",
+          .enabled(if: DeinterlaceHardwareTests.bothFiltersLinked, "needs both GPU deinterlacers and a Metal device"))
+    func bwdifPreferredThenYadif() throws {
+        let timeBase = AVRational(num: 1, den: 30)
+
+        let preferred = DeinterlaceFilter()
+        preferred.config = DeinterlaceConfig(mode: .auto, fieldRate: .field)
+        defer { preferred.teardown() }
+        var frame: UnsafeMutablePointer<AVFrame>? = makeFrame(pts: 0)
+        defer { av_frame_free(&frame) }
+        try #require(preferred.ensureGraph(frame: frame!, timeBase: timeBase))
+        #expect(preferred.activeDeinterlace?.filter == "bwdif_videotoolbox")
+
+        // bwdif_videotoolbox refuses planes under 3x4 at configuration (a 64x6 NV12 frame has
+        // 3-row chroma); yadif_videotoolbox builds on it, so the session stays on the GPU.
+        let small = DeinterlaceFilter()
+        small.config = DeinterlaceConfig(mode: .auto, fieldRate: .field)
+        defer { small.teardown() }
+        var smallFrame: UnsafeMutablePointer<AVFrame>? = makeFrame(pts: 0, height: 6)
+        defer { av_frame_free(&smallFrame) }
+        try #require(small.ensureGraph(frame: smallFrame!, timeBase: timeBase))
+        #expect(small.activeDeinterlace?.filter == "yadif_videotoolbox")
+        #expect(small.failedHardwareFilters == ["bwdif_videotoolbox"])
+    }
+
+    @Test("a GPU graph that errors while running falls back to software, not to the next GPU filter",
+          .enabled(if: DeinterlaceHardwareTests.hardwareAvailable, DeinterlaceHardwareTests.needsHardware))
+    func runtimeErrorGoesToSoftware() throws {
+        let filter = DeinterlaceFilter()
+        filter.config = DeinterlaceConfig(mode: .auto, fieldRate: .field)
+        defer { filter.teardown() }
+        let timeBase = AVRational(num: 1, den: 30)
+        var frame: UnsafeMutablePointer<AVFrame>? = makeFrame(pts: 0)
+        defer { av_frame_free(&frame) }
+
+        try #require(filter.ensureGraph(frame: frame!, timeBase: timeBase))
+        #expect(filter.engine == .hardware)
+        #expect(filter.noteGraphError(afterPull: FFmpegErr.eio))
+        try #require(filter.ensureGraph(frame: frame!, timeBase: timeBase))
+        #expect(filter.engine == .software)
+        #expect(filter.failedHardwareFilters.isEmpty)
     }
 
     @Test("warm-up releases its temporary graph and a fresh hardware graph remains usable",

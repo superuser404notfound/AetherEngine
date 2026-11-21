@@ -25,7 +25,8 @@ public enum VideoFieldOrder: String, Sendable, Equatable {
 
 /// AE#983: the deinterlace graph in the software decoder's frame path, part of `DecodedVideoFormat`.
 public struct VideoDeinterlace: Sendable, Equatable {
-    /// The FFmpeg filter: `yadif_videotoolbox` (Metal), `bwdif`, or `yadif` on older linked builds.
+    /// The FFmpeg filter: `bwdif_videotoolbox` or `yadif_videotoolbox` (Metal), `bwdif`, or `yadif`
+    /// on older linked builds.
     public let filter: String
     public let isHardware: Bool
     /// `.field` emits one frame per field (25i to 50p), `.frame` one per frame (25i to 25p). The
