@@ -111,8 +111,9 @@ extension ColorDescription {
             range: declared.range == AVCOL_RANGE_UNSPECIFIED ? AVCOL_RANGE_MPEG : declared.range)
     }
 
-    /// Bits per luma sample: the pixel format's when the probe resolved one, the container's figure
-    /// otherwise, 0 when neither is known (which `assumed` treats as too shallow).
+    /// Bits per luma sample. The pixel format's when the probe resolved one, the container's figure
+    /// otherwise, 0 when neither is known (which `assumed` treats as too shallow). `VideoStreamFormat`
+    /// reports the same number, so the gate and the host never see two depths for one stream.
     static func bitDepth(pixelFormat: Int32, bitsPerRawSample: Int32) -> Int {
         if pixelFormat >= 0, let desc = av_pix_fmt_desc_get(AVPixelFormat(rawValue: pixelFormat)),
            desc.pointee.nb_components > 0 {

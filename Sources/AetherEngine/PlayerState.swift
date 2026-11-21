@@ -430,11 +430,11 @@ public enum DolbyVisionHandling: String, Sendable, Equatable, CaseIterable {
 
 /// What an untagged video stream is shown as. See `LoadOptions.untaggedVideoColor` (AE#1103).
 public enum UntaggedVideoColor: Sendable, Equatable {
-    /// The engine's own reading: an untagged stream is SDR and is presented as BT.709 (AE#654).
+    /// The engine's own reading. An untagged stream is SDR and is presented as BT.709 (AE#654).
     case standard
-    /// HDR10: BT.2020 primaries, PQ transfer (SMPTE ST 2084), BT.2020 non-constant-luminance matrix.
+    /// HDR10, which is BT.2020 primaries, PQ transfer (SMPTE ST 2084) and the BT.2020 non-constant-luminance matrix.
     case hdr10
-    /// HLG: BT.2020 primaries, HLG transfer (ARIB STD-B67), BT.2020 non-constant-luminance matrix.
+    /// HLG, which is BT.2020 primaries, HLG transfer (ARIB STD-B67) and the BT.2020 non-constant-luminance matrix.
     case hlg
 }
 
@@ -532,8 +532,8 @@ public struct LoadOptions: Sendable, Equatable {
     public var dolbyVisionHandling: DolbyVisionHandling
 
     /// What to show a video stream as when it carries no colour description at all (AE#1103). Some
-    /// IPTV and re-encoded files are HDR10 with every tag stripped: no VUI colour, no HDR SEI, no
-    /// container colour. The engine cannot tell such a stream from SDR and plays it as BT.709 (AE#654),
+    /// IPTV and re-encoded files are HDR10 with every tag stripped (no VUI colour, no HDR SEI, no
+    /// container colour). The engine cannot tell such a stream from SDR and plays it as BT.709 (AE#654),
     /// so the picture looks pale. A host that knows better (its own frame check, a per-title switch)
     /// sets `.hdr10` or `.hlg` here.
     ///
@@ -541,11 +541,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// matrix (neither in the bitstream nor in the container) and is not Dolby Vision. A stream that
     /// declares anything keeps what it declares, so the option is safe to set for a whole library.
     /// The range stays as declared and is limited where the stream says nothing. When it applies, the
-    /// whole session follows: the route, the display criteria, the `colr` box of the native stream,
-    /// the software path's frame tags and `probe(url:options:)`. The log says when it was used.
+    /// whole session follows, which means the route, the display criteria, the `colr` box of the
+    /// native stream, the software path's frame tags and `probe(url:options:)`. The log says when it
+    /// was used.
     ///
-    /// A tuning field: correctable on the playing session through `reloadAtCurrentPosition(applying:)`.
-    /// Default `.standard`.
+    /// A tuning field, correctable on the playing session through `reloadAtCurrentPosition(applying:)`
+    /// on a URL source. A custom `IOReader` source refuses the change with
+    /// `SessionReloadRefusal.untaggedVideoColorNeedsFreshLoad`. Default `.standard`.
     public var untaggedVideoColor: UntaggedVideoColor = .standard
 
     /// Opt in to full dual-layer Dolby Vision decoding of Profile 7 FEL streams, composed on the GPU, instead of

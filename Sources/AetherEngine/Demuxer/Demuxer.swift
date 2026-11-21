@@ -1937,52 +1937,87 @@ public final class Demuxer: @unchecked Sendable {
     /// `codecpar`, like the HLG promotion above and for the same reason: the route, the display
     /// criteria, the muxer's `colr`, the decoders' frame backfill and the probe all read it from there.
     /// After that promotion, so an HLG the SEI proved is a declared transfer and is left alone.
+    ///
+    /// A Dolby Vision Profile 5 has exactly the shape this option looks for (10 bit, nothing declared)
+    /// and its picture is IPT, not YCbCr, so calling it PQ turns it green and violet. A record in
+    /// `codecpar` rules it out, but the recordless audit that adds one runs only for a URL open with
+    /// its audit on, so an HEVC candidate is also checked for an RPU in its first video packets, which
+    /// covers custom readers, disc images and the controlled probe. Peeks, so playback still gets
+    /// every packet.
     private func applyUntaggedVideoColor() {
         let assumption = openProfile.untaggedVideoColor
         guard assumption != .standard, !openProfile.skipStreamInfo else { return }
         let index = videoStreamIndex
-        typealias Outcome = (applied: ColorDescription?, declared: ColorDescription, depth: Int, dolbyVision: Bool)
-        guard let outcome = withStream(at: index, { stream -> Outcome? in
+        typealias Reading = (candidate: ColorDescription?, declared: ColorDescription, depth: Int,
+                             hasRecord: Bool, hevcFraming: VideoNALFraming?)
+        guard let reading = withStream(at: index, { stream -> Reading? in
             guard stream.pointee.discard != AVDISCARD_ALL, let par = stream.pointee.codecpar else { return nil }
             let declared = ColorDescription(codecpar: par)
             let depth = ColorDescription.bitDepth(
                 pixelFormat: par.pointee.format, bitsPerRawSample: par.pointee.bits_per_raw_sample)
-            let dolbyVision = (0..<Int(par.pointee.nb_coded_side_data)).contains {
-                par.pointee.coded_side_data?[$0].type == AV_PKT_DATA_DOVI_CONF
-            }
-            let applied = ColorDescription.assumed(
-                assumption, for: declared, bitDepth: depth, isDolbyVision: dolbyVision)
-            if let applied {
-                par.pointee.color_primaries = applied.primaries
-                par.pointee.color_trc = applied.transfer
-                par.pointee.color_space = applied.matrix
-                par.pointee.color_range = applied.range
-            }
-            return (applied, declared, depth, dolbyVision)
+            let hasRecord = AetherEngine.dvConfig(stream: stream) != nil
+            let framing = par.pointee.codec_id == AV_CODEC_ID_HEVC
+                ? A53SEIParser.nalFraming(codec: .hevc, extradata: par.pointee.extradata,
+                                          size: Int(par.pointee.extradata_size))
+                : nil
+            return (ColorDescription.assumed(assumption, for: declared, bitDepth: depth, isDolbyVision: hasRecord),
+                    declared, depth, hasRecord, framing)
         }) ?? nil else { return }
         let name = assumption == .hdr10 ? "hdr10" : "hlg"
-        if outcome.applied != nil {
-            EngineLog.emit(
-                "[Demuxer] AE#1103 stream=\(index): untagged \(outcome.depth)-bit video shown as \(name) "
-                + "(untaggedVideoColor)", category: .demux)
-        } else {
-            let declared = outcome.declared
+
+        guard let applied = reading.candidate else {
+            // A tagged or 8-bit stream is the common case under a library-wide setting, so its line
+            // stays out of the host's log.
+            let declared = reading.declared
+            let label: (UnsafePointer<CChar>?, Int32) -> String = { $0.map { String(cString: $0) } ?? "\($1)" }
             let reason: String
-            if outcome.dolbyVision {
+            if reading.hasRecord {
                 reason = "the stream is Dolby Vision"
             } else if declared.primaries != AVCOL_PRI_UNSPECIFIED || declared.transfer != AVCOL_TRC_UNSPECIFIED
                         || declared.matrix != AVCOL_SPC_UNSPECIFIED {
-                let label: (UnsafePointer<CChar>?, Int32) -> String = { $0.map { String(cString: $0) } ?? "\($1)" }
                 reason = "the stream declares primaries=\(label(av_color_primaries_name(declared.primaries), Int32(declared.primaries.rawValue))) "
                     + "trc=\(label(av_color_transfer_name(declared.transfer), Int32(declared.transfer.rawValue))) "
                     + "matrix=\(label(av_color_space_name(declared.matrix), Int32(declared.matrix.rawValue)))"
             } else {
-                reason = "the stream is \(outcome.depth)-bit"
+                reason = "the stream is \(reading.depth)-bit"
             }
-            EngineLog.emit(
-                "[Demuxer] AE#1103 stream=\(index): untaggedVideoColor=\(name) not applied, \(reason)",
-                category: .demux)
+            EngineLog.emit("[Demuxer] AE#1103 stream=\(index): untaggedVideoColor=\(name) not applied, \(reason)",
+                           category: .demux, level: reading.hasRecord ? .info : .verbose)
+            return
         }
+
+        if let framing = reading.hevcFraming, firstVideoPacketsCarryRPU(index: index, framing: framing) {
+            EngineLog.emit(
+                "[Demuxer] AE#1103 stream=\(index): untaggedVideoColor=\(name) not applied, the stream carries "
+                + "a Dolby Vision RPU and no record", category: .demux)
+            return
+        }
+
+        _ = withStream(at: index) { stream in
+            guard let par = stream.pointee.codecpar else { return }
+            par.pointee.color_primaries = applied.primaries
+            par.pointee.color_trc = applied.transfer
+            par.pointee.color_space = applied.matrix
+            par.pointee.color_range = applied.range
+        }
+        EngineLog.emit(
+            "[Demuxer] AE#1103 stream=\(index): untagged \(reading.depth)-bit video shown as \(name) "
+            + "(untaggedVideoColor)", category: .demux)
+    }
+
+    /// Whether one of the first video packets holds an unspec62 NAL, the Dolby Vision RPU. Same budget
+    /// as the HLG SEI scan: every Dolby Vision frame carries one, so the first video packet decides.
+    private func firstVideoPacketsCarryRPU(index: Int32, framing: VideoNALFraming) -> Bool {
+        var videoPackets = 0
+        var found = false
+        try? peekPackets(maxPackets: Self.alternativeTransferPacketBudget) { packet in
+            guard packet.pointee.stream_index == index, let data = packet.pointee.data else { return false }
+            videoPackets += 1
+            found = DolbyVisionLayerUnits.rpu(
+                in: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)), framing: framing) != nil
+            return found || videoPackets >= Self.alternativeTransferVideoPacketBudget
+        }
+        return found
     }
 
     /// Run a bounded `avformat_find_stream_info` on an already-open context (#87). Used by the subtitle

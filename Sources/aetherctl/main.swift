@@ -1323,12 +1323,12 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     // `--untagged-color hdr10|hlg`: LoadOptions.untaggedVideoColor (AE#1103), for probe and serve.
     let untaggedColor: UntaggedVideoColor
     switch takeStringFlag("--untagged-color", from: &rest) {
-    case nil: untaggedColor = .standard
+    case nil, "standard": untaggedColor = .standard
     case "hdr10": untaggedColor = .hdr10
     case "hlg": untaggedColor = .hlg
     case let other?:
-        print("--untagged-color takes hdr10 or hlg, not \(other)")
-        exit(2)
+        print("ERROR: --untagged-color takes standard|hdr10|hlg, got '\(other)'")
+        exit(64)
     }
     // `--stereo auto|mono|sbs|ou`: serve a 3D source the way visionOS gets it, from any system.
     let serveStereo: StereoPresentation? = takeStringFlag("--stereo", from: &rest).map {

@@ -73,4 +73,18 @@ struct UntaggedVideoColorTests {
         #expect(session.openProfile.untaggedVideoColor == .hdr10)
         #expect(session.restartReopenProfile.untaggedVideoColor == .hdr10)
     }
+
+    @Test("AE#1103: a custom source refuses any change, a URL source takes it")
+    func customSourceRefusesTheCorrection() {
+        let off = LoadOptions()
+        var on = off
+        on.untaggedVideoColor = .hdr10
+        #expect(SessionOptionCorrection.untaggedVideoColorRefusal(isCustomSource: true, current: off, proposed: on)
+            == .untaggedVideoColorNeedsFreshLoad)
+        #expect(SessionOptionCorrection.untaggedVideoColorRefusal(isCustomSource: true, current: on, proposed: off)
+            == .untaggedVideoColorNeedsFreshLoad)
+        #expect(SessionOptionCorrection.untaggedVideoColorRefusal(isCustomSource: true, current: on, proposed: on) == nil)
+        #expect(SessionOptionCorrection.untaggedVideoColorRefusal(isCustomSource: false, current: off, proposed: on) == nil)
+        #expect(!SessionReloadRefusal.untaggedVideoColorNeedsFreshLoad.description.isEmpty)
+    }
 }

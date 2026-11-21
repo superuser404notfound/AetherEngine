@@ -449,6 +449,7 @@ Both refusals are thrown BEFORE any teardown, so a refused correction leaves the
 | `AetherEngineError.sessionNotReloadable(.dualLayerRouteNeedsFreshLoad)` | the correction changes `preferDualLayerDolbyVision` (or `dolbyVisionHandling` or `dualLayerRoute` while the preference is on) on a custom `IOReader` Profile 7 session. The in-place rebuild keeps the route the session was loaded with; call `load()` again with the new option. |
 | `AetherEngineError.sessionNotReloadable(.upscaleRouteNeedsFreshLoad)` | the correction turns `upscalesLowResolutionVideo` on, or changes `upscaleScaler` while it is on (AE#1039), for a custom `IOReader` session. Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.videoProcessingRouteNeedsFreshLoad)` | the correction turns `videoProcessing` on, or changes its target while it is on, for a custom `IOReader` session (#957). Call `load()` again with the new option. See note 2. |
+| `AetherEngineError.sessionNotReloadable(.untaggedVideoColorNeedsFreshLoad)` | the correction changes `untaggedVideoColor` for a custom `IOReader` session (AE#1103). Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.demuxedAudioLiveIsNativeOnly)` | the correction moves a demuxed-audio live session onto the software path. The side-audio merge does not exist there, so it would play silent. |
 
 1. **Identity fields.** These name the session rather than tune it: each opens the source on a different pipeline or gives the session a different role. Changing one makes a different item, not a correction.
@@ -2892,23 +2893,25 @@ See [formats.md](formats.md#dolby-vision-signaling).
 
 #### `untaggedVideoColor`
 
-Tells the engine what a video stream is when the stream says nothing about its colour (AE#1103). `.standard` (the default) keeps the engine's own reading: an untagged stream is SDR and plays as BT.709 (AE#654). `.hdr10` makes it BT.2020 / PQ, `.hlg` BT.2020 / HLG, both with the BT.2020 non-constant-luminance matrix.
+Tells the engine what a video stream is when the stream says nothing about its colour (AE#1103). `.standard` is the default and keeps the engine's own reading, which is SDR shown as BT.709 (AE#654). `.hdr10` makes the stream BT.2020 / PQ and `.hlg` makes it BT.2020 / HLG, both with the BT.2020 non-constant-luminance matrix.
 
-**When to use it.** Some IPTV and re-encoded files are HDR10 with every tag stripped: no VUI colour, no HDR SEI, no container colour. Nothing in the file tells them from SDR, so they play pale. A host that knows better sets the option, from its own check of the decoded frames or from a per-title "Force HDR" switch.
+**When to use it.** Some IPTV and re-encoded files are HDR10 with every tag stripped. They carry no VUI colour, no HDR SEI and no container colour, so nothing tells them from SDR and they play pale. A host that knows better sets the option, from its own check of the decoded frames or from a per-title "Force HDR" switch.
 
 **Applies only when all of these hold**, so it is safe to set for a whole library:
 
 - the stream is at least 10 bit,
 - primaries, transfer and matrix are all unspecified, in the bitstream and in the container,
-- the stream is not Dolby Vision (a recordless Profile 5 is recognised first, AE#567).
+- the stream is not Dolby Vision. A container record rules it out, and so does a Dolby Vision RPU in the first video packets of an HEVC stream, which catches a Profile 5 without a record on every source type.
 
 A stream that declares even one of the three keeps its own description. The range stays as declared, and is limited where the stream says nothing.
 
-**What follows from it.** The demuxer writes the description into the stream's parameters right after the stream analysis, so every later reader sees the same answer: the route, the display criteria, `VIDEO-RANGE`, the `colr` box of the native stream, the software path's frame tags, `videoFormat` and `probe(url:options:)`. Every reopen and rebuild of the session carries it.
+**What follows from it.** The demuxer writes the description into the stream's parameters right after the stream analysis, so every later reader sees the same answer. That covers the route, the display criteria, `VIDEO-RANGE`, the `colr` box of the native stream, the software path's frame tags, the session's scrub previews, `videoFormat` and `probe(url:options:)`. Every reopen and rebuild of the session carries it.
 
-- The log says `AE#1103 ... shown as hdr10` when it applied, and why not when it did not.
-- A tuning field, correctable through `reloadAtCurrentPosition(applying:)`, which is how a per-title switch takes effect on the playing title.
+- The log says `AE#1103 ... shown as hdr10` when it applied. A refusal because of Dolby Vision is logged too. A tagged or 8-bit stream only gets a verbose line, so a library-wide setting does not fill the host's log.
 - No HDR10 mastering metadata is invented. The display gets PQ without static metadata, as it would for an HDR10 encode that carries none.
+- A `FrameExtractor` the host builds itself opens the file as it is and does not know the option.
+
+**Correcting it.** A tuning field, correctable through `reloadAtCurrentPosition(applying:)` on a URL source, which re-runs `load()`. That is how a per-title switch takes effect on the playing title. On a custom `IOReader` source any change is refused with `SessionReloadRefusal.untaggedVideoColorNeedsFreshLoad`, because the in-place rebuild keeps the route and display criteria it chose for the old description. Call `load()` again there.
 
 #### `forceDolbyVisionOnNonDVDisplay`
 
