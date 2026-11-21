@@ -3,9 +3,10 @@ import AetherEngine
 
 // MARK: - probe
 
-func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
+func runProbe(url: URL, detecting: ProbeDetail = [], untaggedColor: UntaggedVideoColor = .standard) -> Int32 {
     EngineLog.handler = { print($0) }
-    print(EngineLog.redacted("aetherctl probe: \(url.absoluteString)"))
+    print(EngineLog.redacted("aetherctl probe: \(url.absoluteString)"
+        + (untaggedColor == .standard ? "" : " [--untagged-color \(untaggedColor)]")))
     if !detecting.isEmpty {
         var passes: [String] = []
         if detecting.contains(.hdr10Plus) { passes.append("hdr10plus (packet scan)") }
@@ -17,7 +18,9 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
     print("")
     let probe: SourceProbe
     do {
-        probe = try AetherEngine.probe(url: url, detecting: detecting)
+        var options = LoadOptions()
+        options.untaggedVideoColor = untaggedColor
+        probe = try AetherEngine.probe(url: url, options: options, detecting: detecting)
     } catch {
         print("ERROR: \(error)")
         return 1

@@ -2598,6 +2598,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | `panelIsInHDRMode` | false | **Host assertion** that the panel is presenting HDR right now. See [`panelIsInHDRMode`](#panelisinhdrmode). |
 | `attemptsHDRMasterOnUnprovenPanel` | true | Serve the HDR master to an HDR-eligible display whose panel state is unproven, and let AVFoundation's answer be the readout (AE#459). See [`attemptsHDRMasterOnUnprovenPanel`](#attemptshdrmasteronunprovenpanel). |
 | `panelPresentsDolbyVision` | false | **Host assertion** that this display presents Dolby Vision, for the platforms where the engine cannot observe it (AE#493). See [`panelPresentsDolbyVision`](#panelpresentsdolbyvision). |
+| `untaggedVideoColor` | `.standard` | An `UntaggedVideoColor`. `.hdr10` or `.hlg` shows a 10-bit stream with no colour description at all as HDR10 or HLG (AE#1103). See [`untaggedVideoColor`](#untaggedvideocolor). |
 | `omitCriteriaColorExtensions` | false | Diagnostic lever: leave colour out of `AVDisplayCriteria` so AVPlayer re-reads it from the bitstream. |
 | `keepDvh1TagWithoutDV` | false | Diagnostic lever: force dvh1 tags and a master playlist regardless of display capability. |
 | `stereoPresentation` | `.automatic` | How a 3D source is presented where the system shows stereo. See [`stereoPresentation`](#stereopresentation). |
@@ -2888,6 +2889,26 @@ How a 3D source is presented where the system shows stereo (visionOS; every othe
 - A tuning field, correctable through `reloadAtCurrentPosition(applying:)`. Under it, a Profile 5 record the VUI contradicts also stops refusing the software path.
 
 See [formats.md](formats.md#dolby-vision-signaling).
+
+#### `untaggedVideoColor`
+
+Tells the engine what a video stream is when the stream says nothing about its colour (AE#1103). `.standard` (the default) keeps the engine's own reading: an untagged stream is SDR and plays as BT.709 (AE#654). `.hdr10` makes it BT.2020 / PQ, `.hlg` BT.2020 / HLG, both with the BT.2020 non-constant-luminance matrix.
+
+**When to use it.** Some IPTV and re-encoded files are HDR10 with every tag stripped: no VUI colour, no HDR SEI, no container colour. Nothing in the file tells them from SDR, so they play pale. A host that knows better sets the option, from its own check of the decoded frames or from a per-title "Force HDR" switch.
+
+**Applies only when all of these hold**, so it is safe to set for a whole library:
+
+- the stream is at least 10 bit,
+- primaries, transfer and matrix are all unspecified, in the bitstream and in the container,
+- the stream is not Dolby Vision (a recordless Profile 5 is recognised first, AE#567).
+
+A stream that declares even one of the three keeps its own description. The range stays as declared, and is limited where the stream says nothing.
+
+**What follows from it.** The demuxer writes the description into the stream's parameters right after the stream analysis, so every later reader sees the same answer: the route, the display criteria, `VIDEO-RANGE`, the `colr` box of the native stream, the software path's frame tags, `videoFormat` and `probe(url:options:)`. Every reopen and rebuild of the session carries it.
+
+- The log says `AE#1103 ... shown as hdr10` when it applied, and why not when it did not.
+- A tuning field, correctable through `reloadAtCurrentPosition(applying:)`, which is how a per-title switch takes effect on the playing title.
+- No HDR10 mastering metadata is invented. The display gets PQ without static metadata, as it would for an HDR10 encode that carries none.
 
 #### `forceDolbyVisionOnNonDVDisplay`
 

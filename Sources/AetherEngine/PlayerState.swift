@@ -428,6 +428,16 @@ public enum DolbyVisionHandling: String, Sendable, Equatable, CaseIterable {
     case baseLayerOnly
 }
 
+/// What an untagged video stream is shown as. See `LoadOptions.untaggedVideoColor` (AE#1103).
+public enum UntaggedVideoColor: Sendable, Equatable {
+    /// The engine's own reading: an untagged stream is SDR and is presented as BT.709 (AE#654).
+    case standard
+    /// HDR10: BT.2020 primaries, PQ transfer (SMPTE ST 2084), BT.2020 non-constant-luminance matrix.
+    case hdr10
+    /// HLG: BT.2020 primaries, HLG transfer (ARIB STD-B67), BT.2020 non-constant-luminance matrix.
+    case hlg
+}
+
 public struct LoadOptions: Sendable, Equatable {
     /// Diagnostic identity only; retained with the source across internal reloads.
     public var sourceDiagnosticsContext: SourceNetworkDiagnostics.Context? = nil
@@ -520,6 +530,23 @@ public struct LoadOptions: Sendable, Equatable {
     /// layer alone in any case, so there it only lifts the Profile 5 refusal (#176) for a record the VUI
     /// contradicts.
     public var dolbyVisionHandling: DolbyVisionHandling
+
+    /// What to show a video stream as when it carries no colour description at all (AE#1103). Some
+    /// IPTV and re-encoded files are HDR10 with every tag stripped: no VUI colour, no HDR SEI, no
+    /// container colour. The engine cannot tell such a stream from SDR and plays it as BT.709 (AE#654),
+    /// so the picture looks pale. A host that knows better (its own frame check, a per-title switch)
+    /// sets `.hdr10` or `.hlg` here.
+    ///
+    /// It applies only when the stream is at least 10 bit, declares none of primaries, transfer and
+    /// matrix (neither in the bitstream nor in the container) and is not Dolby Vision. A stream that
+    /// declares anything keeps what it declares, so the option is safe to set for a whole library.
+    /// The range stays as declared and is limited where the stream says nothing. When it applies, the
+    /// whole session follows: the route, the display criteria, the `colr` box of the native stream,
+    /// the software path's frame tags and `probe(url:options:)`. The log says when it was used.
+    ///
+    /// A tuning field: correctable on the playing session through `reloadAtCurrentPosition(applying:)`.
+    /// Default `.standard`.
+    public var untaggedVideoColor: UntaggedVideoColor = .standard
 
     /// Opt in to full dual-layer Dolby Vision decoding of Profile 7 FEL streams, composed on the GPU, instead of
     /// the native route (the single-layer Profile 8.1 conversion, or the HDR10 base layer). When true, `dolbyVisionHandling` is `.automatic`, the stream's
@@ -1291,6 +1318,7 @@ public struct LoadOptions: Sendable, Equatable {
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         preferHDR10PlusOverForcedDolbyVision: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
+        untaggedVideoColor: UntaggedVideoColor = .standard,
         preferDualLayerDolbyVision: Bool = false,
         dualLayerRoute: DualLayerRoute = .softwareHost,
         foldsDolbyVisionFEL: Bool = true,
@@ -1367,6 +1395,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.preferHDR10PlusOverForcedDolbyVision = preferHDR10PlusOverForcedDolbyVision
         self.dolbyVisionHandling = dolbyVisionHandling
+        self.untaggedVideoColor = untaggedVideoColor
         self.preferDualLayerDolbyVision = preferDualLayerDolbyVision
         self.dualLayerRoute = dualLayerRoute
         self.foldsDolbyVisionFEL = foldsDolbyVisionFEL

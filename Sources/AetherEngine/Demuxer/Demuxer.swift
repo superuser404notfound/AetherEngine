@@ -98,6 +98,16 @@ struct DemuxerOpenProfile: Sendable {
     /// everywhere else.
     var liveReopenURL: (@Sendable (URL) -> URL?)? = nil
 
+    /// `LoadOptions.untaggedVideoColor` (AE#1103). In the profile so the session's probe, its own
+    /// open, every reopen and rebuild, and `probe(url:options:)` all read the same stream.
+    var untaggedVideoColor: UntaggedVideoColor = .standard
+
+    func withUntaggedVideoColor(_ assumption: UntaggedVideoColor) -> DemuxerOpenProfile {
+        var copy = self
+        copy.untaggedVideoColor = assumption
+        return copy
+    }
+
     func withLiveReopenURL(_ provider: (@Sendable (URL) -> URL?)?) -> DemuxerOpenProfile {
         var copy = self
         copy.liveReopenURL = provider
@@ -819,6 +829,7 @@ public final class Demuxer: @unchecked Sendable {
         accessLock.unlock()
         reportOpenStage(.streamsProbed)
         promoteAlternativeTransferHLG()
+        applyUntaggedVideoColor()
     }
 
     /// Open a custom `IOReader` source. `formatHint` disambiguates probing when
@@ -1197,6 +1208,7 @@ public final class Demuxer: @unchecked Sendable {
         // find_stream_info is where the trailing-index ping-pong lives, not avformat_open_input.
         avioProvider?.markOpenPhaseFinished()
         promoteAlternativeTransferHLG()
+        applyUntaggedVideoColor()
     }
 
     /// AE#585: bracket the host's bounded index pass (the cue prewarm and the cursor reset that
@@ -1919,6 +1931,58 @@ public final class Demuxer: @unchecked Sendable {
             + "trc=\(declaredName); the stream is HLG (videoPackets=\(videoPackets))",
             category: .demux
         )
+    }
+
+    /// AE#1103: give a stream with no colour description the one the host named. Written into
+    /// `codecpar`, like the HLG promotion above and for the same reason: the route, the display
+    /// criteria, the muxer's `colr`, the decoders' frame backfill and the probe all read it from there.
+    /// After that promotion, so an HLG the SEI proved is a declared transfer and is left alone.
+    private func applyUntaggedVideoColor() {
+        let assumption = openProfile.untaggedVideoColor
+        guard assumption != .standard, !openProfile.skipStreamInfo else { return }
+        let index = videoStreamIndex
+        typealias Outcome = (applied: ColorDescription?, declared: ColorDescription, depth: Int, dolbyVision: Bool)
+        guard let outcome = withStream(at: index, { stream -> Outcome? in
+            guard stream.pointee.discard != AVDISCARD_ALL, let par = stream.pointee.codecpar else { return nil }
+            let declared = ColorDescription(codecpar: par)
+            let depth = ColorDescription.bitDepth(
+                pixelFormat: par.pointee.format, bitsPerRawSample: par.pointee.bits_per_raw_sample)
+            let dolbyVision = (0..<Int(par.pointee.nb_coded_side_data)).contains {
+                par.pointee.coded_side_data?[$0].type == AV_PKT_DATA_DOVI_CONF
+            }
+            let applied = ColorDescription.assumed(
+                assumption, for: declared, bitDepth: depth, isDolbyVision: dolbyVision)
+            if let applied {
+                par.pointee.color_primaries = applied.primaries
+                par.pointee.color_trc = applied.transfer
+                par.pointee.color_space = applied.matrix
+                par.pointee.color_range = applied.range
+            }
+            return (applied, declared, depth, dolbyVision)
+        }) ?? nil else { return }
+        let name = assumption == .hdr10 ? "hdr10" : "hlg"
+        if outcome.applied != nil {
+            EngineLog.emit(
+                "[Demuxer] AE#1103 stream=\(index): untagged \(outcome.depth)-bit video shown as \(name) "
+                + "(untaggedVideoColor)", category: .demux)
+        } else {
+            let declared = outcome.declared
+            let reason: String
+            if outcome.dolbyVision {
+                reason = "the stream is Dolby Vision"
+            } else if declared.primaries != AVCOL_PRI_UNSPECIFIED || declared.transfer != AVCOL_TRC_UNSPECIFIED
+                        || declared.matrix != AVCOL_SPC_UNSPECIFIED {
+                let label: (UnsafePointer<CChar>?, Int32) -> String = { $0.map { String(cString: $0) } ?? "\($1)" }
+                reason = "the stream declares primaries=\(label(av_color_primaries_name(declared.primaries), Int32(declared.primaries.rawValue))) "
+                    + "trc=\(label(av_color_transfer_name(declared.transfer), Int32(declared.transfer.rawValue))) "
+                    + "matrix=\(label(av_color_space_name(declared.matrix), Int32(declared.matrix.rawValue)))"
+            } else {
+                reason = "the stream is \(outcome.depth)-bit"
+            }
+            EngineLog.emit(
+                "[Demuxer] AE#1103 stream=\(index): untaggedVideoColor=\(name) not applied, \(reason)",
+                category: .demux)
+        }
     }
 
     /// Run a bounded `avformat_find_stream_info` on an already-open context (#87). Used by the subtitle

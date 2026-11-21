@@ -1277,6 +1277,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         dvrWindowSeconds: Double? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
         sourceOpenPolicy: SourceOpenPolicy = .init(),
+        untaggedVideoColor: UntaggedVideoColor = .standard,
         diagnosticContext: SourceNetworkDiagnostics.Context? = nil,
         liveStartupGraceSeconds: TimeInterval? = nil,
         liveStartupSingleSegmentMinimumSeconds: TimeInterval? = nil,
@@ -1323,6 +1324,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             .withHeldSourceConnection(heldSourceConnection)
             .skippingAttachments()
             .withSourceOpenPolicy(sourceOpenPolicy)
+            .withUntaggedVideoColor(untaggedVideoColor)
             .withDiagnosticContext(diagnosticContext)
         self.dvModeAvailable = dvModeAvailable
         self.displaySupportsHDR = displaySupportsHDR
@@ -1587,6 +1589,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var restartReopenProfile: DemuxerOpenProfile {
         DemuxerOpenProfile.restartReopen
             .withSourceOpenPolicy(openProfile.sourceOpenPolicy)
+            .withUntaggedVideoColor(openProfile.untaggedVideoColor)
             .withDiagnosticContext(openProfile.diagnosticContext)
             .withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDurationSeconds)
             .withHeldSourceConnection(heldSourceConnection)

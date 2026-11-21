@@ -409,8 +409,11 @@ An explicit decode-path choice and disabled escalation are honored; the load the
 | HEVC Main10 (HLG) | BT.2020 / HLG |
 | HEVC / H.264 with a BT.2020 SDR VUI and an alternative-transfer SEI naming HLG | BT.2020 / HLG (AE#839) |
 | AV1 HDR | BT.2020 / PQ |
+| 10-bit stream with no colour description, `untaggedVideoColor = .hdr10` / `.hlg` | BT.2020 / PQ or BT.2020 / HLG (AE#1103). Without the option it is SDR, BT.709 |
 
 Broadcast HLG (BBC iPlayer, UK DVB-T2 UHD) names HLG only in the `alternative_transfer_characteristics` SEI. Its VUI keeps a backward-compatible transfer (BT.709, BT.2020 10 or 12 bit, or unspecified) over BT.2020 primaries, so an SDR set still shows a picture. The demuxer reads the first video packets (at most 8) for that SEI. When it names HLG, the stream is marked HLG for every later reader: format detection, display criteria, `VIDEO-RANGE`, the muxer's `colr` and `probe(url:)` (AE#839).
+
+A stream with no colour description at all cannot be told from SDR, so it plays as BT.709 (AE#654). A host that knows such a stream is HDR sets `LoadOptions.untaggedVideoColor` (AE#1103). The demuxer then marks the stream the same way as the HLG case above, so every later reader agrees. It only touches a 10-bit stream that declares none of primaries, transfer and matrix and is not Dolby Vision. Details: [api › `untaggedVideoColor`](api.md#untaggedvideocolor).
 
 By default AetherEngine does not tone-map (convert HDR to SDR, or to a dimmer display) on the host. It tells the system "this is BT.2020 PQ" (or DV, or HLG) through the HLS-fMP4 sample description. AVPlayer and the system compositor then map HDR to SDR as the connected display needs. tvOS / iOS pick the right path.
 

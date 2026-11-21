@@ -15,7 +15,7 @@ extension AetherEngine {
     ///
     /// - Parameters:
     ///   - url: Media source (`file://`, `http://`, or `https://`).
-    ///   - options: Read for `httpHeaders` and `skipsContainerAttachments`; other flags ignored (no playback session).
+    ///   - options: Read for `httpHeaders`, `skipsContainerAttachments` and `untaggedVideoColor`; other flags ignored (no playback session).
     ///   - limits: Optional shared input, packet and monotonic time limits.
     ///   - cancellation: Optional one-shot token, callable from another thread or a task cancellation handler.
     /// - Throws: Open errors, `ProbeError` for a controlled stop, or `CancellationError`.
@@ -325,6 +325,7 @@ extension AetherEngine {
     /// budget sized for a header.
     private nonisolated static func probeOpenProfile(limits: ProbeLimits?, options: LoadOptions) -> DemuxerOpenProfile {
         let base = DemuxerOpenProfile.playback.skippingAttachments(options.skipsContainerAttachments)
+            .withUntaggedVideoColor(options.untaggedVideoColor)
         guard let limits else { return base }
         var profile = base
         // FFmpeg has a minimum probe size. The input seam still enforces smaller caller limits.

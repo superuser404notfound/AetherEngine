@@ -117,6 +117,7 @@ These flags mean the same on every subcommand that takes them. The per-command t
 | `--no-dv` | `serve`, `validate`, `segverify` | Forces the SDR / HDR10 route, see [Dolby Vision routes](#dolby-vision-routes). | off |
 | `--force-dv` | `serve`, `validate`, `segverify` | `LoadOptions.forceDolbyVisionOnNonDVDisplay`: serves Profile 8.1 as Profile 5 (AE#455). Only with `--no-dv`. | off |
 | `--dv-base-layer` | `serve`, `validate`, `segverify`, `play` | `LoadOptions.dolbyVisionHandling = .baseLayerOnly`. | off |
+| `--untagged-color hdr10\|hlg` | `probe`, `serve` | `LoadOptions.untaggedVideoColor` (AE#1103): a 10-bit stream with no colour description is shown as HDR10 or HLG. A stream that declares anything keeps it. | off |
 | `--audio-index <n>` | `serve`, `customio` | Names the source audio stream at load. | engine choice |
 | `--standard-join` | `play`, `live` | `LoadOptions.liveJoinProfile = .standard`, see [Live join and cushion](#live-join-and-cushion). | `.fastZap` |
 | `--fast-zap` | `play`, `live` | Accepted and ignored, kept for older scripts. | |
@@ -247,13 +248,14 @@ Opens the demuxer, prints what it finds, then exits. No HLS server is started. I
 - the subtitle track list with language, `(default)` and title,
 - the parsed container metadata (`MediaMetadata`): title, artist, album, and the size of embedded cover art (`artwork: N bytes`).
 
-**Usage:** `aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-dv-el] [--detect-atmos] <url>`
+**Usage:** `aetherctl probe [--untagged-color hdr10|hlg] [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-dv-el] [--detect-atmos] <url>`
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `--detect-hdr10plus` | Adds the HDR10+ detail pass of `AetherEngine.probe(url:detecting:)`. | off |
 | `--detect-atmos` | Adds the Atmos detail pass: E-AC-3 JOC, and for TrueHD the major sync, printed as `truehd-atmos=atmos|noAtmos|unsettled` (#1035). | off |
 | `--detect-hdr-vivid` | Adds the HDR Vivid (CUVA) check to the same packet pass. Prints `HDR Vivid: CUVA metadata seen`. | off |
+| `--untagged-color hdr10\|hlg` | Probes with `LoadOptions.untaggedVideoColor` (AE#1103). The `colour:` line and `format:` then read what the session would play, and a `[Demuxer] AE#1103` line says whether it applied and why not. | off |
 | `--detect-dv-el` | Adds the Dolby Vision enhancement-layer check to the same packet pass (#1030). Prints `DV EL: FEL` or `DV EL: MEL`; `not Profile 7` when the container declares no Profile 7, `no RPU seen` when none turned up in the budget. | off |
 
 ```bash
@@ -938,6 +940,7 @@ The mid-session switch is the harder case. At load the offset is just a number h
 | `preferred-audio` | comma list of languages | preferred audio languages |
 | `decode-path` | a `DecodePath` raw value, for example `software` | `preferredDecodePath` |
 | `dolby-vision` | a `DolbyVisionHandling` raw value, for example `baseLayerOnly` | `dolbyVisionHandling` |
+| `untagged-color` | `standard\|hdr10\|hlg` | `untaggedVideoColor` (AE#1103), the per-title "Force HDR" switch a host offers |
 | `prefer-dual-layer-dv` (alias `fel-mode`) | `true\|false` | `LoadOptions.preferDualLayerDolbyVision`, so a running session can move on or off the Profile 7 FEL route |
 | `is-live` | `true\|false` | Drives the refusal: a field that names the session must be observably refused, not observably ignored. |
 | `autoplay` | `true\|false` | Drives the third answer: a field the session owns, neither refused nor applied. |

@@ -99,6 +99,7 @@ enum LoadOptionChange {
     case preferredAudioLanguages([String])
     case decodePath(DecodePath)
     case dolbyVisionHandling(DolbyVisionHandling)
+    case untaggedVideoColor(UntaggedVideoColor)
     case preferDualLayerDolbyVision(Bool)
     case isLive(Bool)
     case autoplay(Bool)
@@ -110,6 +111,7 @@ enum LoadOptionChange {
         case .preferredAudioLanguages(let langs): return "preferredAudioLanguages=\(langs.joined(separator: ","))"
         case .decodePath(let path): return "preferredDecodePath=\(path.rawValue)"
         case .dolbyVisionHandling(let handling): return "dolbyVisionHandling=\(handling.rawValue)"
+        case .untaggedVideoColor(let color): return "untaggedVideoColor=\(color)"
         case .preferDualLayerDolbyVision(let flag): return "preferDualLayerDolbyVision=\(flag)"
         case .isLive(let value): return "isLive=\(value)"
         case .autoplay(let value): return "autoplay=\(value)"
@@ -123,6 +125,7 @@ enum LoadOptionChange {
         case .preferredAudioLanguages(let langs): options.preferredAudioLanguages = langs
         case .decodePath(let path): options.preferredDecodePath = path
         case .dolbyVisionHandling(let handling): options.dolbyVisionHandling = handling
+        case .untaggedVideoColor(let color): options.untaggedVideoColor = color
         case .preferDualLayerDolbyVision(let flag): options.preferDualLayerDolbyVision = flag
         case .isLive(let value): options.isLive = value
         case .autoplay(let value): options.autoplay = value
