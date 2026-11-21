@@ -159,6 +159,68 @@ struct BedRegressionTests {
         #expect(total / bedEnergy < Float(BedRegression.energyBounds.upperBound) * 1.05)
     }
 
+    /// Element gains for `positions`, as `ObjectAudioPlacement` hands them over.
+    static func snapshot(layout: SpatialSpeakerLayout, positions: [SIMD3<Float>]) -> ObjectAudioGainSnapshot {
+        var snapshot = ObjectAudioGainSnapshot()
+        snapshot.resize(elements: positions.count, channels: layout.channelCount)
+        var gains: [Float] = []
+        for (k, p) in positions.enumerated() {
+            AllocentricPanner(layout: layout).pointGains(p, into: &gains)
+            for c in 0..<layout.channelCount { snapshot.layoutGains[k * layout.channelCount + c] = gains[c] }
+            snapshot.positions[k] = p
+            snapshot.gains[k] = 1
+        }
+        return snapshot
+    }
+
+    @Test("an element count that changes mid-stream regroups the statistics like a fresh start")
+    func elementCountChange() {
+        // AE#1106 moved the statistics into per-band blocks of (bed + elements) rows; a resize
+        // rebuilds them. Once the old statistics have decayed, the output must match a regression
+        // that had all elements from the start.
+        let layout = SpatialSpeakerLayout.l916, frames = 96_000, switchAt = 24_000
+        let positions: [SIMD3<Float>] = [SpatialSpeaker.topFrontLeft.position, SpatialSpeaker.topRearRight.position,
+                                         SIMD3(0, 0.5, 0), SIMD3(1, 1, 0), SpatialSpeaker.topFrontRight.position,
+                                         SIMD3(0.5, 0, 0)]
+        let elements = positions.indices.map { Self.noise(frames, seed: UInt64(40 + $0)) }
+        let bed = Self.fold(elements, positions: positions, bedRoles: Self.bed71, frames: frames)
+        func render(startingWith first: Int) -> [[Float]] {
+            let regression = BedRegression(layout: layout, bedRoles: Self.bed71)
+            let out = (0..<layout.channelCount).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: frames) }
+            defer { out.forEach { $0.deallocate() } }
+            var written = 0, offset = 0, count = 0
+            while offset < frames {
+                let wanted = offset < switchAt ? first : positions.count
+                if wanted != count {
+                    count = wanted
+                    regression.setGains(Self.snapshot(layout: layout, positions: Array(positions.prefix(count))))
+                }
+                let n = min(40, frames - offset)
+                written += regression.process(
+                    elements: elements.prefix(count).map { $0.withUnsafeBufferPointer { $0.baseAddress! + offset } },
+                    bed: bed.map { $0.withUnsafeBufferPointer { $0.baseAddress! + offset } }, frameCount: n,
+                    output: out.map { $0 + written })
+                offset += n
+            }
+            return out.map { Array(UnsafeBufferPointer(start: $0, count: written)) }
+        }
+        let resized = render(startingWith: 4), fresh = render(startingWith: positions.count)
+        let tail = (frames - 24_000)..<(frames - BedRegression.latency)
+        var signal: Float = 0, difference: Float = 0
+        for c in 0..<layout.channelCount {
+            for t in tail {
+                signal += fresh[c][t] * fresh[c][t]
+                difference += (fresh[c][t] - resized[c][t]) * (fresh[c][t] - resized[c][t])
+            }
+        }
+        #expect(signal > 0)
+        #expect(10 * log10(signal / max(difference, .leastNonzeroMagnitude)) > 80)
+        // Before the switch the four-element run differs: the resize really happened.
+        var early: Float = 0
+        for c in 0..<layout.channelCount { for t in 12_000..<20_000 { early += abs(fresh[c][t] - resized[c][t]) } }
+        #expect(early > 0)
+    }
+
     // MARK: - Folded heights (DTS:X)
 
     static let dtsxHeights: [SpatialSpeaker] = [.topFrontLeft, .topFrontRight, .topRearLeft, .topRearRight]

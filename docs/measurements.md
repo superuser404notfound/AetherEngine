@@ -607,7 +607,7 @@ The band is the outer 8 output samples on every side (4 in chroma), rewritten as
 
 ### Bed regression in a Debug build (AE#1106)
 
-Measured on an M1 on 2026-11-21. The answer first: **with per-bin Swift loops the bed regression ran at 0.2x real time in an unoptimised build, so a host's Debug build stalled TrueHD Atmos on every segment. Through Accelerate it runs at 11x there, and twice as fast optimised.**
+Measured on an M1 on 2026-11-21. **With per-bin Swift loops the bed regression ran at 0.2x real time in an unoptimised build, so a host's Debug build stalled TrueHD Atmos on every segment. Through Accelerate it runs at 11x there, and twice as fast optimised.** An Apple TV has not been measured since the change.
 
 The benchmark feeds `BedRegression` a 7.1 bed and 16 placed elements (noise) into 9.1.6, in 40-frame blocks as TrueHD delivers them. CPU per second of audio:
 

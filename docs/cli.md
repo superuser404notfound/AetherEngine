@@ -177,7 +177,7 @@ The [Works on](#shared-flags) column lists where it is accepted.
 - A DTS-HD MA track whose frames do not decode as DTS:X logs `DTS-HD MA track is not DTS:X this engine renders (…); keeping the channel bridge` instead.
 - On `play` the 1 Hz line adds `obj=<active>/<declared> up=<overhead> bed=<layout>`, and `hch=<n>` for height channels.
 
-A debug build plays the bed in real time too. Before AE#1106 the regression ran at about a fifth of real time there, and `play` ended in `VERDICT: clock did not advance`. Judge CPU from a release build (`swift build -c release`): in a debug build the rest of the pipeline still costs more.
+On an M1 a debug build plays the bed in real time too. Before AE#1106 the regression ran at about a fifth of real time there, and `play` ended in `VERDICT: clock did not advance`. Judge CPU from a release build (`swift build -c release`), because in a debug build the rest of the pipeline still costs more. A debug build on an Apple TV has not been measured since the change.
 
 With `--bed-format lpcm` it sets `.lpcm(layout)` instead, which serves the bed as 24-bit PCM (`CODECS="…,ipcm"`, log `delivered as ipcm (lossless 24-bit PCM)`). With `--bed-format auto` it sets `.render(layout)`, the form a host should use: PCM, or APAC when the route plays over AirPlay.
 

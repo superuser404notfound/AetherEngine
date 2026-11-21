@@ -114,8 +114,8 @@ final class BedRegression {
     private var spectraD: SplitBuffer<Double>
     private var banded: SplitBuffer<Double>
     private let bedConj: SplitBuffer<Double>
-    private var bandedIndex: UnsafeMutablePointer<Double>
-    private let bedConjIndex: UnsafeMutablePointer<Double>
+    private var bandedIndex: [Double] = []
+    private let bedConjIndex: [Double]
     private var product: SplitBuffer<Double>
     private let bandEdges: [Int]
     /// Per bin, its place between band centres as `vDSP_vlint` reads it: lower band + fraction.
@@ -125,9 +125,9 @@ final class BedRegression {
     private let weights: SplitBuffer<Float>
     private let interpolated: SplitBuffer<Float>
     /// Layout gains of the placed elements (outputs × elementCount, LFE row zero), plus folds.
-    private var elementGains: UnsafeMutablePointer<Double>
+    private var elementGains: [Double] = []
     /// `fallback` in double with the LFE row zero: the D of the fold mode.
-    private let bedFallback: UnsafeMutablePointer<Double>
+    private let bedFallback: [Double]
     private let cholesky: SplitBuffer<Double>, inverseL: SplitBuffer<Double>, inverseLH: SplitBuffer<Double>
     private let inverseM: SplitBuffer<Double>
     private var regression: SplitBuffer<Double>
@@ -221,17 +221,17 @@ final class BedRegression {
         spectraD = SplitBuffer(nb * bins)
         banded = SplitBuffer(nb * bins)
         bedConj = SplitBuffer(bins * nb)
-        bandedIndex = .allocate(capacity: 1)
-        bedConjIndex = .allocate(capacity: max(1, bins * nb))
-        for k in 0..<bins { for j in 0..<nb { bedConjIndex[k * nb + j] = Double(j * bins + k) } }
+        var conjIndex = [Double](repeating: 0, count: bins * nb)
+        for k in 0..<bins { for j in 0..<nb { conjIndex[k * nb + j] = Double(j * bins + k) } }
+        bedConjIndex = conjIndex
         product = SplitBuffer(bands * nb * nb)
         weights = SplitBuffer(outputs * nb * (bands + 1))
         interpolated = SplitBuffer(bins)
-        elementGains = .allocate(capacity: 1)
-        bedFallback = .allocate(capacity: max(1, outputs * nb))
-        for o in 0..<outputs {
-            for j in 0..<nb { bedFallback[o * nb + j] = o == lfeOutput ? 0 : Double(fallback[o * nb + j]) }
+        var bedFallback = [Double](repeating: 0, count: outputs * nb)
+        for o in 0..<outputs where o != layout.lfeIndex {
+            for j in 0..<nb { bedFallback[o * nb + j] = Double(fallback[o * nb + j]) }
         }
+        self.bedFallback = bedFallback
         cholesky = SplitBuffer(nb * nb); inverseL = SplitBuffer(nb * nb); inverseLH = SplitBuffer(nb * nb)
         inverseM = SplitBuffer(nb * nb)
         regression = SplitBuffer(0)
@@ -244,13 +244,6 @@ final class BedRegression {
     deinit {
         vDSP_DFT_DestroySetup(forward)
         vDSP_DFT_DestroySetup(inverse)
-        bandedIndex.deallocate()
-        bedConjIndex.deallocate()
-        elementGains.deallocate()
-        bedFallback.deallocate()
-        for buffer in [stat, spectraD, banded, bedConj, product, cholesky, inverseL, inverseLH, inverseM,
-                       regression, mix, mixCov] { buffer.deallocate() }
-        for buffer in [spectra, weights, interpolated] { buffer.deallocate() }
     }
 
     /// Frames taken in that have not come out yet.
@@ -353,22 +346,20 @@ final class BedRegression {
         for b in 0..<bands {
             resized.copy(from: stat, at: b * oldRows * nb, to: b * rows * nb, count: nb * nb)
         }
-        stat.deallocate(); stat = resized
-        for buffer in [spectraD, banded, product, regression] { buffer.deallocate() }
-        spectra.deallocate(); spectra = SplitBuffer(rows * bins)
+        stat = resized
+        spectra = SplitBuffer(rows * bins)
         spectraD = SplitBuffer(rows * bins)
         banded = SplitBuffer(rows * bins)
         product = SplitBuffer(bands * rows * nb)
         regression = SplitBuffer(count * nb)
-        elementGains.deallocate(); elementGains = .allocate(capacity: max(1, outputs * count))
+        elementGains = [Double](repeating: 0, count: outputs * count)
         rebuildBandedIndex()
     }
 
     /// Where each entry of the per-band regrouping comes from in the spectra.
     private func rebuildBandedIndex() {
         let rows = bedInputs.count + elementCount
-        bandedIndex.deallocate()
-        bandedIndex = .allocate(capacity: max(1, rows * bins))
+        bandedIndex = [Double](repeating: 0, count: rows * bins)
         for b in 0..<bands {
             let e0 = bandEdges[b], m = bandEdges[b + 1] - e0
             for r in 0..<rows {
@@ -711,9 +702,9 @@ final class BedRegression {
     }
 }
 
-/// A split-complex buffer that lives as long as the regression: raw memory, so the hop's
-/// Accelerate calls take it without an `Array` access in between.
-final class SplitBuffer<T: FloatingPoint> {
+/// A split-complex buffer in raw memory, so the hop's Accelerate calls take it without an `Array`
+/// access in between.
+private final class SplitBuffer<T: FloatingPoint> {
     let re: UnsafeMutablePointer<T>
     let im: UnsafeMutablePointer<T>
     let count: Int
@@ -724,7 +715,7 @@ final class SplitBuffer<T: FloatingPoint> {
         im = .allocate(capacity: max(1, count)); im.initialize(repeating: 0, count: max(1, count))
     }
 
-    func deallocate() { re.deallocate(); im.deallocate() }
+    deinit { re.deallocate(); im.deallocate() }
 
     func clear() {
         re.update(repeating: 0, count: max(1, count))
@@ -737,11 +728,11 @@ final class SplitBuffer<T: FloatingPoint> {
     }
 }
 
-extension SplitBuffer where T == Float {
+private extension SplitBuffer where T == Float {
     func split(at offset: Int) -> DSPSplitComplex { DSPSplitComplex(realp: re + offset, imagp: im + offset) }
 }
 
-extension SplitBuffer where T == Double {
+private extension SplitBuffer where T == Double {
     func split(at offset: Int) -> DSPDoubleSplitComplex { DSPDoubleSplitComplex(realp: re + offset, imagp: im + offset) }
 }
 #endif
