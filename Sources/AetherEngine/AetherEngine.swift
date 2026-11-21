@@ -5041,6 +5041,9 @@ public final class AetherEngine: ObservableObject {
         // the branches that return before it); it must not persist into loadedOptions where a later
         // host-initiated reload would resurrect a stale session snapshot.
         loadedOptions.subtitleSessionCarryover = nil
+        // #853: same reason. A later load built from loadedOptions (a title switch, the ingest reroute)
+        // plays another stream and decides inverse telecine for itself.
+        loadedOptions.inverseTelecineCarryover = nil
         adoptSessionLiveness(from: options)
         state = .loading
         // AE#464 round 2: park the position THIS load is rebuilding toward before the clock that held

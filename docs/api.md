@@ -437,6 +437,12 @@ The result is `@discardableResult`, so a host that only needs the refusals can i
 - It costs no teardown and comes back as `sessionOwned` (round 4).
 - The one rebuild that DOES apply the flag is the resume after a background teardown (#357). It has no session transport left to keep, so there the field is named as applied.
 
+**`inverseTelecine` belongs to the load, not to the session** (#853). The load decided it together with the display rate it asked for, and every rebuild keeps both.
+
+- A correction of it comes back in `sessionOwned` and is not installed into the session. It takes effect when a later `load()` passes it.
+- With a session up, it costs no teardown (`rebuilt` false).
+- After a background teardown (#357) the call is the restore itself, so it still rebuilds (`rebuilt` true) and keeps the session's old decision.
+
 #### Refusals
 
 Both refusals are thrown BEFORE any teardown, so a refused correction leaves the session playing. Both are all-or-nothing: if one field is refused, none of the correction is installed.

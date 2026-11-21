@@ -2685,8 +2685,11 @@ extension AetherEngine {
         let preservedRequiresDeinterlaceWarmup =
             restoredDeinterlaceWarmupDecision ?? lastRequiresDeinterlaceWarmup
         // #853: the session's inverse telecine decision. This rebuild keeps the display mode, so it keeps
-        // the decision that chose it too; it never samples again.
-        let preservedInverseTelecine = restoredInverseTelecine ?? lastInverseTelecine
+        // the decision that chose it too; it never samples again. A different disc title is another
+        // stream (a video-shot extra after a film title would lose one frame in five), so it falls back
+        // to the deinterlacer.
+        let preservedInverseTelecine = restoredInverseTelecine
+            ?? (titleToReopen == outgoingDiscTitleID ? lastInverseTelecine : false)
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         // resetDisplayCriteria: false: video format is unchanged; resetting triggers a full waitForSwitch Stage 2 timeout (5 s at the 2026-05-26 device test, ~2 s cap since #117; Bose SLIII A2DP + 4K HDR10 PQ: each switch added ~12 s black-screen). On the same route a panel SDR drop during the reset window failed the PQ variant with AVFoundationErrorDomain -11868 / CoreMediaErrorDomain -17223.

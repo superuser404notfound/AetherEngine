@@ -180,9 +180,10 @@ extension AetherEngine {
         // naming it in the applied line was the last way left for a correction to read as done when
         // it was not. The transport is the session's own unless a background teardown left it none
         // to read, which is the condition `reloadAtCurrentPosition` makes the same call on.
+        let resumesTornDownSession = backgroundTeardownSelection != nil
         let (applied, sessionOwned, loadDecided) = SessionOptionCorrection.partitionChanges(
-            changed, sessionOwnsTransport: backgroundTeardownSelection == nil)
-        if !applied.isEmpty || (sessionOwned.isEmpty && loadDecided.isEmpty) {
+            changed, sessionOwnsTransport: !resumesTornDownSession)
+        if !applied.isEmpty || (sessionOwned.isEmpty && (loadDecided.isEmpty || resumesTornDownSession)) {
             EngineLog.emit(
                 applied.isEmpty
                     ? "[AetherEngine] #460: reload applying no option change (session already on these options)"
@@ -221,7 +222,9 @@ extension AetherEngine {
         // (#357), and there the field is `applied` rather than session-owned, so it never arrives
         // here. `changed.isEmpty` is NOT this case and keeps rebuilding: a correction that changed
         // nothing is a documented way to ask for the rebuild itself.
-        if applied.isEmpty, !sessionOwned.isEmpty || !loadDecided.isEmpty {
+        // #853: a load-decided field skips the rebuild only while a session is up. After a background
+        // teardown this call IS the restore, and returning here left the host with no picture.
+        if applied.isEmpty, !sessionOwned.isEmpty || (!loadDecided.isEmpty && !resumesTornDownSession) {
             EngineLog.emit(
                 "[AetherEngine] #460: correction complete without a rebuild, every field it changed "
                 + "is the session's own (AE#464 round 4)",

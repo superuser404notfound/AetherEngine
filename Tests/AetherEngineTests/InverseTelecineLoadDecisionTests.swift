@@ -71,6 +71,48 @@ struct InverseTelecineLoadDecisionTests {
         #expect(engine.lastInverseTelecine)
     }
 
+    @Test("the carryover is consumed by the rebuild that used it, so a later load decides afresh")
+    func carryoverDoesNotOutliveItsLoad() async throws {
+        let (engine, file) = try await load(TelecineCadenceFixtures.telecinedFilm)
+        defer { engine.stop(); try? FileManager.default.removeItem(at: file) }
+        try await engine.reloadAtCurrentPosition()
+        #expect(engine.lastInverseTelecine)
+        #expect(engine.loadedOptions.inverseTelecineCarryover == nil)
+    }
+
+    @Test("a custom-source title switch drops the outgoing title's decision")
+    func customTitleSwitchDecidesAfresh() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var options = LoadOptions()
+        options.autoplay = false
+        _ = try await engine.load(source: .custom(DataIOReader(data: TelecineCadenceFixtures.telecinedFilm),
+                                                  formatHint: "matroska"), options: options)
+        #expect(engine.lastInverseTelecine)
+        // The title identity is all a disc adds to this decision, as in Issue232InterlaceProbeTests.
+        engine.activeDiscTitleID = 11
+        let url = try #require(engine.loadedURL)
+        let error = await engine.reloadWithAudioOverride(
+            url: url, audioStreamIndex: nil, expectedGeneration: engine.loadGeneration,
+            discTitleIDOverride: 12)
+        #expect(error == nil)
+        #expect(!engine.lastInverseTelecine, "another title is another stream")
+    }
+
+    @Test("a restore after a background teardown rebuilds even when it only corrects inverseTelecine")
+    func backgroundRestoreWithLoadDecidedFieldRebuilds() async throws {
+        let (engine, file) = try await load(TelecineCadenceFixtures.telecinedFilm)
+        defer { engine.stop(); try? FileManager.default.removeItem(at: file) }
+        #expect(engine.lastInverseTelecine)
+        engine.releaseVideoPipelineForBackground()
+        #expect(engine.backgroundTeardownSelection != nil)
+        let outcome = try await engine.reloadAtCurrentPosition { $0.inverseTelecine = .off }
+        #expect(outcome.rebuilt, "the restore is this call; returning early leaves no picture")
+        #expect(outcome.sessionOwned == ["inverseTelecine"])
+        #expect(engine.playbackBackend == .software)
+        #expect(engine.lastInverseTelecine, "the parked decision comes back with the session")
+    }
+
     @Test("interlaced video keeps the deinterlacer and its rate")
     func videoKeepsTheDeinterlacer() async throws {
         let (engine, file) = try await load(TelecineCadenceFixtures.interlacedVideo)
