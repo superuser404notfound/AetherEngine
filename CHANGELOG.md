@@ -58,6 +58,14 @@ the public-API contract.
 
 ### Fixed
 
+- **AC-3 and E-AC-3 are no longer quieter on the software host.** FFmpeg's Dolby decoders apply the
+  stream's dynamic range compression by default, and Apple's decoder on the native path does not. So a
+  session on the software host, for example one that moved there for upscaling, played compressed and about
+  2 dB quieter. An E-AC-3 5.1 film read -18.6 LUFS against Apple's -16.8. Every decoder whose output is
+  heard (software host, audio bridge, audio tap) now opens AC-3 and E-AC-3 with `drc_scale` 0, which reads
+  -16.6 LUFS. Through the engine's own tap, the first 90 s of that film went from 20.8 to 24.8 LU of
+  loudness range at the same integrated level.
+
 - **The TrueHD Atmos and DTS:X bed regression runs in real time in a host's Debug build (AE#1106).** The bed regression computed its band
   statistics, its weights and its mix in per-bin Swift loops. A host's Debug build compiles the package without
   optimisation, and there the regression ran at 0.2x real time, so a TrueHD Atmos session stalled on every

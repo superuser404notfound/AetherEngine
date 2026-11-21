@@ -314,7 +314,7 @@ final class AudioBridge: @unchecked Sendable {
         // probe -> garbled audio. The full path is correct; the only genuine failures are XLL frames that
         // residual-code channels without a usable core ("Residual encoded channels are present without core",
         // EINVAL -22), which feed() skips per-packet instead of failing the whole feed (#64).
-        let openRet = avcodec_open2(dec, srcCodec, nil)
+        let openRet = AudioDecoderOptions.open(dec, srcCodec)
         guard openRet >= 0 else {
             cleanup()
             throw AudioBridgeError.decoderOpenFailed(code: openRet)

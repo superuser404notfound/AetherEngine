@@ -128,7 +128,7 @@ final class AudioDecoder: @unchecked Sendable {
             throw AudioDecoderError.parameterCopyFailed
         }
 
-        guard avcodec_open2(ctx, codec, nil) >= 0 else {
+        guard AudioDecoderOptions.open(ctx, codec) >= 0 else {
             throw AudioDecoderError.openFailed
         }
 

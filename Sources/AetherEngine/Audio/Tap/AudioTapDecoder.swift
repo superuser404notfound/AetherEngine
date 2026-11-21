@@ -68,7 +68,7 @@ final class AudioTapDecoder: @unchecked Sendable {
         guard let ctx = avcodec_alloc_context3(codec) else { throw TapDecoderError.allocFailed }
         codecContext = ctx
         guard avcodec_parameters_to_context(ctx, codecpar) >= 0,
-              avcodec_open2(ctx, codec, nil) >= 0 else {
+              AudioDecoderOptions.open(ctx, codec) >= 0 else {
             avcodec_free_context(&codecContext)
             throw TapDecoderError.openFailed
         }

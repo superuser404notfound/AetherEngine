@@ -104,6 +104,7 @@ Notes:
 | `AudioBridge.swift` | Native path: decode and re-encode per `AudioBridgeMode` (EAC3 5.1 default, or lossless FLAC opt-in) for source codecs that cannot stream-copy into fMP4. |
 | `AudioClockAnchor.swift` | Software path: sample-count PTS anchor so consecutive buffers line up exactly; re-anchors on >100 ms drift (AVSampleBufferAudioRenderer crackle, #89). |
 | `AudioDecoder.swift` | Software path: libavcodec → PCM → `CMSampleBuffer`, with channel-layout tagging that names the resampler's own order (#401). |
+| `AudioDecoderOptions.swift` | How every audible FFmpeg audio decoder opens: AC-3 and E-AC-3 without the stream's dynamic range compression (`drc_scale` 0), as Apple's decoder plays them. |
 | `AudioOutput.swift` | Software path: `AVSampleBufferAudioRenderer` + synchronizer (master clock). |
 | `AudioPlaybackHost.swift` | Audio-only path: FFmpeg demux and decode into `AVSampleBufferAudioRenderer` for codecs off the whitelist. |
 | `AudioTailPadding.swift` | Native path: writes silence in the delivered codec from where a title's audio ends to where its video ends, into the final segment at end of file, because AVPlayer ends an item when its audio runs out (AE#847). |
