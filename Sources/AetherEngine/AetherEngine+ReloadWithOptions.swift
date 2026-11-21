@@ -230,6 +230,9 @@ extension AetherEngine {
                 + "is the session's own (AE#464 round 4)",
                 category: .engine
             )
+            // #853: a load-decided field is not applied to this session, but the loads the engine makes
+            // from `loadedOptions` later (a title switch, the ingest reroute) must see the correction.
+            if loadDecided.contains("inverseTelecine") { setLoadedInverseTelecine(proposed.inverseTelecine) }
             return SessionOptionCorrectionOutcome(
                 applied: applied, sessionOwned: sessionOwned + loadDecided, rebuilt: false)
         }

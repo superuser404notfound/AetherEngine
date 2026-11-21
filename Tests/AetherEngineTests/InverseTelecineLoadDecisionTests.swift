@@ -80,7 +80,7 @@ struct InverseTelecineLoadDecisionTests {
         #expect(engine.loadedOptions.inverseTelecineCarryover == nil)
     }
 
-    @Test("a custom-source title switch drops the outgoing title's decision")
+    @Test("a custom-source title switch samples the new title instead of inheriting the decision")
     func customTitleSwitchDecidesAfresh() async throws {
         let engine = try AetherEngine()
         defer { engine.stop() }
@@ -96,7 +96,38 @@ struct InverseTelecineLoadDecisionTests {
             url: url, audioStreamIndex: nil, expectedGeneration: engine.loadGeneration,
             discTitleIDOverride: 12)
         #expect(error == nil)
-        #expect(!engine.lastInverseTelecine, "another title is another stream")
+        #expect(engine.lastInverseTelecineVerdict?.isFilm == true,
+                "another title is another stream, sampled: \(String(describing: engine.lastInverseTelecineVerdict))")
+        #expect(engine.lastInverseTelecine)
+
+        // A same-title rebuild keeps the decision without a sample.
+        try await engine.reloadAtCurrentPosition()
+        #expect(engine.lastInverseTelecineVerdict == nil)
+        #expect(engine.lastInverseTelecine)
+    }
+
+    @Test("a correction with a session up costs no rebuild but reaches the loads the engine makes later")
+    func correctionIsKeptForLaterLoads() async throws {
+        let (engine, file) = try await load(TelecineCadenceFixtures.telecinedFilm)
+        defer { engine.stop(); try? FileManager.default.removeItem(at: file) }
+        let outcome = try await engine.reloadAtCurrentPosition { $0.inverseTelecine = .off }
+        #expect(!outcome.rebuilt)
+        #expect(outcome.sessionOwned == ["inverseTelecine"])
+        #expect(engine.lastInverseTelecine, "the running session keeps its decision")
+        #expect(engine.loadedOptions.inverseTelecine == .off)
+    }
+
+    @Test("an audio-only load is never sampled")
+    func audioOnlyIsNotSampled() async throws {
+        let file = try writeFixture(TelecineCadenceFixtures.telecinedFilm)
+        let engine = try AetherEngine()
+        defer { engine.stop(); try? FileManager.default.removeItem(at: file) }
+        var options = LoadOptions()
+        options.autoplay = false
+        options.audioOnly = true
+        _ = try? await engine.load(url: file, options: options)
+        #expect(engine.lastInverseTelecineVerdict == nil)
+        #expect(!engine.lastInverseTelecine)
     }
 
     @Test("a restore after a background teardown rebuilds even when it only corrects inverseTelecine")
@@ -179,6 +210,13 @@ struct InverseTelecineOptionCorrectionTests {
             #expect(!SessionOptionCorrection.loadIdentityFields.contains(field))
             #expect(!SessionOptionCorrection.sessionOwnedFields.contains(field))
         }
+    }
+
+    @Test("the decision needs a graph that can run: a stated rate and the filters")
+    func unbuildableIsRefusedBeforeTheDecision() {
+        #expect(AetherEngine.inverseTelecineUnbuildable(rate: DeinterlaceConfig.SourceFrameRate()) != nil)
+        #expect(AetherEngine.inverseTelecineUnbuildable(
+            rate: DeinterlaceConfig.SourceFrameRate(num: 30000, den: 1001)) == nil)
     }
 
     @Test("inverse telecine is on by default, decided per load")

@@ -119,6 +119,23 @@ struct InverseTelecineChainTests {
         #expect(breaks(5), "a step back")
     }
 
+    @Test("a frame that repeats a field (1.5 frames at 90 kHz, either rounding) is no gap; one missing frame is")
+    func repeatFieldFrameIsNoGap() {
+        let filter = filter()
+        defer { filter.teardown() }
+        _ = run(filter, frames: (0..<10).map { Frames.telecinedFrame($0) }, endOfStream: false)
+        // The check reads both timestamps on the time base it is handed, so asking on 1/90000 measures the
+        // step from the last push (PTS 9) in MPEG ticks: 3003 per frame at 29.97.
+        func breaks(afterTicks ticks: Int64) -> Bool {
+            let frame = Frames.telecinedFrame(0, firstPTS: 9 + ticks)
+            defer { var f: UnsafeMutablePointer<AVFrame>? = frame; av_frame_free(&f) }
+            return filter.breaksInverseTelecineCadence(frame, timeBase: AVRational(num: 1, den: 90000))
+        }
+        #expect(!breaks(afterTicks: 4504))
+        #expect(!breaks(afterTicks: 4505), "rounded up, still the repeat-field duration")
+        #expect(breaks(afterTicks: 6006), "one frame missing")
+    }
+
     @Test("after a gap the decoder's flush and rebuild put the timeline back on the source")
     func gapFlushReanchors() {
         let filter = filter()

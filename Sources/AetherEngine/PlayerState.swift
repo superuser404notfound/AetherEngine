@@ -381,8 +381,10 @@ public enum InverseTelecineMode: String, Sendable, Equatable {
     case auto
     /// Never: interlaced sources are deinterlaced, as before #853.
     case off
-    /// Always, without the sample, on any interlaced software-path source at an NTSC rate
-    /// (29.97 / 30 fps). On true interlaced video it drops one frame in five.
+    /// Always, without the sample, on any interlaced NTSC-rate (29.97 / 30 fps) source of a codec
+    /// that has no native route (MPEG-2, VC-1, MPEG-4 Part 2, not H.264 / HEVC / AV1), so the
+    /// display rate it asks for always meets the graph. On true interlaced video it drops one frame
+    /// in five.
     case force
 }
 

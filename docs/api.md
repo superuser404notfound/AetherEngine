@@ -439,7 +439,7 @@ The result is `@discardableResult`, so a host that only needs the refusals can i
 
 **`inverseTelecine` belongs to the load, not to the session** (#853). The load decided it together with the display rate it asked for, and every rebuild keeps both.
 
-- A correction of it comes back in `sessionOwned` and is not installed into the session. It takes effect when a later `load()` passes it.
+- A correction of it comes back in `sessionOwned` and does not change the running session. The engine keeps it for the loads it makes itself later (a disc title switch), and a host's own `load()` takes what it passes.
 - With a session up, it costs no teardown (`rebuilt` false).
 - After a background teardown (#357) the call is the restore itself, so it still rebuilds (`rebuilt` true) and keeps the session's old decision.
 

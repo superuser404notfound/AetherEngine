@@ -484,8 +484,10 @@ final class DeinterlaceFilter {
     /// #853: `decimate` stamps its output from the graph's first frame plus one tick per frame it
     /// keeps, never from the frames' own timestamps. A source frame that never arrives (a damaged or
     /// cut stream) would then move every later picture against the audio for as long as the graph
-    /// lives. True when `frame` lands more than 1.5 source frame durations after the previous push
-    /// into an inverse telecine graph: the caller flushes the graph and lets this frame build a fresh
+    /// lives. True when `frame` lands more than 1.75 source frame durations after the previous push
+    /// into an inverse telecine graph (one missing frame is 2; a soft-telecine frame that repeats a
+    /// field is 1.5 and rounds either side of it at 90 kHz, so a threshold of 1.5 rebuilt the graph on
+    /// every other such frame): the caller flushes the graph and lets this frame build a fresh
     /// one, which anchors on it. A timestamp going backwards (a seam the decoder did not flush) is
     /// the same discontinuity. A repeated timestamp is not: `decimate` ignores input timestamps.
     func breaksInverseTelecineCadence(_ frame: UnsafeMutablePointer<AVFrame>, timeBase: AVRational) -> Bool {
@@ -494,7 +496,7 @@ final class DeinterlaceFilter {
             return false
         }
         let delta = Double(frame.pointee.pts - last) * Double(timeBase.num) / Double(timeBase.den)
-        return delta > 1.5 / rate || delta < 0
+        return delta > 1.75 / rate || delta < 0
     }
 
     /// DEC-203: tells the graph no more input is coming, so yadif/bwdif release the frame they hold as

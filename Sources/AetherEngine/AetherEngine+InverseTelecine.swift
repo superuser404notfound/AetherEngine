@@ -13,6 +13,15 @@ extension AetherEngine {
         return source.map { $0 * 0.8 }
     }
 
+    /// Why the graph could not run inverse telecine for this stream, or nil when it can. Checked before
+    /// the decision, because the decision also picks the display rate: a 23.976 Hz panel fed by a graph
+    /// that fell back to 29.97 drops one frame in five.
+    nonisolated static func inverseTelecineUnbuildable(rate: DeinterlaceConfig.SourceFrameRate) -> String? {
+        if !DeinterlaceFilter.inverseTelecineFiltersLinked { return "no fieldmatch / decimate in the linked FFmpeg build" }
+        if !rate.isKnown { return "the stream states no frame rate" }
+        return nil
+    }
+
     /// Whether this load runs inverse telecine. A rebuild takes its session's decision
     /// (`LoadOptions.inverseTelecineCarryover`); a fresh load reads `LoadOptions.inverseTelecine`
     /// through `TelecineCadenceProbe.gate` and, for `.auto`, samples the source. The sample moves the
@@ -38,6 +47,8 @@ extension AetherEngine {
             return carried
         }
         guard probeOpened, probe.videoStreamIndex >= 0 else { return false }
+        // An audio-only load shows no picture, so the sample would only delay the first sound.
+        guard !options.audioOnly else { return false }
         let gate = TelecineCadenceProbe.gate(
             mode: options.inverseTelecine, isLive: options.isLive, isSeekable: probe.isSourceSeekable,
             codecID: codecID, fieldOrder: fieldOrder, frameRate: frameRate, codedHeight: codedHeight)
@@ -49,6 +60,12 @@ extension AetherEngine {
             }
             return false
         case .force:
+            let rate = probe.stream(at: probe.videoStreamIndex).map { DeinterlaceConfig.SourceFrameRate(stream: $0) }
+                ?? DeinterlaceConfig.SourceFrameRate()
+            if let missing = Self.inverseTelecineUnbuildable(rate: rate) {
+                EngineLog.emit("[Deinterlace] inverse telecine off: \(missing) (#853)", category: .swPlayback)
+                return false
+            }
             EngineLog.emit("[Deinterlace] inverse telecine on: LoadOptions.inverseTelecine is .force (#853)",
                            category: .swPlayback)
             return true
@@ -59,6 +76,10 @@ extension AetherEngine {
         let videoIndex = probe.videoStreamIndex
         let rate = probe.stream(at: videoIndex).map { DeinterlaceConfig.SourceFrameRate(stream: $0) }
             ?? DeinterlaceConfig.SourceFrameRate()
+        if let missing = Self.inverseTelecineUnbuildable(rate: rate) {
+            EngineLog.emit("[Deinterlace] inverse telecine off: \(missing) (#853)", category: .swPlayback)
+            return false
+        }
         let started = DispatchTime.now()
         let verdict = await BlockingWork.detached(priority: .userInitiated) { [probe] in
             let verdict = TelecineCadenceProbe.run(

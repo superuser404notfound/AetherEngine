@@ -2685,11 +2685,9 @@ extension AetherEngine {
         let preservedRequiresDeinterlaceWarmup =
             restoredDeinterlaceWarmupDecision ?? lastRequiresDeinterlaceWarmup
         // #853: the session's inverse telecine decision. This rebuild keeps the display mode, so it keeps
-        // the decision that chose it too; it never samples again. A different disc title is another
-        // stream (a video-shot extra after a film title would lose one frame in five), so it falls back
-        // to the deinterlacer.
-        let preservedInverseTelecine = restoredInverseTelecine
-            ?? (titleToReopen == outgoingDiscTitleID ? lastInverseTelecine : false)
+        // the decision that chose it too; it never samples again. A disc title switch is the exception,
+        // see `reopenedInverseTelecine` below.
+        let preservedInverseTelecine = restoredInverseTelecine ?? lastInverseTelecine
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         // resetDisplayCriteria: false: video format is unchanged; resetting triggers a full waitForSwitch Stage 2 timeout (5 s at the 2026-05-26 device test, ~2 s cap since #117; Bose SLIII A2DP + 4K HDR10 PQ: each switch added ~12 s black-screen). On the same route a panel SDR drop during the reset window failed the PQ variant with AVFoundationErrorDomain -11868 / CoreMediaErrorDomain -17223.
@@ -2881,6 +2879,24 @@ extension AetherEngine {
         }
 
         do {
+            // #853: another disc title is another stream. Carrying the outgoing title's decision over would
+            // decimate a video-shot extra after a film title (one frame in five lost), and dropping it would
+            // deinterlace the next episode of a film-shot series. So the new title is sampled like a fresh
+            // load. The display criteria stay as they are (this reload writes none), so a title that
+            // decides differently plays on the rate the first title asked for.
+            var reopenedInverseTelecine = preservedInverseTelecine
+            lastInverseTelecineVerdict = nil  // a rebuild samples nothing unless the title changed
+            if targetSoftwarePath, restoredInverseTelecine == nil, titleToReopen != outgoingDiscTitleID,
+               let pre = customPreopened, let stream = pre.stream(at: pre.videoStreamIndex),
+               let codecpar = stream.pointee.codecpar {
+                var sampleOptions = loadedOptions
+                sampleOptions.inverseTelecineCarryover = nil
+                reopenedInverseTelecine = try await decideInverseTelecine(
+                    options: sampleOptions, probe: pre, probeOpened: true,
+                    codecID: codecpar.pointee.codec_id, fieldOrder: codecpar.pointee.field_order,
+                    frameRate: Self.detectFrameRate(stream: stream), codedHeight: codecpar.pointee.height,
+                    startPosition: resumeAt, generation: gen)
+            }
             let loadStart = DispatchTime.now()
             if targetSoftwarePath {
                 EngineLog.emit("[AetherEngine] reload: loadSoftware enter audio=\(audioStreamIndex.map(String.init) ?? "nil") resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
@@ -2894,7 +2910,7 @@ extension AetherEngine {
                     dvrWindowSeconds: loadedOptions.dvrWindowSeconds,
                     preopenedDemuxer: customPreopened,
                     requiresDeinterlaceWarmup: reopenedRequiresDeinterlaceWarmup,
-                    inverseTelecine: preservedInverseTelecine,
+                    inverseTelecine: reopenedInverseTelecine,
                     autostarts: transportIntentUnderReconstruction ?? resumesPlaying,
                     generation: gen,
                     elType: sourceElType
@@ -2903,7 +2919,7 @@ extension AetherEngine {
                 isSourceSeekable = preservedSourceSeekable
                 playbackBackend = .software
                 lastRequiresDeinterlaceWarmup = reopenedRequiresDeinterlaceWarmup
-                lastInverseTelecine = preservedInverseTelecine
+                lastInverseTelecine = reopenedInverseTelecine
                 activeAudioTrackIndex = Self.softwareReloadAudioIndex(
                     hostIndex: softwareHost?.audioStreamIndex ?? -1, requested: audioStreamIndex)
                 activeVideoDecoder = Self.videoDecoderLabel(

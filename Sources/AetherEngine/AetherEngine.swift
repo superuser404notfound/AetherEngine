@@ -2834,6 +2834,10 @@ public final class AetherEngine: ObservableObject {
     /// would be lost at the next audio-track switch or background return.
     func setLoadedAudioDelay(_ seconds: Double) { loadedOptions.audioDelaySeconds = seconds }
 
+    /// #853: the narrow write for a correction of `inverseTelecine`. The session keeps its own decision;
+    /// the loads the engine later builds from these options (a title switch, the ingest reroute) take this.
+    func setLoadedInverseTelecine(_ mode: InverseTelecineMode) { loadedOptions.inverseTelecine = mode }
+
     /// AE#923: the narrow write for `setAudioShaping`, for the same reason as the delay above.
     func setLoadedAudioShaping(_ shaping: AudioShaping) { loadedOptions.audioShaping = shaping }
 
