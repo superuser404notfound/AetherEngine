@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.72.0] - 2026-11-21
+
 ### Added
 
 - **`untaggedVideoColor` lets a host show an untagged 10-bit stream as HDR10 or HLG (AE#1103).** Some IPTV
@@ -66,8 +70,8 @@ the public-API contract.
   -16.6 LUFS. Through the engine's own tap, the first 90 s of that film went from 20.8 to 24.8 LU of
   loudness range at the same integrated level.
 
-- **The TrueHD Atmos and DTS:X bed regression runs in real time in a host's Debug build (AE#1106).** The bed regression computed its band
-  statistics, its weights and its mix in per-bin Swift loops. A host's Debug build compiles the package without
+- **The TrueHD Atmos and DTS:X bed regression runs in real time in a host's Debug build (AE#1106).** The
+  bed regression computed its band statistics, its weights and its mix in per-bin Swift loops. A host's Debug build compiles the package without
   optimisation, and there the regression ran at 0.2x real time, so a TrueHD Atmos session stalled on every
   segment. The three steps now run through Accelerate (one matrix product per band, the weights interpolated
   with `vDSP_vlint`). On an M1, 16 elements into 9.1.6 went from 5.8 s to 0.09 s of CPU per second of audio
