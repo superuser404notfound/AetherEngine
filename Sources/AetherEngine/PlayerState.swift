@@ -369,6 +369,23 @@ public enum DeinterlaceFieldRate: String, Sendable, Equatable {
     case frame
 }
 
+/// Inverse telecine on the software-decode path (#853): film that was put on NTSC video with 3:2
+/// pulldown baked into the pictures (hard telecine, the usual NTSC DVD of a film-shot series) has
+/// its fields matched back into the original film frames, the repeated frame of each five dropped,
+/// and the display asked for 23.976 Hz, instead of being deinterlaced. Residual combed frames
+/// (titles and credits made at video rate) still go through the deinterlacer `DeinterlaceMode`
+/// picks.
+public enum InverseTelecineMode: String, Sendable, Equatable {
+    /// A load-time sample decides (VOD, SD NTSC-rate interlaced MPEG-2 only). A sample that is not
+    /// clearly film keeps the deinterlacer, so true interlaced video plays as before.
+    case auto
+    /// Never: interlaced sources are deinterlaced, as before #853.
+    case off
+    /// Always, without the sample, on any interlaced software-path source at an NTSC rate
+    /// (29.97 / 30 fps). On true interlaced video it drops one frame in five.
+    case force
+}
+
 /// Live-join latency profile for loopback live sessions (`LoadOptions.liveJoinProfile`, AetherEngine#195).
 public enum LiveJoinProfile: Sendable, Equatable {
     /// The pre-default behavior: ~4s segment cut target, served TARGETDURATION >= 6, live-edge holdback
@@ -1248,6 +1265,12 @@ public struct LoadOptions: Sendable, Equatable {
     /// rate). See `DeinterlaceFieldRate`.
     public var deinterlaceFieldRate: DeinterlaceFieldRate = .field
 
+    /// Inverse telecine for hard-telecined film on the software path (#853): `.auto` (default)
+    /// decides from a load-time sample, `.off` always deinterlaces, `.force` always matches fields.
+    /// While it runs the output is 23.976 fps whatever `deinterlaceFieldRate` says. See
+    /// `InverseTelecineMode`.
+    public var inverseTelecine: InverseTelecineMode = .auto
+
     /// AE#461: which decode path this session runs on when the host needs to overrule the engine's
     /// own routing. `.automatic` (default) leaves the routing alone. `.software` serves the source
     /// through `SoftwarePlaybackHost` (libavcodec / dav1d) whatever the routing concluded, scoped to
@@ -1310,6 +1333,12 @@ public struct LoadOptions: Sendable, Equatable {
     /// types a URL by its path extension and `Content-Type` and never by its body. Rides `loadedOptions`,
     /// so every rebuild of a rerouted session keeps the declaration.
     var hlsPlaylistProvenByBody: Bool = false
+
+    /// ENGINE-INTERNAL: the inverse telecine decision (#853) of the session a session-preserving reload
+    /// (`reloadAtCurrentPosition`) rebuilds. Not settable from the public initializer. When present the
+    /// load takes it instead of sampling again, so a rebuild never pays the sample twice and never moves
+    /// the display rate the first load chose. Consumed by the load; never persisted.
+    var inverseTelecineCarryover: Bool? = nil
 
     public init(
         omitCriteriaColorExtensions: Bool = false,
@@ -1382,6 +1411,7 @@ public struct LoadOptions: Sendable, Equatable {
         normalizationGainDB: Double? = nil,
         deinterlaceMode: DeinterlaceMode = .auto,
         deinterlaceFieldRate: DeinterlaceFieldRate = .field,
+        inverseTelecine: InverseTelecineMode = .auto,
         preferredDecodePath: DecodePath = .automatic,
         escalatesToSoftwarePath: Bool = true,
         sharedOutputRole: SharedOutputRole = .primary,
@@ -1460,6 +1490,7 @@ public struct LoadOptions: Sendable, Equatable {
             $0.isFinite ? NormalizationGainProcessor.clampedGainDB($0) : nil }
         self.deinterlaceMode = deinterlaceMode
         self.deinterlaceFieldRate = deinterlaceFieldRate
+        self.inverseTelecine = inverseTelecine
         self.preferredDecodePath = preferredDecodePath
         self.escalatesToSoftwarePath = escalatesToSoftwarePath
         self.sharedOutputRole = sharedOutputRole

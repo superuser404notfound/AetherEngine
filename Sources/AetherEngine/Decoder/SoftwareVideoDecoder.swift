@@ -522,6 +522,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             }
 
             let isInterlaced = (f.pointee.flags & (1 << 3)) != 0  // AV_FRAME_FLAG_INTERLACED
+            // #853: decimate stamps its output from the graph's first frame plus one tick per frame, so a
+            // source frame that never arrived would shift every later picture against the audio. Flush
+            // what the graph holds and let this frame build a fresh one that anchors on it.
+            if deinterlacer.isActive, deinterlacer.breaksInverseTelecineCadence(f, timeBase: timeBase) {
+                if filtered == nil { filtered = av_frame_alloc() }
+                if deinterlacer.sendEndOfStream() >= 0, let out = filtered { emitFilteredFramesLocked(out) }
+                deinterlacer.teardown()
+            }
             if isInterlaced || deinterlacer.isActive {
                 if deinterlacer.ensureGraph(frame: f, timeBase: timeBase),
                    deinterlacer.push(f) >= 0 {

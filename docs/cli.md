@@ -640,6 +640,7 @@ Other lines `play` prints:
 | `--line-art` | `LoadOptions.upscaleScaler = .lineArt` (AE#1039); implies `--upscale`. | off |
 | `--tone-map <nits>` | `LoadOptions.videoProcessing` with this `targetPeakNits` (#957). | off |
 | `--deinterlace-field-rate field\|frame` | `LoadOptions.deinterlaceFieldRate` (AE#492). | `field` |
+| `--inverse-telecine auto\|off\|force` | `LoadOptions.inverseTelecine` (#853). | `auto` |
 | `--native-video-frame-diagnostics` | `LoadOptions.nativeVideoFrameDiagnostics`. | off |
 | `--native-video-frame-recovery` | Bounded SDR native decoded-output repair. | off |
 
@@ -1021,6 +1022,18 @@ Measured on a 480i fixture through the hardware chain, four runs per arm: 59.9 f
 
 Nothing binds a render surface in a CLI run, so the absolute drop level belongs to the harness. Only the ratio between arms is a measurement.
 
+### Inverse telecine (#853)
+
+`--inverse-telecine auto|off|force` sets `LoadOptions.inverseTelecine`. On a hard-telecined NTSC MPEG-2 source the load logs its decision before the `[AetherEngine] load` line, and that line's `rate=` is the rate asked of the display:
+
+```
+[Deinterlace] inverse telecine on: film, progressive 100% of 60 decided frames, cadence 100%, 61 frames in 155 ms, 155 ms with the rewind (#853)
+[AetherEngine] load url=... rate=23.976
+[Deinterlace] engaged [hardware]: 720x480 pixFmt=0 (fieldmatch=order=auto:combmatch=full,decimate,format=nv12,hwupload,bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced) outTB=1001/48000 built in 3.3ms
+```
+
+With `--frame-times` the output reads `ft=24` a second and the `[SWDiag]` lines `dpts=41.7/41.7`; the deinterlacer alone reads `ft=60` at field rate. The sample's cost to the first frame over a throttled origin is in [measurements › Inverse telecine](measurements.md#inverse-telecine-853).
+
 ### Frame times (`--frame-times`, `--present-times`)
 
 **`--frame-times`** installs the #311 software frame-time observer BEFORE `load()` (the documented usage: the engine re-arms each new host with it) and reads `softwarePresentationTimebase`. Each tick appends:
@@ -1284,7 +1297,7 @@ Tests scrub previews. By default it covers Dolby Vision Profile 5 / 10.0 sources
 
 The default mode needs a build WITHOUT the `DolbyVisionStillReshaping` trait. With the trait such a source serves reshaped stills instead of drawing in a view, so the default mode fails with exit 1; use `--stills` there.
 
-**Usage:** `aetherctl scrubpreview [--warm S] [--at s1,s2,...] [--keep DIR] [--throttle-kbps N] [--stills [--max-concurrent-requests N] [--forward-buffer-segments N]] <url>`
+**Usage:** `aetherctl scrubpreview [--warm S] [--at s1,s2,...] [--keep DIR] [--throttle-kbps N] [--stills [--max-concurrent-requests N] [--forward-buffer-segments N] [--inverse-telecine auto|off|force]] <url>`
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -1295,6 +1308,7 @@ The default mode needs a build WITHOUT the `DolbyVisionStillReshaping` trait. Wi
 | `--stills` | Asks `scrubPreviewFrame` instead, for any source. | off |
 | `--max-concurrent-requests N` | Only with `--stills`. See [Shared flags](#shared-flags). | engine default |
 | `--forward-buffer-segments N` | Passes through to `LoadOptions`. Only with `--stills`. | engine default |
+| `--inverse-telecine auto\|off\|force` | `LoadOptions.inverseTelecine` for the playing session, only with `--stills`. The stills themselves always come off the plain deinterlacer (#853). | `auto` |
 
 **Default mode.** Loads the source on the native path, plays it for `--warm` seconds, then asks `showScrubPreview(atSeconds:in:)` for each position. For each it prints whether a picture came, how long it took, the span it stands for, and whether the position was resident.
 

@@ -335,6 +335,17 @@ When the linked FFmpegBuild has no `bwdif_videotoolbox`, or its graph fails to b
 
 `AetherEngine.load` decides the route (`VideoRoutingPolicy`), per source, from `VTCapabilityProbe`, the codec id, the declared field order, and on VOD the decode sample that verifies it.
 
+#### Inverse telecine
+
+Film put on NTSC video with its 3:2 pulldown baked into the pictures (hard telecine, the usual NTSC DVD of a film-shot series) gets its film frames back instead of being deinterlaced (#853). `fieldmatch` pairs each frame's fields with their matching ones, `decimate` drops the repeated frame of each five, and the display is asked for 23.976 Hz. The deinterlacer still runs, but only on the frames `fieldmatch` could not match: titles and credits made at video rate.
+
+- **Which sources.** `LoadOptions.inverseTelecine = .auto`, the default, samples a VOD, seekable, 29.97 / 30 fps MPEG-2 source of 576 lines or fewer whose frames decode interlaced. Soft telecine (the decoder repeats fields) already decodes to film frames and is left alone. Live, HD, PAL (25 fps, 2:2 pulldown) and other codecs keep the deinterlacer.
+- **`.force` and `.off`.** `.force` matches fields without the sample on any NTSC-rate interlaced source of a codec that always decodes on the software path; on true interlaced video it loses one frame in five. `.off` never matches fields.
+- **The sample.** Before the display criteria are written, the load decodes from its start position through `fieldmatch` and `idet`. It decides film when, over the last 60 decided frames, at least 90% read progressive after matching and the repeated frame of each five keeps one phase in at least 15% of the cycle pairs (four at least). The repeat is judged by the worst 16x16 block, so video made from film by motion interpolation is not mistaken for it. It decides video early after 20 cycles in which every frame moved, with at most one such repeat. The sample stops at 300 frames, 3000 packets or 2 s, then rewinds. Anything short of film keeps the deinterlacer. Measurements: [measurements › Inverse telecine](measurements.md#inverse-telecine-853).
+- **The session keeps it.** Seeks, audio-track switches, `reloadAtCurrentPosition` and the return from background keep the first load's decision and display rate. A changed `inverseTelecine` takes effect at the next load.
+- **The output.** 23.976 fps on a 1001/24000 timeline that starts again at every seek or timestamp gap, at frame rate whatever `deinterlaceFieldRate` says. Scrub stills keep the plain deinterlacer.
+- `decodedVideoFormat?.deinterlace?.inverseTelecine` tells a host it runs ([api › Stream and decoded format](api.md#stream-and-decoded-format)).
+
 `$sourceVideoScan` tells a host whether the source is progressive or interlaced, from the same evidence (AE#983, [api › Scan type](api.md#scan-type)).
 
 ### Upscaling

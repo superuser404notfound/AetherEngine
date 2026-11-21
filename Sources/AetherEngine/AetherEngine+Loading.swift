@@ -2102,6 +2102,7 @@ extension AetherEngine {
         dvrWindowSeconds: Double? = nil,
         preopenedDemuxer: Demuxer?,
         requiresDeinterlaceWarmup: Bool,
+        inverseTelecine: Bool = false,
         autostarts: Bool,
         generation: UInt64,
         elType: String? = nil,
@@ -2167,9 +2168,12 @@ extension AetherEngine {
                                                   closedCadence: ingest?.closedLiveCadenceSeconds)
             }
         }
+        // #853: inverse telecine is the load's decision (it chose the display rate), never re-read from
+        // the options here: a rebuild hands in the session's decision.
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
-            fieldRate: loadedOptions.deinterlaceFieldRate
+            fieldRate: loadedOptions.deinterlaceFieldRate,
+            inverseTelecine: inverseTelecine
         )
         host.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }
@@ -2562,6 +2566,7 @@ extension AetherEngine {
         resumeOverride: Double? = nil,
         resumePlaying: Bool? = nil,
         restoredDeinterlaceWarmupDecision: Bool? = nil,
+        restoredInverseTelecine: Bool? = nil,
         keepsDisplayRefusedMediaRoute: Bool = false
     ) async -> Error? {
         // Liveness guard: a stop()/load() between scheduling and here would resurrect a dismissed session or kill the successor. Generation captured at schedule time; both stop() and load() invalidate it.
@@ -2679,6 +2684,9 @@ extension AetherEngine {
         let preservedSourceSeekable = isSourceSeekable
         let preservedRequiresDeinterlaceWarmup =
             restoredDeinterlaceWarmupDecision ?? lastRequiresDeinterlaceWarmup
+        // #853: the session's inverse telecine decision. This rebuild keeps the display mode, so it keeps
+        // the decision that chose it too; it never samples again.
+        let preservedInverseTelecine = restoredInverseTelecine ?? lastInverseTelecine
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         // resetDisplayCriteria: false: video format is unchanged; resetting triggers a full waitForSwitch Stage 2 timeout (5 s at the 2026-05-26 device test, ~2 s cap since #117; Bose SLIII A2DP + 4K HDR10 PQ: each switch added ~12 s black-screen). On the same route a panel SDR drop during the reset window failed the PQ variant with AVFoundationErrorDomain -11868 / CoreMediaErrorDomain -17223.
@@ -2733,6 +2741,7 @@ extension AetherEngine {
         adoptSessionLiveness(from: loadedOptions)
         lastDetectedVideoCodec = preservedVideoCodec
         lastRequiresDeinterlaceWarmup = preservedRequiresDeinterlaceWarmup
+        lastInverseTelecine = preservedInverseTelecine
 
         // Custom sources: no URL to reopen; rebuild on the retained reader. Demuxer opens at byte 0; loadSoftware/loadNative seek to startPosition.
         // Preserve the caller's probe budget (#68) across the reopen so an audio/title switch doesn't re-incur the full find_stream_info cost the caller paid to avoid.
@@ -2882,6 +2891,7 @@ extension AetherEngine {
                     dvrWindowSeconds: loadedOptions.dvrWindowSeconds,
                     preopenedDemuxer: customPreopened,
                     requiresDeinterlaceWarmup: reopenedRequiresDeinterlaceWarmup,
+                    inverseTelecine: preservedInverseTelecine,
                     autostarts: transportIntentUnderReconstruction ?? resumesPlaying,
                     generation: gen,
                     elType: sourceElType
@@ -2890,6 +2900,7 @@ extension AetherEngine {
                 isSourceSeekable = preservedSourceSeekable
                 playbackBackend = .software
                 lastRequiresDeinterlaceWarmup = reopenedRequiresDeinterlaceWarmup
+                lastInverseTelecine = preservedInverseTelecine
                 activeAudioTrackIndex = Self.softwareReloadAudioIndex(
                     hostIndex: softwareHost?.audioStreamIndex ?? -1, requested: audioStreamIndex)
                 activeVideoDecoder = Self.videoDecoderLabel(
@@ -2994,6 +3005,7 @@ extension AetherEngine {
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .native
                 lastRequiresDeinterlaceWarmup = reopenedRequiresDeinterlaceWarmup
+                lastInverseTelecine = false
                 // Publish the session's actual pick (invalid override falls back to auto; demuxed-audio resolves in side-demuxer numbering).
                 syncPublishedAudioStateFromNativeSession()
                 activeVideoDecoder = Self.videoDecoderLabel(

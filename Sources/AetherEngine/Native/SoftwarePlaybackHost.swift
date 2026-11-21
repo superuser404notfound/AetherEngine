@@ -1585,6 +1585,11 @@ final class SoftwarePlaybackHost {
             }
         }
 
+        // #853: an inverse telecine graph declares the stream's rate (decimate needs one); taken here,
+        // where the stream is, so the loader does not have to read it.
+        if deinterlaceConfig.inverseTelecine {
+            deinterlaceConfig.sourceFrameRate = DeinterlaceConfig.SourceFrameRate(stream: vStream)
+        }
         // Applied here (not init) so it also covers a decoder replaced above.
         (videoDecoder as? SoftwareVideoDecoder)?.deinterlaceConfig = deinterlaceConfig
 
@@ -1619,8 +1624,12 @@ final class SoftwarePlaybackHost {
             self.presentFirstFrameUnderPause(pts: ptsSeconds, generation: self.decodeGeneration)
         }
 
-        let onFrame = upscaledFrameHandler(
-            baseOnFrame, decoder: videoDecoder, frameRate: AetherEngine.detectFrameRate(stream: vStream))
+        // #853: under inverse telecine the frames come out at 4/5 of the stream's rate, and that is the
+        // interval the picture stages have per frame.
+        let stagedFrameRate = deinterlaceConfig.inverseTelecine
+            ? deinterlaceConfig.sourceFrameRate.framesPerSecond.map { $0 * 0.8 }
+            : AetherEngine.detectFrameRate(stream: vStream)
+        let onFrame = upscaledFrameHandler(baseOnFrame, decoder: videoDecoder, frameRate: stagedFrameRate)
         Self.prepareForPlayback(videoDecoder)
 
         if vStream.pointee.codecpar?.pointee.codec_id == AV_CODEC_ID_VP9 {
@@ -2808,11 +2817,15 @@ final class SoftwarePlaybackHost {
                 return nil
             }
             do {
+                // #853: a still needs no cadence, and decimate would hold back the first picture until
+                // a cycle of five had arrived, so stills keep the plain deinterlacer.
+                var stillDeinterlace = deinterlaceConfig
+                stillDeinterlace.inverseTelecine = false
                 let built = try SoftwareStillExtractor(
                     stream: stream,
                     videoStreamIndex: videoStreamIndex,
                     timeBaseSeconds: videoTimeBaseSeconds,
-                    deinterlace: deinterlaceConfig)
+                    deinterlace: stillDeinterlace)
                 // Once per session, and its absence is the point: a session that never scrubs
                 // should never print it, which is the whole of AE#595 stated as an observable.
                 EngineLog.emit("[SWHost] #595 still extractor built on the first request",

@@ -86,14 +86,16 @@ private func scrubPreviewRun(url: URL, positions: [Double], warmSeconds: Double,
 /// came from (a resident segment or the keyframe still ladder) and the span it names. With
 /// `--max-concurrent-requests 1` the origin is the one-connection shape the ladder exists for.
 func runScrubStills(url: URL, positions: [Double], warmSeconds: Double,
-                    maxConcurrentRequests: Int?, forwardBufferSegments: Int?) -> Int32 {
+                    maxConcurrentRequests: Int?, forwardBufferSegments: Int?,
+                    inverseTelecine: InverseTelecineMode = .auto) -> Int32 {
     print(EngineLog.redacted("aetherctl scrubpreview --stills: \(url.absoluteString)"))
     EngineLog.handler = { print($0) }
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
         box.value = await scrubStillsRun(url: url, positions: positions, warmSeconds: warmSeconds,
                                          maxConcurrentRequests: maxConcurrentRequests,
-                                         forwardBufferSegments: forwardBufferSegments)
+                                         forwardBufferSegments: forwardBufferSegments,
+                                         inverseTelecine: inverseTelecine)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -102,13 +104,15 @@ func runScrubStills(url: URL, positions: [Double], warmSeconds: Double,
 
 @MainActor
 private func scrubStillsRun(url: URL, positions: [Double], warmSeconds: Double,
-                            maxConcurrentRequests: Int?, forwardBufferSegments: Int?) async -> Int32 {
+                            maxConcurrentRequests: Int?, forwardBufferSegments: Int?,
+                            inverseTelecine: InverseTelecineMode) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
         try await engine.load(url: url, options: LoadOptions(
             maxConcurrentSourceRequests: maxConcurrentRequests,
-            forwardBufferSegments: forwardBufferSegments))
+            forwardBufferSegments: forwardBufferSegments,
+            inverseTelecine: inverseTelecine))
     } catch {
         print("load failed: \(error.localizedDescription)")
         return 1

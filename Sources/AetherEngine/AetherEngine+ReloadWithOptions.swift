@@ -180,9 +180,9 @@ extension AetherEngine {
         // naming it in the applied line was the last way left for a correction to read as done when
         // it was not. The transport is the session's own unless a background teardown left it none
         // to read, which is the condition `reloadAtCurrentPosition` makes the same call on.
-        let (applied, sessionOwned) = SessionOptionCorrection.partitionChanges(
+        let (applied, sessionOwned, loadDecided) = SessionOptionCorrection.partitionChanges(
             changed, sessionOwnsTransport: backgroundTeardownSelection == nil)
-        if !applied.isEmpty || sessionOwned.isEmpty {
+        if !applied.isEmpty || (sessionOwned.isEmpty && loadDecided.isEmpty) {
             EngineLog.emit(
                 applied.isEmpty
                     ? "[AetherEngine] #460: reload applying no option change (session already on these options)"
@@ -195,6 +195,14 @@ extension AetherEngine {
                 "[AetherEngine] #460: \(sessionOwned.joined(separator: ", ")) not applied, the session "
                 + "owns it: the rebuild comes back in the transport state the session is in, not the one "
                 + "a mount was given (AE#464 round 2). Call play() / pause() to change it",
+                category: .engine
+            )
+        }
+        if !loadDecided.isEmpty {
+            EngineLog.emit(
+                "[AetherEngine] #460: \(loadDecided.joined(separator: ", ")) not applied to this session: the "
+                + "load decided it together with the display rate it asked for, and a rebuild keeps that "
+                + "decision (#853). It takes effect at the next load",
                 category: .engine
             )
         }
@@ -213,14 +221,14 @@ extension AetherEngine {
         // (#357), and there the field is `applied` rather than session-owned, so it never arrives
         // here. `changed.isEmpty` is NOT this case and keeps rebuilding: a correction that changed
         // nothing is a documented way to ask for the rebuild itself.
-        if applied.isEmpty, !sessionOwned.isEmpty {
+        if applied.isEmpty, !sessionOwned.isEmpty || !loadDecided.isEmpty {
             EngineLog.emit(
                 "[AetherEngine] #460: correction complete without a rebuild, every field it changed "
                 + "is the session's own (AE#464 round 4)",
                 category: .engine
             )
             return SessionOptionCorrectionOutcome(
-                applied: applied, sessionOwned: sessionOwned, rebuilt: false)
+                applied: applied, sessionOwned: sessionOwned + loadDecided, rebuilt: false)
         }
 
         // Install BEFORE the rebuild, not through it: the URL branch carries these options into
@@ -240,7 +248,7 @@ extension AetherEngine {
         endRecordingIfRunning(reason: .sourceReset)
         try await reloadAtCurrentPosition()
         return SessionOptionCorrectionOutcome(
-            applied: applied, sessionOwned: sessionOwned, rebuilt: true)
+            applied: applied, sessionOwned: sessionOwned + loadDecided, rebuilt: true)
     }
 
     /// Why `reloadAtCurrentPosition` would rebuild nothing for this session, or nil when it can
@@ -377,17 +385,26 @@ enum SessionOptionCorrection {
     /// which is the half that a host actually reads while its correction is happening.
     static let sessionOwnedFields: [String] = ["autoplay"]
 
-    /// Split what the correction changed into what the reload applies and what the session decides.
+    /// #853: fields the LOAD decides together with the display rate it asks for. Every rebuild keeps the
+    /// session's decision (a session-preserving reload must not move the panel's refresh rate), so a
+    /// correction of one is reported and takes effect at the next load, with or without a transport.
+    static let loadDecidedFields: [String] = ["inverseTelecine"]
+
+    /// Split what the correction changed into what the reload applies, what the session decides, and
+    /// what only the next load decides.
     ///
     /// The transport is the session's own only where the rebuild has one to read. A resume after a
     /// background teardown (#357) has none, so there the mount flag still decides and the field is
     /// applied like any other, which is the same condition `reloadAtCurrentPosition` replays on.
     static func partitionChanges(
         _ changed: [String], sessionOwnsTransport: Bool
-    ) -> (applied: [String], sessionOwned: [String]) {
-        guard sessionOwnsTransport else { return (changed, []) }
-        return (changed.filter { !sessionOwnedFields.contains($0) },
-                changed.filter { sessionOwnedFields.contains($0) })
+    ) -> (applied: [String], sessionOwned: [String], loadDecided: [String]) {
+        let loadDecided = changed.filter { loadDecidedFields.contains($0) }
+        let rest = changed.filter { !loadDecidedFields.contains($0) }
+        guard sessionOwnsTransport else { return (rest, [], loadDecided) }
+        return (rest.filter { !sessionOwnedFields.contains($0) },
+                rest.filter { sessionOwnedFields.contains($0) },
+                loadDecided)
     }
 
     /// Identity fields the proposal changed, in `loadIdentityFields` order. Empty means the
@@ -567,7 +584,8 @@ enum SessionOptionCorrection {
         "nativeSubtitlePreferredLanguages", "sequentialOrigin", "maxConcurrentSourceRequests", "heldSourceConnection",
         "declaredDurationSeconds", "probesize", "maxAnalyzeDuration", "skipsContainerAttachments", "preferredAudioLanguages",
         "preferredSubtitleLanguages", "externalSubtitles", "initialSubtitleTrackID", "forwardBufferSegments", "sessionCacheByteBudget", "sessionCacheHardLimitBytes", "sessionCacheFreeReserveBytes", "softwarePacketCacheStorage", "retainsSessionCacheAfterStop", "progressiveSegmentDelivery", "autoplay",
-        "audioDelaySeconds", "audioShaping", "normalizationGainDB", "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "preferredDecodePath",
+        "audioDelaySeconds", "audioShaping", "normalizationGainDB", "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "inverseTelecine", "preferredDecodePath",
         "escalatesToSoftwarePath", "sharedOutputRole", "isLiveRejoin", "subtitleSessionCarryover", "hlsPlaylistProvenByBody",
+        "inverseTelecineCarryover",
     ]
 }

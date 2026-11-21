@@ -64,6 +64,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+RetainedSessionCache.swift` | `discardRetainedSessionCache()` and `retainedSessionCacheBytes`, the host's handle on the kept segment cache (AE#1095). |
 | `AetherEngine+Prewarm.swift` | `prewarmDualLayerDolbyVision()` (compiles the FEL composer's shaders ahead of time) and `prewarm(url:...)`, the source warm (#551). |
 | `AetherEngine+Upscale.swift` | #846: the load's side of the upscale stage. Reads probe, display and device once per load; publishes the stage's status. |
+| `AetherEngine+InverseTelecine.swift` | #853: the load's inverse telecine decision, taken before the display criteria; a rebuild reuses its session's decision. |
 | `AetherEngine+VideoProcessing.swift` | #957: the load's side of the picture processing (`LoadOptions.videoProcessing`). Reads the probe's stream once per load; publishes the stage's status and latches its disable. |
 | `AetherEngine+Recording.swift` | `startRecording(to:)` / stop: records the playing live stream from the connection the session already holds (AE#560). |
 | `PlaybackErrorInfo.swift` | `PlaybackErrorKind` (stable string tokens, #376) and `PlaybackErrorInfo` behind a published `PlaybackState.error`. |
@@ -193,10 +194,11 @@ Notes:
 | `OrderedDelivery.swift` | Software FEL path (`DualLayerDolbyVision` trait): hands composed frames from the Metal completion queue to the renderer in decode order, with an epoch for seeks and a stall guard (#702). |
 | `CCDataParser.swift` | Parses the bare cc_data triplet stream from a demuxable CEA-608 caption track (#77). |
 | `CEA608Decoder.swift` | In-house CEA-608 line-21 decoder (field 1 / CC1), checked against FFmpeg `ccaption_dec.c` (#77). |
-| `DeinterlaceFilter.swift` | Software path: persistent bwdif / yadif libavfilter graph; engages on the first interlaced frame. |
+| `DeinterlaceFilter.swift` | Software path: persistent bwdif / yadif libavfilter graph; engages on the first interlaced frame. Under inverse telecine `fieldmatch` and `decimate` run around it (#853). |
 | `FFmpegDecoderContext.swift` | The one libavcodec decoder-context open (allocate, copy codecpar, configure, `max_pixels`, open, free on failure) behind the video, probe and subtitle decoders (audit DEC-R202). |
 | `EmbeddedSubtitleDecoder.swift` | Inline subtitle decode from demuxed packets. Opens DVB teletext with libzvbi_teletextdec text-format options (#107). |
 | `InterlaceProbe.swift` | Decodes a sample and applies the deinterlacer's own engagement test, so a declared field order that no frame backs up (PsF) stops costing a software decode (#232). |
+| `TelecineCadenceProbe.swift` | The load-time inverse telecine sample (#853): which sources are sampled, the `fieldmatch` + `idet` sampler, the film / video decision over its samples, and the frame, packet and wall-clock budgets. |
 | `ParserInit.swift` | `parserInit(_:)`: calls `av_parser_init` with whichever parameter type the linked libavcodec declares (`int` in FFmpeg 8, `enum AVCodecID` from FFmpeg 9). |
 | `VideoRoutingPolicy.swift` | Pure dispatch rule by codec and field order. See note. |
 | `HardwareVideoDecoder.swift` | Software path: VideoToolbox hardware decoder (HEVC, VP9, AV1 Dolby Vision) for sources routed away from AVPlayer. |
