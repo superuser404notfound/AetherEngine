@@ -45,6 +45,16 @@ the public-API contract.
   track, and it works on forward-only custom sources too. The ring grows by the other tracks' bitrate, a few
   percent next to broadcast MPEG-2. Thanks to sunnierseattle for the report and the probe of the tuner.
 
+### Fixed
+
+- **Subtitles before a session's start position come back after a backward seek on the software path
+  (AE#1104).** A file opened at 46.2 s and then sought to 0 showed no subtitles until 27.5 s. The store held
+  only what the load had read, from 27.5 s on, and the seek decoded that first. The drain cursor then sat
+  past it, and the cues the readers found from 0 s on were stored behind the cursor and never decoded. The
+  reset after a seek now waits until the stretch in front of its first stored cue has been read. Measured
+  with `aetherctl play --sw` on such a file, all cues from 7.25 s on arrive 0.14 s after the landing. Thanks
+  to sarathm09 for the report and the log.
+
 ## [7.71.2] - 2026-11-20
 
 ### Fixed

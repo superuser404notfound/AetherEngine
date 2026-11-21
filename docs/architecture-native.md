@@ -697,6 +697,14 @@ The coverage ledger ([below](#the-landing-after-a-seek)) knows both cases. `harv
 
 So where the ledger has heard from a reader, it is the whole answer, both for a cut and for the end of a wait. A pair whose span some run read is decoded through; one nobody read is a hole, whatever the sequences say. Order stays the rule only on a store whose readers never report coverage.
 
+**The ground in front of the first packet (AE#1104).** A reset after a seek has no packet in front of its first entry, so no pair covers that stretch. A backward seek past the session's earliest reading shows why it matters:
+
+- A file opened at 46.2 s holds only what the load read, from 27.5 s on.
+- After a seek to 0 that island is the first entry in the window, and the stretch from 0 to 27.5 s is unread.
+- Decoding the island first put the cursor past it, so the cues the readers then found from 0 s on were stored behind the cursor and never shown.
+
+So a reset also asks the ledger about the stretch from its window start (clamped at 0, like every reader's read start) to the first entry. Unread means the tick decodes nothing, leaves the cursor at the window start and waits there, under the same rules as any other wait. Without a ledger the reset decodes as before, since order has nothing to compare at a window boundary.
+
 On a link near the media bitrate, two more rules make this work:
 
 - **No reach claim during a seek.** The pump's reach claim ("it rendered the playhead, so it read up to there") is not made while a seek is in flight. `sourceTime` still reports the frame the seek is leaving while the producer is already re-anchored behind it, so the claim would stretch the fresh run across exactly the skipped ground.
