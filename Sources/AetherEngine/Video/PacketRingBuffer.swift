@@ -21,6 +21,10 @@ final class PacketRingBuffer: @unchecked Sendable {
         let isKeyframe: Bool
         let isVideo: Bool
         let bytes: Data
+        /// The source stream the packet came from, or -1 when the writer did not say. AE#1100: the
+        /// software live route stores every audio track of the source, so a feeder picks its track
+        /// by this.
+        var streamIndex: Int32 = -1
     }
 
     /// Writes all of `bytes` at `offset` or throws. Injectable so tests can fill the disk.
@@ -58,6 +62,8 @@ final class PacketRingBuffer: @unchecked Sendable {
         let length: UInt32
         let chunk: UInt32
         let flags: UInt8
+        /// Fits the padding after `flags`: the record stays 24 bytes.
+        let stream: Int16
 
         static let keyframeFlag: UInt8 = 1
         static let videoFlag: UInt8 = 2
@@ -187,15 +193,16 @@ final class PacketRingBuffer: @unchecked Sendable {
 
     // MARK: - Writer
 
-    func append(pts: Double, isKeyframe: Bool, isVideo: Bool, bytes: Data) throws {
+    func append(pts: Double, isKeyframe: Bool, isVideo: Bool, streamIndex: Int32 = -1, bytes: Data) throws {
         try bytes.withUnsafeBytes { raw in
-            try append(pts: pts, isKeyframe: isKeyframe, isVideo: isVideo, bytes: raw)
+            try append(pts: pts, isKeyframe: isKeyframe, isVideo: isVideo, streamIndex: streamIndex, bytes: raw)
         }
     }
 
     /// Takes the packet's memory as is, so the host appends straight from the `AVPacket` without an
     /// intermediate copy.
-    func append(pts: Double, isKeyframe: Bool, isVideo: Bool, bytes: UnsafeRawBufferPointer) throws {
+    func append(pts: Double, isKeyframe: Bool, isVideo: Bool, streamIndex: Int32 = -1,
+                bytes: UnsafeRawBufferPointer) throws {
         guard bytes.count <= Int(UInt32.max / 2) else { throw Failure.packetTooLarge }
         writeLock.lock()
         defer { writeLock.unlock() }
@@ -251,7 +258,8 @@ final class PacketRingBuffer: @unchecked Sendable {
         if isKeyframe { flags |= Entry.keyframeFlag }
         if isVideo { flags |= Entry.videoFlag }
         let entry = Entry(pts: pts, offset: UInt32(placement.offset), length: UInt32(bytes.count),
-                          chunk: placement.chunk, flags: flags)
+                          chunk: placement.chunk, flags: flags,
+                          stream: Int16(clamping: streamIndex < 0 ? -1 : streamIndex))
 
         lock.lock()
         guard !closed else {
@@ -344,6 +352,20 @@ final class PacketRingBuffer: @unchecked Sendable {
         return indexLocked(seq).map { entries[$0].isVideo }
     }
 
+    /// AE#1100: the kind and source stream of `seq` from the index alone, or nil if evicted or not yet
+    /// appended. A stream of -1 means the writer did not say.
+    func kind(atSeq seq: Int) -> (isVideo: Bool, streamIndex: Int32)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return indexLocked(seq).map { (entries[$0].isVideo, Int32(entries[$0].stream)) }
+    }
+
+    /// AE#1100: whether an audio packet of `stream` belongs to the track the feeder plays. A packet
+    /// whose writer named no stream predates the per-track ring and always does.
+    nonisolated static func audioPacket(ofStream stream: Int32, feeds active: Int32) -> Bool {
+        stream < 0 || stream == active
+    }
+
     /// Returns packet for `seq`, or nil if evicted, not yet appended, or unreadable. Index lock NOT held across the disk read.
     func packet(atSeq seq: Int) -> Packet? {
         lock.lock()
@@ -356,7 +378,8 @@ final class PacketRingBuffer: @unchecked Sendable {
         lock.unlock()
         guard let handle = cached ?? openReadHandle(entry.chunk),
               let bytes = Self.read(handle.fd, offset: entry.offset, length: entry.length) else { return nil }
-        return Packet(pts: entry.pts, isKeyframe: entry.isKeyframe, isVideo: entry.isVideo, bytes: bytes)
+        return Packet(pts: entry.pts, isKeyframe: entry.isKeyframe, isVideo: entry.isVideo, bytes: bytes,
+                      streamIndex: Int32(entry.stream))
     }
 
     func seq(forKeyframeAtOrBefore target: Double) -> Int? {

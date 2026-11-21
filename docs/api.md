@@ -256,6 +256,30 @@ A URL with a rotated per-session token misses that memory, so every retune pays 
 
 Either way skips the native mount and up to 4 s of carriage-watchdog grace per retune, whatever the URL looks like this time.
 
+### Live: a one-shot live URL
+
+**What the host must do, if its origin replays:** set `liveReopenURL` before `load`, and return the URL with a fresh session id. Return nil to reopen the loaded URL.
+
+```swift
+player.liveReopenURL = { loaded in
+    var parts = URLComponents(url: loaded, resolvingAgainstBaseURL: false)
+    parts?.queryItems = parts?.queryItems?.map {
+        $0.name == "SessionID" ? URLQueryItem(name: "SessionID", value: UUID().uuidString) : $0
+    }
+    return parts?.url
+}
+```
+
+**Why.** Some origins treat a live URL as one session. An HDHomeRun tuner opened a second time with the same `ClientID` and `SessionID` replays that session from its start instead of joining at live (AE#1100: the second open delivered the first one's bytes again, 25 MB in 6 s). Every reopen of the loaded URL then puts the viewer minutes behind.
+
+**When the engine asks.** Before each time it opens a live URL source again inside the session:
+
+- an audio-track switch that reloads the session (not the in-place switch of the software live route)
+- `reloadAtCurrentPosition()`, which the return from the background also runs
+- each reconnect of a live connection that dropped, on both routes, and each attempt of the native route's own source reopen
+
+It is handed the URL the session loaded, every time, so the closure needs no state of its own. The reconnects run off the main actor, so keep it quick and never block in it. It is not asked for a custom source or for VOD. The native route reads the value the session loaded with, so set it before `load`.
+
 ### Live: exhausted verified replay
 
 **What the host must do:** only if it sets `LoadOptions.hostRetriesExhaustedLiveReplay = true`, subscribe to `liveSourceReplayExhausted` and retry with `retryLiveSourceRecovery()` under its own backoff.
@@ -1300,7 +1324,7 @@ A settings screen reads `AetherEngine.displayCapabilities` instead of guessing f
 | --- | --- |
 | `$audioTracks` | `[TrackInfo]`. Republished when `LoadOptions.confirmAtmos` confirms a track, and when the DTS:X decoder confirms the playing track as DTS:X (`isDTSX`). On `.remoteBypass`, see below. |
 | `$activeAudioTrackIndex` | The selected track's id. On `.remoteBypass`, the enabled item track's. |
-| `selectAudioTrack(index:)` | Session-preserving reload. `index` is `TrackInfo.id`. See [Switching audio tracks](#switching-audio-tracks). |
+| `selectAudioTrack(index:)` | Session-preserving reload, or an in-place switch on a software live session with a ring. `index` is `TrackInfo.id`. See [Switching audio tracks](#switching-audio-tracks). |
 | `audioShaping`, `setAudioShaping(_:)`, `$audioShapingState` | Shape the session's audio before it reaches the output (AE#923). See [Audio shaping](#audio-shaping). |
 | `normalizationGainDB`, `setNormalizationGain(_:)`, `normalizationGainReport` | Per-track loudness gain on audio-only sessions, lift included. See [Track loudness on audio-only sessions](#track-loudness-on-audio-only-sessions). |
 | `installAudioTap(channels:)`, `removeAudioTap()`, `audioTapHasDeliverySource`, `AetherEngine.audioTapFormat` | Opt-in decoded PCM, mono Float32 48 kHz with source-PTS stamps, off the render path. `channels` is an `AudioTapChannels`: `.downmix` (default) or `.dialogue` (the centre channel alone). See [the audio tap contract](#the-audio-tap-ends-with-its-session). |
@@ -1315,7 +1339,18 @@ The ids are synthetic (from 400000 up), because there is no stream index on that
 
 ### Switching audio tracks
 
-`selectAudioTrack(index:)` is a session-preserving reload.
+`selectAudioTrack(index:)` is a session-preserving reload. The one exception is the software live route, which switches in place (next paragraph).
+
+**Software live with a ring: no reload (AE#1100).** A live session on the software path that has a packet ring (`dvrWindowSeconds`, or `liveEdgeCushionSeconds`) keeps every audio track of the source in that ring, not only the one playing. A pick opens a decoder for the new track and reseeds the feeder at the playhead, the way a DVR seek to the same spot would. So:
+
+- the source is not opened again, and an origin that replays a session opened twice (HDHomeRun) cannot put the viewer back at the tune-in
+- the position and the whole rewind window stay, and a rewind behind the switch plays the new track too
+- it also works on a forward-only custom source, which could not switch at all before
+- the picture holds through the reseed, like a DVR seek
+
+The extra tracks cost ring space: each one adds its own bitrate (an AC-3 track at 192 to 448 kbit/s next to 8 to 19 Mbit/s of broadcast MPEG-2, so a few percent). A session that cannot switch in place, for example one whose clock has not started yet, falls back to the reload and logs why. Every other live session reloads, which opens the source again; see [Live: a one-shot live URL](#live-a-one-shot-live-url).
+
+The rest of this section describes the reload.
 
 - **Native path.** The old item stays mounted while the source reopens. Its last picture is held until the new item's first frame, so the switch shows a still, not black. How and where it is held (still view, PiP, Dolby Vision, software path): [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). Audio is not gapless, and a media-services reset still discards the item.
 - **Elsewhere** expect roughly 0.5 to 1 s of black.
@@ -1328,7 +1363,7 @@ The ids are synthetic (from 400000 up), because there is no stream index on that
 It does nothing in these cases. Every refusal is logged, so a picker that does nothing can be explained:
 
 - when out of range or already active
-- on a forward-only custom source (live ingest included), which cannot rebuild its pipeline. There a track change is a fresh `load` naming the stream.
+- on a forward-only custom source (live ingest included), which cannot rebuild its pipeline, unless the software live route switches it in place (above). Otherwise a track change there is a fresh `load` naming the stream.
 - on a sequential origin (`$isSequentialOrigin`): a track change there is a fresh `load`, see [`sequentialOrigin`](#sequentialorigin).
 - on `.remoteBypass`, where AVPlayer owns the audio selection and the track list is informational. A different language there is a different URL.
 
@@ -1534,6 +1569,7 @@ Hosts can supply other positive limits. Ordinary subtitle selection behaves as b
 | `nativeLiveDVRMandatoryBytes` | The finite pinned playback payload that may exceed that allowance. Excludes init and subtitle data, muxer staging, AVPlayer's buffers, filesystem overhead and recordings. |
 | `setSoftwareLiveDVRLimits(_:availableCapacityBytes:)`, `softwareLiveDVRBytes` | The same lease for the software live spool, which needs `LoadOptions.softwareDVRRetention`. `softwareLiveDVRBytes` is the retained packet payload. See [DVR limits](#dvr-limits). |
 | `liveSourceReset` | The [retune contract](#live-the-retune-request). |
+| `liveReopenURL` | `(@Sendable (URL) -> URL?)?`. The URL to open when the engine opens a live URL source again inside one session. See [Live: a one-shot live URL](#live-a-one-shot-live-url). |
 | `liveSourceReplayExhausted` | Verified replay exhausted one bounded recovery round. Cached DVR stays readable; retry via `retryLiveSourceRecovery()` under the host's backoff without losing packet history. See [exhausted verified replay](#live-exhausted-verified-replay). |
 | `liveResumeClamped`, `LiveResumeClamp` | A resume that found the playhead outside the window and moved it; see [a resume that had to move](#live-a-resume-that-had-to-move). |
 | `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | Still on the live session axis, decoded from what the session already holds. A native session reads its DVR segment cache; a software session reads its DVR packet ring (#544). So a tuner channel the box decodes in software has a scrub preview too. |

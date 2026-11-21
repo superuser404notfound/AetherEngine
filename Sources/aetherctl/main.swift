@@ -74,7 +74,7 @@ func printUsage() {
       aetherctl bench --compare <base.json> <new.json> [--tolerance PCT]
       aetherctl play [--fel [--fel-output]] [--upscale [--line-art]] [--tone-map NITS] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--live-join-at-start] [--dvr-window N] [--subs <codec-or-lang>]
                  [--assert-dv] [--dv-base-layer]
-                 [--start-position S] [--switch-audio <index>[@ms]]
+                 [--start-position S] [--switch-audio <index>[@ms]] [--live-reopen-param NAME]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
                  [--subtitle-offset-reach SECONDS] [--subtitle-delay-reach SECONDS] [--subtitle-advance-reach SECONDS]
                  [--audio-delay <ms>] [--switch-audio-delay <ms>[@ms]]... [--paused]
@@ -881,6 +881,9 @@ if first == "play" {
     let subsPick = takeStringFlag("--subs", from: &rest)
     let hostCalls = takeStringFlag("--host-calls", from: &rest).map { $0.split(separator: ",").map(String.init) } ?? []
     let audioStats = takeFlag("--audio-stats", from: &rest)
+    // AE#1100: answers `liveReopenURL` by rewriting this query parameter to a fresh value per reopen,
+    // the way a host mints a new HDHomeRun SessionID.
+    let liveReopenParameter = takeStringFlag("--live-reopen-param", from: &rest)
     let seekEvery = takeDoubleFlag("--seek-every", from: &rest)
     // #240: absolute far-seek targets, cycled one per --seek-every tick (e.g. 600,30,302,640).
     let seekPattern = takeStringFlag("--seek-pattern", from: &rest)
@@ -1251,7 +1254,7 @@ if first == "play" {
         }
         done.wait()
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, liveCushion: liveCushion, liveJoinAtStart: liveJoinAtStart, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, liveCushion: liveCushion, liveJoinAtStart: liveJoinAtStart, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, liveReopenParameter: liveReopenParameter, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, servedURL: servedURL, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, nativeVideoFrameDiagnostics: nativeVideoFrameDiagnostics, nativeVideoFrameRecovery: nativeVideoFrameRecovery, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,

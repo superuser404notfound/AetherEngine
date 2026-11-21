@@ -612,6 +612,7 @@ Other lines `play` prints:
 | Flag | Meaning | Default |
 |---|---|---|
 | `--switch-audio <index>[@ms]` | Switches the audio stream just after playback starts (#337). | +20 ms |
+| `--live-reopen-param NAME` | Answers `liveReopenURL` by giving the query parameter `NAME` a new value on every reopen, the way a host mints a fresh HDHomeRun `SessionID` (AE#1100). Each answer prints a `LIVEREOPEN` line. | off |
 | `--audio-delay <ms>` | `LoadOptions.audioDelaySeconds` at load. See [Shared flags](#shared-flags). | 0 |
 | `--switch-audio-delay <ms>[@ms]` | Calls `setAudioDelay(_:)` mid-session. Repeatable. | +20 s |
 | `--audio-shaping <spec>` | `LoadOptions.audioShaping` at load. | off |
@@ -838,6 +839,17 @@ Serve an HLS master over https with a self-signed certificate, and the two arms 
 
 - Pick a stream whose first packet sits late in the mux. The defect reading (before the fix) is `state=playing cur=0.00` for the whole run with a first frame on screen. The end-of-run verdict names it.
 - `--audio-stats` with it re-installs the tap after the switch. The tap is bound to the software host the switch replaces, and would otherwise report silence for a session that is playing fine.
+- On a software live session with a ring the switch happens in place (AE#1100): no rebuild, and the log shows `AE#1100 live audio switched in place`. The tap re-install is then harmless.
+
+**A replaying live origin (AE#1100).** To see whether a live session opens its source twice, put an origin in front that behaves like an HDHomeRun tuner: a `SessionID` opened again replays from where that session began. Then read the origin's request log. Measured on a 720p MPEG-2 fixture with two AC-3 tracks (`-ac:a:0 2 -ac:a:1 6`):
+
+```bash
+aetherctl play --live --dvr-window 600 --switch-audio 2@25000 --seconds 45 "http://127.0.0.1:8912/auto/v4.1?ClientID=1&SessionID=101"
+aetherctl play --live --live-reopen-param SessionID --switch-audio 2@15000 --seconds 30 "<same URL>"
+```
+
+- With the ring, the switch opens nothing: one request in the origin log, `cur` runs on (23.42 to 24.36 s) and `range=` keeps its start.
+- Without a ring the switch reloads. Without the flag the reload replayed the session (the source PTS fell from 31.05 to 18.04 s); with `--live-reopen-param SessionID` it opened `SessionID=9r1` at live (31.29 to 32.96 s).
 
 Build a fixture with a late track by offsetting one input:
 

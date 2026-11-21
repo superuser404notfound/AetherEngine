@@ -1292,6 +1292,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         preopenedDemuxer: Demuxer? = nil,
         sourceReopenableByURL: Bool = true,
         customSourceReopenFactory: CustomSourceReopenFactory? = nil,
+        liveReopenURL: (@Sendable (URL) -> URL?)? = nil,
         refusalBooksURL: URL? = nil,
         companionAudioReader: IOReader? = nil,
         liveSourceAnnouncesDiscontinuities: Bool = false,
@@ -1376,6 +1377,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.preopenedDemuxer = preopenedDemuxer
         self.sourceReopenableByURL = sourceReopenableByURL
         self.customSourceReopenFactory = customSourceReopenFactory
+        self.liveReopenURL = liveReopenURL
         self.companionAudioReader = companionAudioReader
         self.liveSourceAnnouncesDiscontinuities = liveSourceAnnouncesDiscontinuities
         self.forwardWindowSegments = Self.clampedForwardWindow(forwardBufferSegments)
@@ -1444,6 +1446,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// URL sources and host-provided custom readers.
     public typealias CustomSourceReopenFactory = @Sendable () -> (reader: IOReader, formatHint: String?)?
     let customSourceReopenFactory: CustomSourceReopenFactory?
+
+    /// AE#1100: the host's `AetherEngine.liveReopenURL`, asked before each live reopen by URL. Nil
+    /// reopens `sourceURL`.
+    let liveReopenURL: (@Sendable (URL) -> URL?)?
 
     /// AE#1084: the URL whose `OriginRequestBudget` books say whether this source is metering us.
     /// `sourceURL` for a URL source; for the VOD TS ingest it is the playlist, because the session's
@@ -1670,7 +1676,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             dem = Demuxer()
             do {
                 try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders,
-                             profile: openProfile.withRequestHeaders(requestHeaders), isLive: isLiveSession)
+                             profile: openProfile.withRequestHeaders(requestHeaders)
+                                .withLiveReopenURL(isLiveSession ? liveReopenURL : nil), isLive: isLiveSession)
             } catch {
                 throw Self.openFailure(from: error)
             }

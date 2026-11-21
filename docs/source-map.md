@@ -31,6 +31,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `LiveReloadPolicy.swift` | Pure decisions for live reloads: rejoin at the live edge (no stale resume position), skip the pre-readiness zero seek. |
 | `TransportControllable.swift` | Common transport surface of the four playback hosts (single active-host dispatch). |
 | `FFmpegErrorConstants.swift` | AVERROR sentinels Swift cannot import from the C macros. |
+| `AetherEngine+LiveReopenURL.swift` | AE#1100: asks the host's `liveReopenURL` before a live URL is opened again, and publishes an in-place live audio switch. |
 | `AetherEngine+LiveSubtitleRenditions.swift` | Live: the upstream master's `EXT-X-MEDIA:TYPE=SUBTITLES` renditions as tracks (#359). See note. |
 | `AetherEngine+SubtitleOCR.swift` | Arming, per-ordinal cursors and the MainActor tick of the bitmap-subtitle OCR worker. It fills a text rendition for PiP / AirPlay / external display while a PGS / DVB / DVD track's rendition is selected natively. |
 | `AetherEngine+AudioShaping.swift` | `setAudioShaping(_:)`: audio shaping as a live setting. Each change is a session-preserving rebuild, with presses folded into the one in flight (AE#923). |
@@ -442,6 +443,7 @@ On-demand MPEG-DASH (AE#859): one static Period, each representation a single `S
 | `SoftwarePacketCacheTiming.swift` | A separate presentation axis for packets whose PTS the AVI MPEG-4 repair withholds, qualified against the decoder's own frames. |
 | `SoftwareReadAdmission.swift` | Read generations: packets, EOF and errors of a superseded seek or stop are rejected. |
 | `SoftwareEndOfMediaClock.swift` | AE#374: stops the software master clock at end of media so `currentTime` does not walk past `duration`. |
+| `LiveAudioSelection.swift` | AE#1100: the audio track the software live feeder plays, swapped in place by an audio pick; also which other tracks the reader stores in the ring. |
 | `SoftwareLiveJoinPolicy.swift` | Where a software live session starts playing once the connect burst has landed, and the holdback behind the edge. |
 | `DirectLiveAudioReadAhead.swift` | Software live without a DVR feeder: a forward-only read-ahead on the one existing source connection. |
 | `SoftwareStillExtractor.swift` | #544: decodes one still from the software live path's packet window with a real `SoftwareVideoDecoder`. |

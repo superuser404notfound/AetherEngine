@@ -1190,8 +1190,15 @@ extension HLSVideoEngine {
             do {
                 switch transport {
                 case .url:
-                    try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders,
-                                 profile: openProfile.withRequestHeaders(requestHeaders), isLive: true)
+                    // AE#1100: an origin that replays its session on the same URL gets a fresh one.
+                    let reopenURL = liveReopenURL?(sourceURL) ?? sourceURL
+                    if reopenURL != sourceURL {
+                        EngineLog.emit("[HLSVideoEngine] AE#1100 live reopen attempt \(attempt): on the URL the host handed over",
+                                       category: .session)
+                    }
+                    try dem.open(url: reopenURL, extraHeaders: sourceHTTPHeaders,
+                                 profile: openProfile.withRequestHeaders(requestHeaders)
+                                    .withLiveReopenURL(liveReopenURL), isLive: true)
                 case .customFactory:
                     // #199: fresh engine-created ingest reader over the same channel; the dead
                     // reader's construction inputs are immutable, so this rejoins at the live edge.

@@ -44,29 +44,33 @@ extension AetherEngine {
             forName: AVAudioSession.routeChangeNotification,
             object: AVAudioSession.sharedInstance(), queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.ownsChannelPreference else { return }
-                // Same source the activation path resolves: the engines' coordinated maximum, else this
-                // engine's own track, so a stereo title is never presented to the route as 8 channels.
-                let sources = SharedOutputCoordinator.shared.preferredSourceChannels ?? self.ownSourceChannels()
-                _ = self.enqueueAudioSessionTransition {
-                    // Off the main actor (AE#538): the reads, the compare and the write are one step.
-                    let session = AVAudioSession.sharedInstance()
-                    guard session.maximumOutputNumberOfChannels > 0,
-                          let wanted = AetherEngine.channelPreferenceTarget(
-                        preferredNow: session.preferredOutputNumberOfChannels,
-                        sourceChannels: sources, maxOutput: session.maximumOutputNumberOfChannels
-                    ) else { return }
-                    do {
-                        try session.setPreferredOutputNumberOfChannels(wanted)
-                        EngineLog.emit("[AetherEngine] route change: channel preference -> \(wanted) (source=\(sources?.formatted() ?? "unknown") max=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels))", category: .engine)
-                    } catch {
-                        EngineLog.emit("[AetherEngine] route change: channel preference write failed: \(error)", category: .engine)
-                    }
-                }
-            }
+            Task { @MainActor in self?.refreshRendererChannelPreference(reason: "route change") }
         }
         retainLifecycleObserver(observer)
+    }
+
+    /// Rewrites the channel preference when the route or the source's channel count moved. Also run
+    /// after an in-place live audio switch (AE#1100), which changes the source side without a load.
+    func refreshRendererChannelPreference(reason: String) {
+        guard ownsChannelPreference else { return }
+        // Same source the activation path resolves: the engines' coordinated maximum, else this
+        // engine's own track, so a stereo title is never presented to the route as 8 channels.
+        let sources = SharedOutputCoordinator.shared.preferredSourceChannels ?? ownSourceChannels()
+        _ = enqueueAudioSessionTransition {
+            // Off the main actor (AE#538): the reads, the compare and the write are one step.
+            let session = AVAudioSession.sharedInstance()
+            guard session.maximumOutputNumberOfChannels > 0,
+                  let wanted = AetherEngine.channelPreferenceTarget(
+                preferredNow: session.preferredOutputNumberOfChannels,
+                sourceChannels: sources, maxOutput: session.maximumOutputNumberOfChannels
+            ) else { return }
+            do {
+                try session.setPreferredOutputNumberOfChannels(wanted)
+                EngineLog.emit("[AetherEngine] \(reason): channel preference -> \(wanted) (source=\(sources?.formatted() ?? "unknown") max=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels))", category: .engine)
+            } catch {
+                EngineLog.emit("[AetherEngine] \(reason): channel preference write failed: \(error)", category: .engine)
+            }
+        }
     }
     #endif
 }

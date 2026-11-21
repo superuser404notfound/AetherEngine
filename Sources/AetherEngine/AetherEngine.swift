@@ -6881,7 +6881,8 @@ public final class AetherEngine: ObservableObject {
         var options = loadedOptions
         options.isLiveRejoin = options.isLive
         options.subtitleSessionCarryover = carryover
-        try await load(url: url, startPosition: resume, options: options,
+        try await load(url: urlForLiveReopen(of: url, site: "reload at current position"),
+                       startPosition: resume, options: options,
                        audioSourceStreamIndex: audioToRestore.map { Int32($0) }, discTitleID: titleID)
         // AE#711 follow-up: `load` autostarts from the flag it was handed; a play/pause that arrived
         // while it ran is the newer word.
@@ -8552,6 +8553,22 @@ public final class AetherEngine: ObservableObject {
     /// answers by starting the item over. Runs on the main actor.
     public var nowPlayingCommandInterceptor: (@MainActor (NowPlayingRemoteCommand) -> Bool)?
 
+    /// The URL to open when the engine opens a live URL source again inside the same session
+    /// (AE#1100). Handed the URL the session loaded; return a fresh one, or nil to reopen that URL.
+    ///
+    /// For an origin whose live URL is one-shot: an HDHomeRun tuner opened twice with the same
+    /// `SessionID` replays that session from its start instead of joining at live, so every reopen
+    /// put the viewer minutes behind. A host there returns the URL with a new `SessionID`.
+    ///
+    /// Asked before each reopen: an audio-track switch that rebuilds the session, a rebuild at the
+    /// current position (`reloadAtCurrentPosition()`, the return from the background), and each
+    /// attempt of the native route's own reconnect after the source dropped. That last one runs off
+    /// the main actor, so the closure must be quick and must not block. Not asked for a custom
+    /// source, for VOD, or for the switch the software route serves from its ring without reopening
+    /// anything (see `selectAudioTrack(index:)`). Set it before `load`; the native reconnect keeps the
+    /// value the session loaded with.
+    public var liveReopenURL: (@Sendable (_ loadedURL: URL) -> URL?)?
+
     /// Takes the shared Now-Playing surface for this engine when several engines in the process publish
     /// there (one per player window on macOS). An engine claims it on its own when it starts playing; call
     /// this when the user brings its player to the front. No effect on a route published through an
@@ -8673,6 +8690,12 @@ public final class AetherEngine: ObservableObject {
     ///
     /// Not available on a sequential origin either (AE#958): the rebuild could only reopen it at byte 0,
     /// which restarted the programme on the native route and failed the software route's reposition.
+    ///
+    /// A live session on the software route with a ring (`dvrWindowSeconds`, or the live edge cushion)
+    /// switches in place instead (AE#1100): the ring holds every audio track of the source, so the
+    /// switch keeps the position, the rewind window and the source connection, and works on a
+    /// forward-only custom source too. Every other live session rebuilds, which opens the source again
+    /// (see `liveReopenURL`).
     public func selectAudioTrack(index: Int) {
         if videoRoute == .remoteBypass {
             EngineLog.emit(
@@ -8682,9 +8705,12 @@ public final class AetherEngine: ObservableObject {
             )
             return
         }
+        // AE#1100: a switch the software host serves from its own ring never reads the source again,
+        // so the two refusals below, both about reopening it, do not apply.
+        let switchesInPlace = softwareHost?.canSwitchLiveAudioInPlace(to: Int32(index)) ?? false
         // Forward-only custom sources (incl. live HLS-ingest) can't rewind; rebuilding would re-consume a
         // drained FIFO and stall silently. Logged so a picker that does nothing is explainable.
-        if isCustomSource && !customSourceIsSeekable {
+        if !switchesInPlace, isCustomSource && !customSourceIsSeekable {
             EngineLog.emit(
                 "[AetherEngine] selectAudioTrack(\(index)) ignored: forward-only custom "
                 + "source cannot rebuild its pipeline (live ingest / demuxed-audio "
@@ -8737,6 +8763,24 @@ public final class AetherEngine: ObservableObject {
                 let selected = self.pendingAudioSelection ?? selected
                 self.pendingAudioSelection = nil
                 if self.activeAudioTrackIndex == selected { continue }
+                if let host = self.softwareHost, host.canSwitchLiveAudioInPlace(to: Int32(selected)) {
+                    let outcome = await host.switchLiveAudioInPlace(to: Int32(selected))
+                    guard !Task.isCancelled, self.audioSelectionEpoch == epoch, self.softwareHost === host else { return }
+                    switch outcome {
+                    case .switched:
+                        self.noteLiveAudioSwitchedInPlace(host: host)
+                        continue
+                    case .superseded:
+                        return
+                    case .unavailable(let reason):
+                        EngineLog.emit(
+                            "[AetherEngine] AE#1100 selectAudioTrack(\(selected)): no in-place switch (\(reason)); "
+                            + "rebuilding the session instead",
+                            category: .engine)
+                    }
+                }
+                // The in-place switch was the only way on a forward-only custom source.
+                if self.isCustomSource && !self.customSourceIsSeekable { return }
                 let beforeReload = self.loadGeneration
                 let failure = await self.reloadWithAudioOverride(
                     url: url, audioStreamIndex: Int32(selected), expectedGeneration: beforeReload,
