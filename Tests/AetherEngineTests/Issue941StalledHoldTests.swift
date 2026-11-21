@@ -37,7 +37,7 @@ struct Issue941StalledHoldTests {
         -> (decodeEnd: Int, hold: SubtitleOverlayDrainer.HarvestGapHold?) {
         SubtitleOverlayDrainer.harvestGapStep(
             count: window.count, ptsAt: { window[$0] }, sequenceAt: { sequence[$0] },
-            held: held, resumeFrom: cursor, isReset: false,
+            held: held, resumeFrom: cursor, resetFrom: nil,
             releaseAt: playhead + AetherEngine.subtitleDrainHarvestGapReleaseLeadSeconds,
             isRead: { coverage.covers(from: $0, through: $1) })
     }
@@ -107,7 +107,7 @@ struct Issue941StalledHoldTests {
         let sequence: [UInt64] = [50, 51, 52, 53, 54]
         let result = SubtitleOverlayDrainer.harvestGapStep(
             count: window.count, ptsAt: { window[$0] }, sequenceAt: { sequence[$0] },
-            held: .init(at: 47.0, sequence: 14), resumeFrom: (47.0, 14), isReset: true,
+            held: .init(at: 47.0, sequence: 14), resumeFrom: (47.0, 14), resetFrom: 44.86 - 15,
             releaseAt: 44.86 + 2, isRead: { coverage.covers(from: $0, through: $1) })
         #expect(result.decodeEnd == window.count)
         #expect(result.hold == nil)

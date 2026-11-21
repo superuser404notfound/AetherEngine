@@ -550,7 +550,7 @@ extension AetherEngine {
                 sequenceAt: { entries[$0].sequence },
                 held: held?.harvestGap,
                 resumeFrom: held.map { ($0.lastDecodedPts, $0.lastDecodedSequence) },
-                isReset: isReset,
+                resetFrom: isReset ? window.from : nil,
                 releaseAt: playhead + Self.subtitleDrainHarvestGapReleaseLeadSeconds,
                 isRead: store.harvestReadCheck())
             work.channels.append(SubtitleDrainChannelWork(
@@ -635,9 +635,12 @@ extension AetherEngine {
                 lastDecoded = entry.ptsSeconds
                 lastDecodedSequence = entry.sequence
             }
-            if case .resetAndDecode = plan, batchEnd == 0 {
-                // Fresh window with nothing stored yet: anchor just behind the window start so
-                // steady ticks rescan it without re-triggering the discontinuity path.
+            if isReset, decodeEnd == 0 {
+                // Fresh window with nothing stored yet, or (AE#1104) nothing read in front of its
+                // first entry: anchor just behind the window start so steady ticks rescan it without
+                // re-triggering the discontinuity path. The old cursor is where the seek left.
+                // Not clamped at 0 like the AE#1104 hold: the next tick decodes from just past
+                // here, and a cursor on 0 would skip a packet stamped exactly 0.
                 lastDecoded = window.from
                 lastDecodedSequence = 0
             }

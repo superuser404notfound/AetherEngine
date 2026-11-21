@@ -173,16 +173,31 @@ enum SubtitleOverlayDrainer {
     /// the refill was about to harvest (reported: 50..68 s lost, the set at 71 s published at
     /// 44.86 s). The release lead already ends a hold exactly when its far side is due, and nothing
     /// before that is on screen, so a hole the harvest never closes costs no visible delay either.
+    ///
+    /// AE#1104: `resetFrom` is the window start when this tick is a reset, nil on a steady tick.
+    /// A reset checks the ground in front of its first entry too, from that start clamped at 0
+    /// like every reader's read start. A backward seek past the
+    /// session's earliest reading leaves the store holding only what an earlier run read further
+    /// on, so the first stored entry is that island and the stretch from the window start to it is
+    /// unread. Decoding the island put the cursor on its far side, and the cues the readers then
+    /// found from the landing on were stored behind the cursor and never decoded (reported: opened
+    /// at 46.2 s, sought to 0, the cues from 7.25 to 25.25 s never arrived). Only where the ledger
+    /// speaks: harvest order has no pair to compare at a window boundary.
     static func harvestGapStep(count: Int, ptsAt: (Int) -> Double,
                                sequenceAt: (Int) -> UInt64,
                                held: HarvestGapHold?,
                                resumeFrom: (pts: Double, sequence: UInt64)?,
-                               isReset: Bool, releaseAt: Double,
+                               resetFrom: Double?, releaseAt: Double,
                                isRead: ((Double, Double) -> Bool)?) -> (decodeEnd: Int, hold: HarvestGapHold?) {
+        let isReset = resetFrom != nil
         if let held, !isReset, count > 0, ptsAt(0) > releaseAt,
            !harvestGapHoldResumes(firstSequence: sequenceAt(0), heldSequence: held.sequence,
                                   firstPts: ptsAt(0), heldAt: held.at, isRead: isRead) {
             return (0, held)
+        }
+        if let resetFrom, let isRead, count > 0, ptsAt(0) > releaseAt {
+            let from = max(0, resetFrom)
+            if !isRead(from, ptsAt(0)) { return (0, HarvestGapHold(at: from, sequence: 0)) }
         }
         if let cut = harvestGapCut(count: count, ptsAt: ptsAt, sequenceAt: sequenceAt,
                                    resumeFrom: isReset ? nil : resumeFrom,
