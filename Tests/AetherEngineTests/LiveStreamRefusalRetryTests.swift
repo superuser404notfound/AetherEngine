@@ -113,13 +113,15 @@ struct LiveStreamRefusalRetryTests {
     }
 
     /// Reads until `expectedBytes` have come through or the reader fails; the bytes, and the code
-    /// the read ended with when it did not deliver them.
+    /// the read ended with when it did not deliver them. The last read asks only for what is left: a
+    /// reader that already prefetched the next connection hands over a whole 64 KB, and on a loaded
+    /// runner that overshot `chunk.count * 16` with no failure (CI, 2026-11-21).
     private static func drain(_ reader: AVIOReader, expectedBytes: Int) -> (bytes: Int, failure: Int32?) {
         let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 64 * 1024)
         defer { buf.deallocate() }
         var total = 0
         while total < expectedBytes {
-            let n = reader.read(into: buf, size: 64 * 1024)
+            let n = reader.read(into: buf, size: Int32(min(64 * 1024, expectedBytes - total)))
             if n <= 0 { return (total, n) }
             total += Int(n)
         }

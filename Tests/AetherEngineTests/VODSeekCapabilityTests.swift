@@ -70,6 +70,12 @@ struct VODSeekCapabilityTests {
     @Test("An audio switch keeps a seekable source seekable on both decode paths",
           arguments: [DecodePath.automatic, DecodePath.software])
     func audioSwitchKeepsSeekability(path: DecodePath) async throws {
+        // On the CI run of 2026-11-21 both cases ran into the suite's time limit at once and the log
+        // could not say where. The watchdog names the step it hung in. A plain Task, so the issue is
+        // filed against this test; the wait itself runs off the main actor, which may be the stuck part.
+        let step = StepMarker("load")
+        let watchdog = Task { await Self.reportIfStuck(step, path: path) }
+        defer { watchdog.cancel() }
         let origin = try ProbeHTTPTestOrigin(data: TwoAudioTrackFixture.data)
         let engine = try AetherEngine()
         defer { engine.stop(); origin.stop() }
@@ -77,21 +83,40 @@ struct VODSeekCapabilityTests {
         options.preferredDecodePath = path
         options.suppressDisplayCriteria = true
         try await engine.load(url: URL(string: "http://127.0.0.1:\(origin.port)/two-audio.mkv")!, options: options)
+        step.value = "seekable and playing"
         try await waitFor { engine.canSeek && engine.currentTime > 0.5 }
         // The clip is 6 s and plays in real time. On a starved CI pool the switch took long enough for
         // it to reach .ended, which refuses the seek for a reason this test is not about. Paused, it
         // cannot run out.
+        step.value = "paused"
         engine.pause()
         try await waitFor { engine.state == .paused }
         let other = try #require(engine.audioTracks.first { $0.id != engine.activeAudioTrackIndex })
+        step.value = "audio switch to \(other.id)"
         engine.selectAudioTrack(index: other.id)
         try await waitFor { engine.activeAudioTrackIndex == other.id && engine.isSessionReady }
         #expect(engine.isSourceSeekable == true)
         #expect(engine.canSeek)
+        step.value = "seek to 4"
         await engine.seek(to: 4)
+        step.value = "landing past 3.5"
         try await waitFor { engine.currentTime > 3.5 }
         #expect(abs(engine.currentTime - 4) < 1)
     }
 
+    nonisolated private static func reportIfStuck(_ step: StepMarker, path: DecodePath) async {
+        do { try await Task.sleep(for: .seconds(150)) } catch { return }
+        Issue.record("audio switch test (\(path)) still at step '\(step.value)' after 150 s")
+    }
+}
 
+/// Which step a long test is in, readable from the detached watchdog.
+private final class StepMarker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: String
+    init(_ initial: String) { current = initial }
+    var value: String {
+        get { lock.withLock { current } }
+        set { lock.withLock { current = newValue } }
+    }
 }

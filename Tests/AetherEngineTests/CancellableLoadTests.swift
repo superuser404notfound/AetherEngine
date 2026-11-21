@@ -70,6 +70,14 @@ struct CancellableLoadTests {
     /// "a timeout ended it". 1.5 s was a guess at the quiet-machine time and a loaded runner took 2 s.
     static let ceiling: Duration = .seconds(4)
 
+    /// The same bound for a URL source whose origin takes ranges, where the open never sends the HEAD:
+    /// the held requests are the pump's open GET (20 s stall timeout) and the tail range probe (25 s
+    /// budget), so 8 s still tells the cancel from a timeout. The end of `load()` needs the main actor,
+    /// and on the one-thread extended run a busy main actor alone took 4.5 s in both jobs while the
+    /// cancel itself lands in 0.02 to 0.15 s locally. The test checks that no HEAD went out, which is
+    /// what keeps the shortest timeout at 20 s.
+    static let rangedURLCeiling: Duration = .seconds(8)
+
     /// A custom source has no timeout to tell the cancel from: the only other end of a parked read
     /// is the reader's own fallback (`ParkedReader` and `RetainedReader` both wait 120 s), so the
     /// bound is derived from that. 4 s failed on a loaded runner that took 7.3 s from the cancel to
@@ -119,7 +127,8 @@ struct CancellableLoadTests {
 
         let elapsed = try await Self.cancelAndTime(task, box)
         #expect(box.outcome == .cancelled, "ended \(String(describing: box.outcome)) after \(elapsed)")
-        #expect(elapsed < Self.ceiling)
+        #expect(origin.requests.allSatisfy { $0.method != "HEAD" }, "a HEAD went out, \(origin.requests)")
+        #expect(elapsed < Self.rangedURLCeiling)
         origin.stop()
         await task.value
         #expect(engine.state == .idle)
