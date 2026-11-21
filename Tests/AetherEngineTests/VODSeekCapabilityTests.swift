@@ -71,12 +71,10 @@ struct VODSeekCapabilityTests {
           arguments: [DecodePath.automatic, DecodePath.software])
     func audioSwitchKeepsSeekability(path: DecodePath) async throws {
         // On the CI run of 2026-11-21 both cases ran into the suite's time limit at once and the log
-        // could not say where. The watchdog runs off the main actor and names the step it hung in.
+        // could not say where. The watchdog names the step it hung in. A plain Task, so the issue is
+        // filed against this test; the wait itself runs off the main actor, which may be the stuck part.
         let step = StepMarker("load")
-        let watchdog = Task.detached {
-            try await Task.sleep(for: .seconds(150))
-            Issue.record("audio switch test (\(path)) still at step '\(step.value)' after 150 s")
-        }
+        let watchdog = Task { await Self.reportIfStuck(step, path: path) }
         defer { watchdog.cancel() }
         let origin = try ProbeHTTPTestOrigin(data: TwoAudioTrackFixture.data)
         let engine = try AetherEngine()
@@ -106,7 +104,10 @@ struct VODSeekCapabilityTests {
         #expect(abs(engine.currentTime - 4) < 1)
     }
 
-
+    nonisolated private static func reportIfStuck(_ step: StepMarker, path: DecodePath) async {
+        do { try await Task.sleep(for: .seconds(150)) } catch { return }
+        Issue.record("audio switch test (\(path)) still at step '\(step.value)' after 150 s")
+    }
 }
 
 /// Which step a long test is in, readable from the detached watchdog.
