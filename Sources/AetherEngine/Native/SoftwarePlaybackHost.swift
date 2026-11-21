@@ -594,8 +594,10 @@ final class SoftwarePlaybackHost {
         }
         let previous = audioStreamIndex
         let timeBaseSeconds = Double(tb.num) / Double(tb.den)
-        // The old decoder is not closed here: the feeder may be inside a decode on it, and its own
-        // snapshot keeps it alive until that returns. What it produces meets the reseed's flush.
+        // Closed right after the swap. Safe under a running feeder: decode and close share the
+        // decoder's lock, a decode after close returns nothing, and what one in flight produced
+        // meets the reseed's flush.
+        let outgoing = audioDecoder
         audioDecoder = made.producer
         audioStreamIndex = index
         audioTimeBaseSeconds = timeBaseSeconds
@@ -603,6 +605,7 @@ final class SoftwarePlaybackHost {
         audioRouteTakesAtmosActivator = made.route.takesAtmosOutputActivator
         audioShapingApplied = audioShaping.isActive && made.route == .pcm
         selection.replace(streamIndex: index, decoder: made.producer, timeBaseSeconds: timeBaseSeconds)
+        outgoing?.close()
         let clock = audioOutput?.currentTimeSeconds ?? .nan
         let target = liveSessionSeconds(forSource: clock) ?? currentTime
         EngineLog.emit(
