@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Added
 
+- **`untaggedVideoColor` lets a host show an untagged 10-bit stream as HDR10 or HLG (AE#1103).** Some IPTV
+  files are HDR10 with every colour tag stripped, and since #654 the engine plays them as BT.709, which looks
+  pale. With `.hdr10` or `.hlg` set, a 10-bit stream that declares no primaries, transfer or matrix and is not
+  Dolby Vision gets that description, and the route, display criteria, `colr` box, software frame tags and
+  `probe` follow it. A stream that declares anything keeps it, and an HEVC stream with a Dolby Vision RPU is
+  left alone even without a record. Measured on such an HEVC encode, the served `init.mp4` carries
+  `colr nclx` 9 / 16 / 9, and Apple's decoder reads it as BT.2020 / PQ instead of guessing BT.709.
 - **`liveReopenURL` lets a host hand the engine a fresh URL whenever it opens a live source again (AE#1100).**
   An HDHomeRun tuner opened twice with the same `SessionID` replays that session from its start, so every
   reopen of the loaded URL put the viewer minutes behind live. The engine now asks the closure before an

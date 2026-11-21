@@ -8,7 +8,7 @@ func runServe(url: URL, dvModeAvailable: Bool, forceDVWithoutDisplay: Bool = fal
               nativeSubsIndex: Int? = nil, startPosition: Double? = nil,
               audioDelayMs: Int = 0, iFrames: Bool = false,
               objectAudioRendering: ObjectAudioRendering = .off, audioStreamIndex: Int32? = nil,
-              stereo: StereoPresentation? = nil) -> Never {
+              stereo: StereoPresentation? = nil, untaggedColor: UntaggedVideoColor = .standard) -> Never {
     EngineLog.handler = { line in
         let timestamp = ISO8601DateFormatter.string(
             from: Date(),
@@ -33,6 +33,7 @@ func runServe(url: URL, dvModeAvailable: Bool, forceDVWithoutDisplay: Bool = fal
     }
     if let audioStreamIndex { flagSuffix += " [--audio-index \(audioStreamIndex)]" }
     if let stereo { flagSuffix += " [--stereo \(stereo)]" }
+    if untaggedColor != .standard { flagSuffix += " [--untagged-color \(untaggedColor)]" }
     print(EngineLog.redacted("aetherctl serve: \(url.absoluteString)\(flagSuffix)"))
     print("")
 
@@ -48,7 +49,8 @@ func runServe(url: URL, dvModeAvailable: Bool, forceDVWithoutDisplay: Bool = fal
         objectAudioRendering: objectAudioRendering,
         // nil (no flag) is the session as this system gets it; a flag resolves it as visionOS would.
         stereoPresentation: stereo ?? .automatic,
-        stereoOnAnySystem: stereo != nil
+        stereoOnAnySystem: stereo != nil,
+        untaggedVideoColor: untaggedColor
     )
     // Resume anchor exactly like AetherEngine.loadNative's load(startPosition:) (#99 repro).
     engine.initialStartSeconds = startPosition

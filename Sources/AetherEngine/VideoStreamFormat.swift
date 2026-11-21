@@ -38,12 +38,8 @@ public struct VideoStreamFormat: Sendable, Equatable {
          codecID: AVCodecID,
          profile: Int32) {
         let pixName = pixelFormat == AV_PIX_FMT_NONE ? nil : av_get_pix_fmt_name(pixelFormat).map { String(cString: $0) }
-        var depth: Int? = nil
-        if pixelFormat != AV_PIX_FMT_NONE, let desc = av_pix_fmt_desc_get(pixelFormat), desc.pointee.nb_components > 0 {
-            depth = Int(desc.pointee.comp.0.depth)
-        } else if declaredBitDepth > 0 {
-            depth = Int(declaredBitDepth)
-        }
+        let resolvedDepth = ColorDescription.bitDepth(pixelFormat: pixelFormat.rawValue, bitsPerRawSample: declaredBitDepth)
+        let depth: Int? = resolvedDepth > 0 ? resolvedDepth : nil
         self.init(
             pixelFormat: pixName,
             bitDepth: depth,

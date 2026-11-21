@@ -22,6 +22,7 @@ extension AetherEngine {
             .withHeldSourceConnection(options.heldSourceConnection)
             .skippingAttachments(options.skipsContainerAttachments)
             .withSourceOpenPolicy(options.sourceOpenPolicy)
+            .withUntaggedVideoColor(options.untaggedVideoColor)
             .withDiagnosticContext(options.sourceDiagnosticsContext)
             .withRequestHeaders(sessionRequestHeaders)
             .withLiveReopenURL(options.isLive && !isCustomSource ? liveReopenURL : nil)
@@ -967,6 +968,7 @@ extension AetherEngine {
             // path only for the host's explicit fastZap profile.
             liveJoinProfile: loadedOptions.liveJoinProfile,
             sourceOpenPolicy: loadedOptions.sourceOpenPolicy,
+            untaggedVideoColor: loadedOptions.untaggedVideoColor,
             diagnosticContext: loadedOptions.sourceDiagnosticsContext,
             liveStartupGraceSeconds: loadedOptions.liveStartupGraceSeconds,
             liveStartupSingleSegmentMinimumSeconds: loadedOptions.liveStartupSingleSegmentMinimumSeconds,

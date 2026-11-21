@@ -160,6 +160,18 @@ extension AetherEngine {
             throw AetherEngineError.sessionNotReloadable(refusal)
         }
 
+        // AE#1103: the same shape for the untagged colour reading.
+        if let refusal = SessionOptionCorrection.untaggedVideoColorRefusal(
+            isCustomSource: isCustomSource, current: loadedOptions, proposed: proposed
+        ) {
+            EngineLog.emit(
+                "[AetherEngine] untaggedVideoColor correction refused, \(refusal.rawValue): a custom source keeps "
+                + "the route it was loaded with; load() it again with the new option",
+                category: .engine
+            )
+            throw AetherEngineError.sessionNotReloadable(refusal)
+        }
+
         // Stating the no-op matters for the same reason #364's teletext switch states it: a host
         // that corrected an option and saw a plain reload cannot otherwise tell "the correction was
         // already in force" from "the correction did not arrive".
@@ -309,6 +321,12 @@ public enum SessionReloadRefusal: String, Sendable, Equatable, CustomStringConve
     /// option. Turning it off is honoured in place, and URL sources are not affected: their correction
     /// re-runs `load()`.
     case videoProcessingRouteNeedsFreshLoad
+    /// AE#1103: a correction that changes `untaggedVideoColor` for a session that plays from a custom
+    /// `IOReader` source. The new description reaches the reopened stream, but the route and the display
+    /// criteria are decided by `load()`, which a custom source's in-place rebuild does not re-run, so the
+    /// panel would not follow. Call `load()` again with the new option. URL sources are not affected:
+    /// their correction re-runs `load()`.
+    case untaggedVideoColorNeedsFreshLoad
 
     public var description: String {
         switch self {
@@ -324,6 +342,8 @@ public enum SessionReloadRefusal: String, Sendable, Equatable, CustomStringConve
             return "the low-resolution upscale route of a custom source is decided by load(), not by a rebuild"
         case .videoProcessingRouteNeedsFreshLoad:
             return "the picture processing route of a custom source is decided by load(), not by a rebuild"
+        case .untaggedVideoColorNeedsFreshLoad:
+            return "the colour route of a custom source's untagged stream is decided by load(), not by a rebuild"
         }
     }
 }
@@ -495,6 +515,16 @@ enum SessionOptionCorrection {
         return .videoProcessingRouteNeedsFreshLoad
     }
 
+    /// Why a correction of `untaggedVideoColor` cannot be honoured, or nil when it can (AE#1103). Any
+    /// change on a custom source is refused, off included: the route and the display criteria the
+    /// session keeps were chosen for the old description, in either direction.
+    static func untaggedVideoColorRefusal(
+        isCustomSource: Bool, current: LoadOptions, proposed: LoadOptions
+    ) -> SessionReloadRefusal? {
+        guard isCustomSource, proposed.untaggedVideoColor != current.untaggedVideoColor else { return nil }
+        return .untaggedVideoColorNeedsFreshLoad
+    }
+
     /// Every field the proposal changed, for the log line. Reflection is right here and wrong
     /// above: a diagnostic that names a new field the day it is added is worth more than one that
     /// cannot be wrong, and being wrong here costs a log line.
@@ -526,7 +556,7 @@ enum SessionOptionCorrection {
     static let knownFields: [String] = [
         "sourceDiagnosticsContext",
         "omitCriteriaColorExtensions", "suppressDisplayCriteria", "displayCriteriaOwner", "httpHeaders", "nativeVideoFrameDiagnostics", "nativeVideoFrameRecovery", "hostRetriesExhaustedLiveReplay",
-        "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "preferHDR10PlusOverForcedDolbyVision", "dolbyVisionHandling", "preferDualLayerDolbyVision", "dualLayerRoute", "foldsDolbyVisionFEL", "upscalesLowResolutionVideo", "upscaleScaler", "videoProcessing", "matchContentEnabled",
+        "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "preferHDR10PlusOverForcedDolbyVision", "dolbyVisionHandling", "untaggedVideoColor", "preferDualLayerDolbyVision", "dualLayerRoute", "foldsDolbyVisionFEL", "upscalesLowResolutionVideo", "upscaleScaler", "videoProcessing", "matchContentEnabled",
         "panelIsInHDRMode", "attemptsHDRMasterOnUnprovenPanel", "panelPresentsDolbyVision",
         "audioBridgeMode", "objectAudioRendering", "rendersDTSXObjectAudio", "stereoPresentation", "isLive", "audioOnly",
         "dvrWindowSeconds",

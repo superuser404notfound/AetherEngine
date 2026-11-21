@@ -81,3 +81,44 @@ struct ColorDescription: Equatable {
         return true
     }
 }
+
+// MARK: - AE#1103: a host-supplied reading of an untagged stream
+
+extension ColorDescription {
+
+    /// The description `LoadOptions.untaggedVideoColor` gives a stream, or nil when it does not apply.
+    ///
+    /// Only a stream that says nothing about primaries, transfer and matrix is touched; one field is
+    /// enough to keep the stream's own word, so the option can sit on a whole library. Under 10 bit a
+    /// PQ or HLG reading is a guess the stream contradicts by its depth, and a Dolby Vision stream is
+    /// described by its record (a recordless Profile 5 has one by now, see `DolbyVisionRecordAudit`).
+    /// The range is kept when declared and limited otherwise, which is what an HDR10 encode carries.
+    static func assumed(
+        _ assumption: UntaggedVideoColor, for declared: ColorDescription, bitDepth: Int, isDolbyVision: Bool
+    ) -> ColorDescription? {
+        let transfer: AVColorTransferCharacteristic
+        switch assumption {
+        case .standard: return nil
+        case .hdr10: transfer = AVCOL_TRC_SMPTE2084
+        case .hlg: transfer = AVCOL_TRC_ARIB_STD_B67
+        }
+        guard bitDepth >= 10, !isDolbyVision,
+              declared.primaries == AVCOL_PRI_UNSPECIFIED,
+              declared.transfer == AVCOL_TRC_UNSPECIFIED,
+              declared.matrix == AVCOL_SPC_UNSPECIFIED else { return nil }
+        return ColorDescription(
+            primaries: AVCOL_PRI_BT2020, transfer: transfer, matrix: AVCOL_SPC_BT2020_NCL,
+            range: declared.range == AVCOL_RANGE_UNSPECIFIED ? AVCOL_RANGE_MPEG : declared.range)
+    }
+
+    /// Bits per luma sample. The pixel format's when the probe resolved one, the container's figure
+    /// otherwise, 0 when neither is known (which `assumed` treats as too shallow). `VideoStreamFormat`
+    /// reports the same number, so the gate and the host never see two depths for one stream.
+    static func bitDepth(pixelFormat: Int32, bitsPerRawSample: Int32) -> Int {
+        if pixelFormat >= 0, let desc = av_pix_fmt_desc_get(AVPixelFormat(rawValue: pixelFormat)),
+           desc.pointee.nb_components > 0 {
+            return Int(desc.pointee.comp.0.depth)
+        }
+        return max(0, Int(bitsPerRawSample))
+    }
+}
