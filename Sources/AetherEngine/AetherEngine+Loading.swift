@@ -24,6 +24,7 @@ extension AetherEngine {
             .withSourceOpenPolicy(options.sourceOpenPolicy)
             .withDiagnosticContext(options.sourceDiagnosticsContext)
             .withRequestHeaders(sessionRequestHeaders)
+            .withLiveReopenURL(options.isLive && !isCustomSource ? liveReopenURL : nil)
     }
 
     /// Apply an AVPlayer clock tick (native VOD/live path) to the engine clock. `nativeClockSeconds`
@@ -980,6 +981,7 @@ extension AetherEngine {
             preopenedDemuxer: preopenedDemuxer,
             sourceReopenableByURL: !isCustomSource,
             customSourceReopenFactory: ingestReopenFactory,
+            liveReopenURL: loadedOptions.isLive && !isCustomSource ? liveReopenURL : nil,
             refusalBooksURL: (customReader as? HLSVODIngestReader)?.budgetOriginURL,
             companionAudioReader: companionAudioReader,
             liveSourceAnnouncesDiscontinuities: liveIngest != nil,
@@ -2565,6 +2567,8 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] reload superseded before start; ignored", category: .engine)
             return nil
         }
+        // AE#1100: a live URL that replays its session when opened twice gets a fresh one from the host.
+        let url = urlForLiveReopen(of: url, site: "session rebuild")
         // #227 round 2: this is a session-preserving rebuild exactly like `reloadAtCurrentPosition`'s
         // URL branch, and it tears down the very item the external-playback KVO watches, so it has to
         // hold the same edge. #227 put the hold on that one branch only, which left the three rebuilds

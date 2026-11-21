@@ -494,6 +494,16 @@ final class SoftwarePlaybackHost {
     /// Disk-spooled DVR rewind ring; non-nil for live sessions with dvrWindowSeconds set. Demux-thread appended (internally locked).
     nonisolated(unsafe) private var dvrRing: PacketRingBuffer?
 
+    /// AE#1100: the track the live feeder plays, swapped by `switchLiveAudioInPlace(to:)`. Nil off the
+    /// ring-fed live route.
+    private var liveAudioSelection: LiveAudioSelection?
+    /// AE#1100: the audio tracks the live reader stores beside the one it started on, by stream index,
+    /// with their time bases in seconds.
+    private var liveAlternateAudioStreams: [Int32: Double] = [:]
+    /// AE#1100: the track the live reader started on. It keeps folding the timeline on it after a
+    /// switch, since the reader runs for the whole session.
+    private var liveReferenceAudioStreamIndex: Int32 = -1
+
     /// Same construction path for the live decoder and controlled-source contract fixtures.
     @discardableResult
     func prepareLiveDVR(windowSeconds window: Double, retention: SoftwareDVRRetentionOptions? = nil,
@@ -530,6 +540,80 @@ final class SoftwarePlaybackHost {
         return ring.setLimits(limits, availableBytes: availableBytes)
     }
     var liveDVRBytes: Int? { dvrRing?.retainedBytes }
+
+    // MARK: - AE#1100 live audio switch in place
+
+    enum LiveAudioSwitchOutcome: Equatable {
+        case switched
+        /// A stop or a newer pick owns the host now.
+        case superseded
+        /// This session cannot switch without a rebuild; the reason is for the log.
+        case unavailable(String)
+    }
+
+    /// Whether `switchLiveAudioInPlace(to:)` can serve `index`: a ring-fed live session that stores
+    /// the track, and a clock that has started (before that the reseed has no playhead to keep).
+    func canSwitchLiveAudioInPlace(to index: Int32) -> Bool {
+        liveAudioSwitchRefusal(to: index) == nil
+    }
+
+    private func liveAudioSwitchRefusal(to index: Int32) -> String? {
+        guard isLive, dvrRing != nil, liveAudioSelection != nil, demuxer != nil else {
+            return "not a ring-fed live session"
+        }
+        guard !stopRequested, failure == nil else { return "the session is stopping or failed" }
+        guard clockArmed else { return "the clock has not started yet" }
+        guard index == liveReferenceAudioStreamIndex || liveAlternateAudioStreams[index] != nil else {
+            return "stream \(index) is not stored in the ring"
+        }
+        return nil
+    }
+
+    /// AE#1100: switches the live session to another audio track without touching the source. The
+    /// reader has stored that track in the ring since the session began, so a new decoder is opened
+    /// for it and the feeder is reseeded at the playhead, the way a DVR seek to the same spot would.
+    /// The position, the rewind window and the source connection all stay.
+    func switchLiveAudioInPlace(to index: Int32) async -> LiveAudioSwitchOutcome {
+        if index == audioStreamIndex { return .switched }
+        if let refusal = liveAudioSwitchRefusal(to: index) { return .unavailable(refusal) }
+        guard let selection = liveAudioSelection, let dem = demuxer,
+              let stream = dem.stream(at: index) else { return .unavailable("stream \(index) has no stream entry") }
+        let tb = stream.pointee.time_base
+        guard tb.den > 0 else { return .unavailable("stream \(index) has no time base") }
+        let made: (producer: any SoftwareAudioProducing, route: SoftwareAtmosRoute)
+        do {
+            made = try await makeAudioProducer(demuxer: dem, streamIndex: index, isLive: true)
+        } catch is CancellationError {
+            return .superseded
+        } catch {
+            return .unavailable("the decoder for stream \(index) did not open: \(error)")
+        }
+        guard !stopRequested, liveAudioSelection === selection else {
+            made.producer.close()
+            return .superseded
+        }
+        let previous = audioStreamIndex
+        let timeBaseSeconds = Double(tb.num) / Double(tb.den)
+        // The old decoder is not closed here: the feeder may be inside a decode on it, and its own
+        // snapshot keeps it alive until that returns. What it produces meets the reseed's flush.
+        audioDecoder = made.producer
+        audioStreamIndex = index
+        audioTimeBaseSeconds = timeBaseSeconds
+        audioRoute = made.route
+        audioRouteTakesAtmosActivator = made.route.takesAtmosOutputActivator
+        audioShapingApplied = audioShaping.isActive && made.route == .pcm
+        selection.replace(streamIndex: index, decoder: made.producer, timeBaseSeconds: timeBaseSeconds)
+        let clock = audioOutput?.currentTimeSeconds ?? .nan
+        let target = liveSessionSeconds(forSource: clock) ?? currentTime
+        EngineLog.emit(
+            "[SWHost] AE#1100 live audio switched in place: stream \(previous) -> \(index), reseeding at "
+            + "\(String(format: "%.2f", target))s without reopening the source",
+            category: .swPlayback)
+        switch await seek(to: target) {
+        case .superseded: return .superseded
+        default: return .switched
+        }
+    }
     /// A live session without a DVR window that asked for `liveEdgeCushionSeconds`: the ring exists
     /// only so the join can wait for the cushion and play behind the reader, and the session still
     /// publishes no rewind window, so a seek stays refused as on any live-only session.
@@ -2958,6 +3042,9 @@ final class SoftwarePlaybackHost {
         }
         dvrRing?.close()
         dvrRing = nil
+        liveAudioSelection = nil
+        liveAlternateAudioStreams = [:]
+        liveReferenceAudioStreamIndex = -1
         retentionClaims.forEach { $0.release() }
         retentionClaims.removeAll()
         liveEdgeLock.lock()
@@ -3131,6 +3218,23 @@ final class SoftwarePlaybackHost {
         }
 
         if liveSession, let ring {
+            let alternateAudio = LiveAudioSelection.alternateStreams(
+                audioTracks: dem.audioTrackInfos().compactMap { info in
+                    let index = Int32(info.id)
+                    guard let tb = dem.stream(at: index)?.pointee.time_base, tb.den > 0 else { return nil }
+                    return (index, Double(tb.num) / Double(tb.den))
+                },
+                reference: aIdx)
+            let audioSelection = LiveAudioSelection(streamIndex: aIdx, decoder: aDec, timeBaseSeconds: aTbSec)
+            liveAudioSelection = audioSelection
+            liveAlternateAudioStreams = alternateAudio
+            liveReferenceAudioStreamIndex = aIdx
+            if !alternateAudio.isEmpty {
+                EngineLog.emit(
+                    "[SWHost] AE#1100 live ring also stores audio streams \(alternateAudio.keys.sorted()) "
+                    + "beside stream \(aIdx), so an audio pick switches in place without reopening the source",
+                    category: .swPlayback)
+            }
             let getFeederPlaying: @Sendable () -> Bool = { [weak self] in
                 guard let self else { return false }
                 return !self.dvrRecoveryPending && !self.seekWindowOpen && getIsPlaying()
@@ -3184,6 +3288,7 @@ final class SoftwarePlaybackHost {
                     ring: ring,
                     videoTimeBaseSeconds: vTbSec,
                     audioTimeBaseSeconds: aTbSec,
+                    alternateAudioStreams: alternateAudio,
                     noteEdge: noteEdge,
                     readerMayAdvance: { [weak self] in
                         guard let self else { return false }
@@ -3205,16 +3310,14 @@ final class SoftwarePlaybackHost {
                 Self.runLiveFeederLoop(
                     videoDecoder: vDec,
                     framePipeline: frames,
-                    audioDecoder: aDec,
+                    audioSelection: audioSelection,
                     audioOutput: aOut,
                     videoStreamIndex: vIdx,
-                    audioStreamIndex: aIdx,
                     renderer: rndr,
                     condition: condition,
                     ring: ring,
                     audioLookahead: lookahead,
                     videoTimeBaseSeconds: vTbSec,
-                    audioTimeBaseSeconds: aTbSec,
                     readCursor: readCursor,
                     advanceCursor: advanceCursor,
                     recoverCursor: recoverCursor,
@@ -3315,6 +3418,7 @@ final class SoftwarePlaybackHost {
         ring: PacketRingBuffer,
         videoTimeBaseSeconds: Double,
         audioTimeBaseSeconds: Double,
+        alternateAudioStreams: [Int32: Double] = [:],
         noteEdge: @Sendable (Double) -> Void,
         readerMayAdvance: @Sendable () -> Bool = { true },
         stopRequested: @Sendable () -> Bool,
@@ -3407,14 +3511,19 @@ final class SoftwarePlaybackHost {
                 }
             }
 
+            // AE#1100: another audio track of the source, stored so a pick can switch to it in place.
+            let alternateAudioTb = alternateAudioStreams[streamIdx]
+
             // NOPTS repair: ring gates on valid PTS; MPEG-TS/H.264 field packets with NOPTS would starve the decoder. Synthesize PTS from DTS.
-            if streamIdx == videoStreamIndex || streamIdx == audioStreamIndex,
+            if streamIdx == videoStreamIndex || streamIdx == audioStreamIndex || alternateAudioTb != nil,
                packet.pointee.pts == Int64.min, packet.pointee.dts != Int64.min {
                 packet.pointee.pts = packet.pointee.dts
             }
 
-            // Live PTS-discontinuity, per stream (AE#1053): same fold as the combined loop.
-            let foldStream: LiveTimelineFold.Stream = streamIdx == audioStreamIndex ? .audio : .video
+            // Live PTS-discontinuity, per stream (AE#1053): same fold as the combined loop. The other
+            // audio tracks share the programme clock, so they take the fold of the track it watches.
+            let foldStream: LiveTimelineFold.Stream =
+                streamIdx == audioStreamIndex || alternateAudioTb != nil ? .audio : .video
             if streamIdx == videoStreamIndex || streamIdx == audioStreamIndex,
                packet.pointee.pts != Int64.min {
                 let tbSec = foldStream == .video ? videoTimeBaseSeconds : audioTimeBaseSeconds
@@ -3428,7 +3537,7 @@ final class SoftwarePlaybackHost {
             let discontinuityOffsetSec = timelineFold.offsetSeconds(for: foldStream)
             if discontinuityOffsetSec != 0 {
                 let tbSec = (streamIdx == videoStreamIndex)
-                    ? videoTimeBaseSeconds : audioTimeBaseSeconds
+                    ? videoTimeBaseSeconds : (alternateAudioTb ?? audioTimeBaseSeconds)
                 if tbSec > 0 {
                     // Audit NAT-101: the offset spans twice the input range and converts per stream
                     // base, so a packet on the far side of a seam can still leave Int64.
@@ -3440,7 +3549,19 @@ final class SoftwarePlaybackHost {
 
             let isVideo = streamIdx == videoStreamIndex
             let isAudio = streamIdx == audioStreamIndex
-            if isVideo || isAudio {
+            if let tbSec = alternateAudioTb {
+                // Stored only: the edge, the played-media ledger and the timeline follow the track the
+                // reader started on.
+                let rawPts = packet.pointee.pts
+                if rawPts != Int64.min, let data = packet.pointee.data, packet.pointee.size > 0 {
+                    try? ring.append(pts: Double(rawPts) * tbSec, isKeyframe: false, isVideo: false,
+                                     streamIndex: streamIdx,
+                                     bytes: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)))
+                    condition.lock()
+                    condition.broadcast()
+                    condition.unlock()
+                }
+            } else if isVideo || isAudio {
                 let tbSec = isVideo ? videoTimeBaseSeconds : audioTimeBaseSeconds
                 let rawPts = packet.pointee.pts
                 if rawPts != Int64.min, tbSec > 0 {
@@ -3451,7 +3572,7 @@ final class SoftwarePlaybackHost {
                         let isKey = isVideo && (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
                         // Best-effort: a write failure just shrinks the
                         // rewind window, it must not stall the reader.
-                        try? ring.append(pts: ptsSec, isKeyframe: isKey, isVideo: isVideo,
+                        try? ring.append(pts: ptsSec, isKeyframe: isKey, isVideo: isVideo, streamIndex: streamIdx,
                                          bytes: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)))
                         condition.lock()
                         condition.broadcast()
@@ -3486,16 +3607,14 @@ final class SoftwarePlaybackHost {
     nonisolated private static func runLiveFeederLoop(
         videoDecoder: any VideoDecodingPipeline,
         framePipeline: PipelinedFrameStage?,
-        audioDecoder: (any SoftwareAudioProducing)?,
+        audioSelection: LiveAudioSelection,
         audioOutput: AudioOutput?,
         videoStreamIndex: Int32,
-        audioStreamIndex: Int32,
         renderer: SampleBufferRenderer,
         condition: NSCondition,
         ring: PacketRingBuffer,
         audioLookahead: AudioLookaheadState,
         videoTimeBaseSeconds: Double,
-        audioTimeBaseSeconds: Double,
         readCursor: @Sendable () -> Int,
         advanceCursor: @Sendable (Int) -> Void,
         recoverCursor: @Sendable (Int) -> Void,
@@ -3537,7 +3656,8 @@ final class SoftwarePlaybackHost {
         var lastLowLeadLog = DispatchTime(uptimeNanoseconds: 0)
         var feederGeneration = seekGeneration()
         func pumpAudio(epoch audioEpoch: UInt64) {
-            guard let aDec = audioDecoder, let aOut = audioOutput, audioStreamIndex >= 0 else { return }
+            let audio = audioSelection.snapshot
+            guard let aDec = audio.decoder, let aOut = audioOutput, audio.streamIndex >= 0 else { return }
             var seq = audioLookahead.align(to: readCursor())
             func pumpIteration() -> Bool {
                 guard readCursor() >= ring.seqBounds.first,
@@ -3551,9 +3671,12 @@ final class SoftwarePlaybackHost {
                 ) == .feed else { return false }
                 guard seq < ring.seqBounds.end else { return false }  // live edge: nothing to pump yet
                 // Audit PERF-101: the kind is in the index, so the video packets this pump skips are
-                // never read off the disk (the feeder reads each of them once, for decode).
-                guard ring.isVideo(atSeq: seq) == false, let pkt = ring.packet(atSeq: seq) else {
-                    // Video, or evicted/unreadable under the pump: skip, same as the combined loop.
+                // never read off the disk (the feeder reads each of them once, for decode). AE#1100:
+                // nor the audio of the tracks not playing.
+                guard let kind = ring.kind(atSeq: seq), !kind.isVideo,
+                      PacketRingBuffer.audioPacket(ofStream: kind.streamIndex, feeds: audio.streamIndex),
+                      let pkt = ring.packet(atSeq: seq) else {
+                    // Video, another track, or evicted/unreadable under the pump: skip, same as the combined loop.
                     guard audioLookahead.advance(from: seq, fedPTS: nil) else { return false }
                     seq += 1
                     return true
@@ -3564,9 +3687,9 @@ final class SoftwarePlaybackHost {
                     audioDecoder: aDec,
                     audioOutput: aOut,
                     videoStreamIndex: videoStreamIndex,
-                    audioStreamIndex: audioStreamIndex,
+                    audioStreamIndex: audio.streamIndex,
                     videoTimeBaseSeconds: videoTimeBaseSeconds,
-                    audioTimeBaseSeconds: audioTimeBaseSeconds,
+                    audioTimeBaseSeconds: audio.timeBaseSeconds,
                     audioTapSink: audioTapSink(),
                     audioEpoch: audioEpoch,
                     noteDecodeGeneration: noteDecodeGeneration
@@ -3809,8 +3932,12 @@ final class SoftwarePlaybackHost {
             guard isPlaying(), seekGeneration() == generation, readCursor() == cursor,
                   cursor >= ring.seqBounds.first else { return true }
             // Audio the pump already delivered: consume the slot without reading it back, the
-            // pump read it once already (audit PERF-101).
-            if cursor < audioLookahead.current, ring.isVideo(atSeq: cursor) == false {
+            // pump read it once already (audit PERF-101). AE#1100: audio of a track not playing
+            // is consumed unread too. Read after the pump, so a switch is seen by both alike.
+            let audio = audioSelection.snapshot
+            if let kind = ring.kind(atSeq: cursor), !kind.isVideo,
+               cursor < audioLookahead.current
+                || !PacketRingBuffer.audioPacket(ofStream: kind.streamIndex, feeds: audio.streamIndex) {
                 advanceCursor(cursor)
                 return true
             }
@@ -3833,7 +3960,7 @@ final class SoftwarePlaybackHost {
                     videoDecoder.drainForEndOfStream()
                     videoDecoder.flush()
                     framePipeline?.settle()
-                    audioDecoder?.flush()
+                    audio.decoder?.flush()
                     renderer.drainReorderBuffer()
                     onEnd()
                     return false
@@ -3896,12 +4023,12 @@ final class SoftwarePlaybackHost {
             let producedAudio = feedRingPacket(
                 pkt,
                 videoDecoder: videoDecoder,
-                audioDecoder: audioDecoder,
+                audioDecoder: audio.decoder,
                 audioOutput: audioOutput,
                 videoStreamIndex: videoStreamIndex,
-                audioStreamIndex: audioStreamIndex,
+                audioStreamIndex: audio.streamIndex,
                 videoTimeBaseSeconds: videoTimeBaseSeconds,
-                audioTimeBaseSeconds: audioTimeBaseSeconds,
+                audioTimeBaseSeconds: audio.timeBaseSeconds,
                 audioTapSink: audioTapSink(),
                 audioEpoch: audioEpoch,
                 noteDecodeGeneration: noteDecodeGeneration
@@ -3909,7 +4036,7 @@ final class SoftwarePlaybackHost {
 
             // Arm clock once on first packet PTS (anchoring at .zero caused delay). Audio: first decoded buffers; video-only: first video packet (no clock without audio = frozen frame).
             if !clockArmed(), let aOut = audioOutput {
-                let shouldArm = (audioDecoder == nil) ? pkt.isVideo : producedAudio
+                let shouldArm = (audio.decoder == nil) ? pkt.isVideo : producedAudio
                 if shouldArm {
                     let armTime = CMTime(seconds: pkt.pts, preferredTimescale: 90000)
                     // Latest host rate, read at arm time (a setRate before arming is deferred here, #107).

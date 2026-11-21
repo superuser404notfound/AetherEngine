@@ -93,6 +93,16 @@ struct DemuxerOpenProfile: Sendable {
     /// request instead of keeping the `extraHeaders` it was opened with, so a session-scoped open (the
     /// playback demuxer, the producer's reopens) follows `updateRequestHeaders(_:)`. Nil everywhere else.
     var requestHeaders: RequestHeaderStore? = nil
+    /// AE#1100: `AetherEngine.liveReopenURL` for a live URL session. The reader asks it before each
+    /// reconnect of a dropped live connection, so a one-shot live URL is not opened twice. Nil
+    /// everywhere else.
+    var liveReopenURL: (@Sendable (URL) -> URL?)? = nil
+
+    func withLiveReopenURL(_ provider: (@Sendable (URL) -> URL?)?) -> DemuxerOpenProfile {
+        var copy = self
+        copy.liveReopenURL = provider
+        return copy
+    }
 
     func withSourceOpenPolicy(_ policy: SourceOpenPolicy) -> DemuxerOpenProfile {
         var copy = self
@@ -983,7 +993,8 @@ public final class Demuxer: @unchecked Sendable {
             sourceOpenPolicy: openProfile.sourceOpenPolicy,
             requestHeaderStore: openProfile.requestHeaders,
             diagnosticContext: openProfile.diagnosticContext,
-            routesDiscMediaType: routesDiscMediaType
+            routesDiscMediaType: routesDiscMediaType,
+            liveReopenURL: isLive ? openProfile.liveReopenURL : nil
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         reader.playIntentProvider = playIntentProvider

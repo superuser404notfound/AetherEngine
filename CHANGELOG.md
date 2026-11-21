@@ -10,7 +10,23 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`liveReopenURL` lets a host hand the engine a fresh URL whenever it opens a live source again (AE#1100).**
+  An HDHomeRun tuner opened twice with the same `SessionID` replays that session from its start, so every
+  reopen of the loaded URL put the viewer minutes behind live. The engine now asks the closure before an
+  audio switch that reloads, before `reloadAtCurrentPosition()` (the background return included), and before
+  every reconnect of a dropped live connection on both routes. Measured against a replaying origin: a dropped
+  connection used to fall back from 27.71 to 16.67 s of source time, and now joins at live.
+
+### Changed
+
+- **An audio-track switch on a software live session no longer reopens the source (AE#1100).** A session on
+  the software path with a packet ring (`dvrWindowSeconds` or the live edge cushion) now stores every audio
+  track of the source in it, and a pick switches in place: new decoder, feeder reseeded at the playhead. The
+  position, the rewind window and the source connection all stay, a rewind behind the switch plays the new
+  track, and it works on forward-only custom sources too. The ring grows by the other tracks' bitrate, a few
+  percent next to broadcast MPEG-2. Thanks to sunnierseattle for the report and the probe of the tuner.
 
 ## [7.71.2] - 2026-11-20
 
