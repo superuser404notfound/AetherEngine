@@ -580,13 +580,24 @@ if first == "scrubpreview" {
     let stills = takeFlag("--stills", from: &rest)
     let maxRequests = takeIntFlag("--max-concurrent-requests", from: &rest)
     let forward = takeIntFlag("--forward-buffer-segments", from: &rest)
+    // #853: the stills come off the plain deinterlacer either way; this sets what the playing session runs
+    // beside them, so a run can compare the two.
+    let stillsInverseTelecine = takeStringFlag("--inverse-telecine", from: &rest)
+        .map { spec -> InverseTelecineMode in
+            guard let mode = InverseTelecineMode(rawValue: spec) else {
+                print("ERROR: --inverse-telecine takes auto|off|force, got '\(spec)'")
+                exit(64)
+            }
+            return mode
+        } ?? .auto
     if let kbps = takeIntFlag("--throttle-kbps", from: &rest) {
         AetherEngine.setSourceThrottleKbpsForTesting(kbps)
         print("[aetherctl] source throttle: \(kbps) kbit/s")
     }
     guard let urlArg = rest.first(where: { !$0.hasPrefix("--") }) else {
         print("Usage: aetherctl scrubpreview [--at s1,s2,...] [--warm S] [--keep DIR] [--throttle-kbps N] "
-              + "[--stills [--max-concurrent-requests N] [--forward-buffer-segments N]] <url>")
+              + "[--stills [--max-concurrent-requests N] [--forward-buffer-segments N] "
+              + "[--inverse-telecine auto|off|force]] <url>")
         exit(64)
     }
     rest.removeAll { $0 == urlArg }
@@ -594,7 +605,8 @@ if first == "scrubpreview" {
     let positions = at.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
     if stills {
         exit(runScrubStills(url: parseSourceURL(urlArg), positions: positions, warmSeconds: warm,
-                            maxConcurrentRequests: maxRequests, forwardBufferSegments: forward))
+                            maxConcurrentRequests: maxRequests, forwardBufferSegments: forward,
+                            inverseTelecine: stillsInverseTelecine))
     }
     exit(runScrubPreview(url: parseSourceURL(urlArg), positions: positions, warmSeconds: warm, keepDir: keep))
 }
@@ -995,6 +1007,19 @@ if first == "play" {
     } else {
         playFieldRate = .field
     }
+    // #853: `LoadOptions.inverseTelecine`. `.auto` samples SD NTSC MPEG-2 at load and matches fields on
+    // film; `off` is the deinterlacer alone; `force` matches fields without the sample.
+    let playInverseTelecineSpec = takeStringFlag("--inverse-telecine", from: &rest)
+    let playInverseTelecine: InverseTelecineMode
+    if let playInverseTelecineSpec {
+        guard let parsed = InverseTelecineMode(rawValue: playInverseTelecineSpec) else {
+            print("ERROR: --inverse-telecine takes auto|off|force, got '\(playInverseTelecineSpec)'")
+            exit(64)
+        }
+        playInverseTelecine = parsed
+    } else {
+        playInverseTelecine = .auto
+    }
     // AE#462: force the audio pipeline to fail so the video-only drop is observable end to end.
     // There is no fixture for it: the drop needs a codec this build has no decoder for (AC-4 is the
     // realistic one), and a threshold that plausible is worth less than the real published value.
@@ -1283,6 +1308,7 @@ if first == "play" {
                  declaredDuration: declaredDuration,
                  httpHeaders: playHeaders,
                  deinterlaceFieldRate: playFieldRate,
+                 inverseTelecine: playInverseTelecine,
                  assertDolbyVision: playAssertDV,
                  preserveASSMarkup: preserveASSMarkup,
                  skipAttachments: skipAttachments,

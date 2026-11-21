@@ -1,5 +1,6 @@
 import Foundation
 import AetherLibavfilter
+import AetherLibavformat
 import AetherLibavutil
 
 /// Deinterlacer selection + cadence for the software-decode path, resolved from `LoadOptions`
@@ -7,6 +8,42 @@ import AetherLibavutil
 struct DeinterlaceConfig: Sendable, Equatable {
     var mode: DeinterlaceMode = .auto
     var fieldRate: DeinterlaceFieldRate = .field
+    /// #853: match fields back into film frames and drop the repeated frame of each five around the
+    /// deinterlacer (`fieldmatch` + `decimate`), for hard-telecined film. Decided at load.
+    var inverseTelecine = false
+    /// The video stream's frame rate, which the buffer source declares under inverse telecine:
+    /// `decimate` refuses an input link without one. Unknown (0/1) keeps inverse telecine off.
+    var sourceFrameRate = SourceFrameRate()
+
+    struct SourceFrameRate: Sendable, Equatable {
+        var num: Int32 = 0
+        var den: Int32 = 1
+        var isKnown: Bool { num > 0 && den > 0 }
+        var framesPerSecond: Double? { isKnown ? Double(num) / Double(den) : nil }
+
+        init(num: Int32 = 0, den: Int32 = 1) {
+            self.num = num
+            self.den = den
+        }
+
+        /// The stream's declared rate (`avg_frame_rate`, else `r_frame_rate`, as
+        /// `AetherEngine.detectFrameRate` reads it), with the NTSC rates snapped to their exact
+        /// rationals: a container that rounds 30000/1001 to 2997/100 would otherwise put
+        /// `decimate`'s output a hair off 24000/1001.
+        init(stream: UnsafeMutablePointer<AVStream>) {
+            let avg = stream.pointee.avg_frame_rate
+            let rate = avg.num > 0 && avg.den > 0 ? avg : stream.pointee.r_frame_rate
+            guard rate.num > 0, rate.den > 0 else { self.init(); return }
+            let fps = Double(rate.num) / Double(rate.den)
+            if abs(fps - 30000.0 / 1001.0) < 0.01 {
+                self.init(num: 30000, den: 1001)
+            } else if abs(fps - 30) < 0.01 {
+                self.init(num: 30, den: 1)
+            } else {
+                self.init(num: rate.num, den: rate.den)
+            }
+        }
+    }
 }
 
 /// Persistent deinterlacing graph for the software-decode path (MPEG-2/VC-1/MPEG-4 and, per the
@@ -24,6 +61,20 @@ struct DeinterlaceConfig: Sendable, Equatable {
 ///   running, hw stays off for the session.
 /// - SOFTWARE (fallback, or `config.mode == .software`): CPU bwdif (yadif for older linked
 ///   frameworks), always `mode=send_frame`, field rate without the GPU is the wrong cost trade.
+///
+/// Inverse telecine (#853, `config.inverseTelecine`) wraps either engine for hard-telecined film:
+/// `fieldmatch` rebuilds the film frames from the fields, the deinterlacer then touches only the
+/// frames `fieldmatch` could not match (it flags them interlaced, so `deint=interlaced` skips the
+/// rest), and `decimate` drops the repeated frame of each five, 29.97 to 23.976 fps. Software:
+/// `fieldmatch,bwdif,decimate`, the order the FFmpeg docs give. Hardware: `decimate` cannot take
+/// VideoToolbox frames, so the cadence work stays on the CPU before the upload:
+/// `fieldmatch,decimate,format,hwupload,<gpu filter>`. Always `send_frame`: at field rate the frame
+/// count doubles before `decimate` and its 1-in-5 cycle no longer lines up with the pulldown.
+/// `fieldmatch` runs `combmatch=full`, because only a match judged by comb scores flags the frames
+/// it could not match (`interlaced_frame = combs[match] >= combpel`; the scores are never computed
+/// otherwise). `decimate` stamps its output from the graph's first frame plus one 1001/24000 tick
+/// per frame, so a rebuild (every seek) re-anchors it, and so does a gap in the input timestamps
+/// (`breaksInverseTelecineCadence`).
 ///
 /// MUST be persistent: yadif/bwdif are temporal filters that need a continuous frame stream.
 /// `deint=interlaced` passes progressive frames through untouched.
@@ -79,11 +130,45 @@ final class DeinterlaceFilter {
 
     private var builtFilterName: String?
 
+    /// True while the built graph runs inverse telecine (#853).
+    private(set) var builtInverseTelecine = false
+
+    /// The PTS (input time base) of the last frame pushed into an inverse telecine graph, for the
+    /// cadence-gap check. nil while no such graph is built.
+    private var lastInverseTelecinePTS: Int64?
+
+    /// Logged once per filter instance when inverse telecine was asked for and cannot be built.
+    private var loggedInverseTelecineUnavailable = false
+
+    /// `fieldmatch` and `decimate` are both in the linked FFmpeg build (FFmpegBuild 3.11+).
+    static let inverseTelecineFiltersLinked: Bool =
+        avfilter_get_by_name("fieldmatch") != nil && avfilter_get_by_name("decimate") != nil
+
+    /// The `fieldmatch` options of the playback chain. `combmatch=full`: see the class doc.
+    static let inverseTelecineFieldMatch = "fieldmatch=order=auto:combmatch=full"
+
     /// The built graph as the public report describes it (AE#983); nil while no graph is built.
     var activeDeinterlace: VideoDeinterlace? {
         guard let engine, let builtFilterName else { return nil }
         return VideoDeinterlace(filter: builtFilterName, isHardware: engine == .hardware,
-                                fieldRate: engine == .hardware ? config.fieldRate : .frame)
+                                fieldRate: engine == .hardware && !builtInverseTelecine ? config.fieldRate : .frame,
+                                inverseTelecine: builtInverseTelecine)
+    }
+
+    /// Inverse telecine for the next build: asked for, with a known source rate (the buffer source
+    /// must declare it for `decimate`), and both filters linked. Logs once why not.
+    private func inverseTelecineBuildable() -> Bool {
+        guard config.inverseTelecine else { return false }
+        let missing: String? = !Self.inverseTelecineFiltersLinked
+            ? "no fieldmatch / decimate in the linked FFmpeg build"
+            : (!config.sourceFrameRate.isKnown ? "the stream states no frame rate" : nil)
+        guard let missing else { return true }
+        if !loggedInverseTelecineUnavailable {
+            loggedInverseTelecineUnavailable = true
+            EngineLog.emit("[Deinterlace] inverse telecine unavailable (\(missing)); deinterlacing instead (#853)",
+                           category: .swPlayback)
+        }
+        return false
     }
 
     static func prewarmHardwarePipeline() -> Bool {
@@ -213,6 +298,12 @@ final class DeinterlaceFilter {
         if frame.pointee.color_range != AVCOL_RANGE_UNSPECIFIED {
             args += ":range=\(frame.pointee.color_range.rawValue)"
         }
+        // #853: decimate's output rate is the input link's rate times 4/5, and a link with no rate
+        // (0/1) fails the graph, so an inverse telecine graph declares the stream's.
+        let inverseTelecine = inverseTelecineBuildable()
+        if inverseTelecine {
+            args += ":frame_rate=\(config.sourceFrameRate.num)/\(config.sourceFrameRate.den)"
+        }
 
         var src: UnsafeMutablePointer<AVFilterContext>?
         var sink: UnsafeMutablePointer<AVFilterContext>?
@@ -241,10 +332,12 @@ final class DeinterlaceFilter {
             // compatible). deint=interlaced: progressive frames pass through (uploaded but
             // untouched).
             let swFmt = is10Bit(frame.pointee.format) ? "p010le" : "nv12"
-            let mode = config.fieldRate == .field ? "send_field" : "send_frame"
+            // #853: never field rate under inverse telecine, see the class doc.
+            let mode = config.fieldRate == .field && !inverseTelecine ? "send_field" : "send_frame"
             let deintOpts = "mode=\(mode):parity=auto:deint=interlaced"
             let hardwareFilter = hardwareFilter ?? ""
-            chain = "format=\(swFmt),hwupload,\(hardwareFilter)=\(deintOpts)"
+            chain = (inverseTelecine ? "\(Self.inverseTelecineFieldMatch),decimate," : "")
+                + "format=\(swFmt),hwupload,\(hardwareFilter)=\(deintOpts)"
 
             guard let formatFilter = avfilter_get_by_name("format"),
                   let uploadFilter = avfilter_get_by_name("hwupload"),
@@ -273,7 +366,27 @@ final class DeinterlaceFilter {
                 )
                 return false
             }
-            guard avfilter_link(srcC, 0, fmtC, 0) >= 0,
+            // #853: fieldmatch and decimate take CPU frames only, so they sit between the source
+            // and the format conversion.
+            var head = srcC
+            if inverseTelecine {
+                guard let matchFilter = avfilter_get_by_name("fieldmatch"),
+                      let decimateFilter = avfilter_get_by_name("decimate") else { return false }
+                var matchCtx: UnsafeMutablePointer<AVFilterContext>?
+                var decimateCtx: UnsafeMutablePointer<AVFilterContext>?
+                let matchArgs = String(Self.inverseTelecineFieldMatch.dropFirst("fieldmatch=".count))
+                let matchRet = avfilter_graph_create_filter(&matchCtx, matchFilter, "match", matchArgs, nil, g)
+                let decimateRet = avfilter_graph_create_filter(&decimateCtx, decimateFilter, "decimate", nil, nil, g)
+                guard matchRet >= 0, decimateRet >= 0, let matchC = matchCtx, let decimateC = decimateCtx,
+                      avfilter_link(srcC, 0, matchC, 0) >= 0,
+                      avfilter_link(matchC, 0, decimateC, 0) >= 0 else {
+                    EngineLog.emit("[Deinterlace] inverse telecine filters failed fieldmatch=\(matchRet) "
+                                   + "decimate=\(decimateRet)", category: .swPlayback)
+                    return false
+                }
+                head = decimateC
+            }
+            guard avfilter_link(head, 0, fmtC, 0) >= 0,
                   avfilter_link(fmtC, 0, upC, 0) >= 0,
                   avfilter_link(upC, 0, deintC, 0) >= 0,
                   avfilter_link(deintC, 0, sinkC, 0) >= 0 else {
@@ -286,7 +399,8 @@ final class DeinterlaceFilter {
             // linked frameworks. Always send_frame: see class doc. No hw device involved, so
             // the string-parse path is fine here.
             let filterName = avfilter_get_by_name("bwdif") != nil ? "bwdif" : "yadif"
-            chain = "\(filterName)=mode=send_frame:parity=auto:deint=interlaced"
+            let deinterlace = "\(filterName)=mode=send_frame:parity=auto:deint=interlaced"
+            chain = inverseTelecine ? "\(Self.inverseTelecineFieldMatch),\(deinterlace),decimate" : deinterlace
 
             var inputs = avfilter_inout_alloc()
             var outputs = avfilter_inout_alloc()
@@ -324,6 +438,8 @@ final class DeinterlaceFilter {
         engine = wanted
         builtFilterName = wanted == .hardware ? hardwareFilter
             : (avfilter_get_by_name("bwdif") != nil ? "bwdif" : "yadif")
+        builtInverseTelecine = inverseTelecine
+        lastInverseTelecinePTS = nil
         outputTimeBase = av_buffersink_get_time_base(sink)
         width = frame.pointee.width
         height = frame.pointee.height
@@ -358,7 +474,27 @@ final class DeinterlaceFilter {
     /// call had emptied. The caller unrefs the frame after a successful push.
     func push(_ frame: UnsafeMutablePointer<AVFrame>) -> Int32 {
         guard let src = srcCtx else { return -1 }
-        return av_buffersrc_add_frame_flags(src, frame, Int32(AV_BUFFERSRC_FLAG_KEEP_REF))
+        let ret = av_buffersrc_add_frame_flags(src, frame, Int32(AV_BUFFERSRC_FLAG_KEEP_REF))
+        if ret >= 0, builtInverseTelecine, frame.pointee.pts != Int64.min {
+            lastInverseTelecinePTS = frame.pointee.pts
+        }
+        return ret
+    }
+
+    /// #853: `decimate` stamps its output from the graph's first frame plus one tick per frame it
+    /// keeps, never from the frames' own timestamps. A source frame that never arrives (a damaged or
+    /// cut stream) would then move every later picture against the audio for as long as the graph
+    /// lives. True when `frame` lands more than 1.5 source frame durations after the previous push
+    /// into an inverse telecine graph: the caller flushes the graph and lets this frame build a fresh
+    /// one, which anchors on it. A timestamp going backwards (a seam the decoder did not flush) is
+    /// the same discontinuity. A repeated timestamp is not: `decimate` ignores input timestamps.
+    func breaksInverseTelecineCadence(_ frame: UnsafeMutablePointer<AVFrame>, timeBase: AVRational) -> Bool {
+        guard builtInverseTelecine, let last = lastInverseTelecinePTS, frame.pointee.pts != Int64.min,
+              let rate = config.sourceFrameRate.framesPerSecond, rate > 0, timeBase.num > 0, timeBase.den > 0 else {
+            return false
+        }
+        let delta = Double(frame.pointee.pts - last) * Double(timeBase.num) / Double(timeBase.den)
+        return delta > 1.5 / rate || delta < 0
     }
 
     /// DEC-203: tells the graph no more input is coming, so yadif/bwdif release the frame they hold as
@@ -418,6 +554,8 @@ final class DeinterlaceFilter {
         sinkCtx = nil
         engine = nil
         builtFilterName = nil
+        builtInverseTelecine = false
+        lastInverseTelecinePTS = nil
         outputTimeBase = AVRational(num: 0, den: 1)
         width = 0
         height = 0

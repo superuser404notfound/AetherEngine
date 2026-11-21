@@ -19,6 +19,17 @@ the public-API contract.
   `probe` follow it. A stream that declares anything keeps it, and an HEVC stream with a Dolby Vision RPU is
   left alone even without a record. Measured on such an HEVC encode, the served `init.mp4` carries
   `colr nclx` 9 / 16 / 9, and Apple's decoder reads it as BT.2020 / PQ instead of guessing BT.709.
+- **Hard-telecined film plays as film: inverse telecine on the software path (#853).** An NTSC DVD of a
+  film-shot series (24p film put on 29.97i MPEG-2 with the 3:2 pulldown baked into the pictures) used to be
+  deinterlaced, which interpolated half of every film frame and kept the pulldown judder. A load now samples
+  such a source before it writes the display criteria (`fieldmatch` + `idet` and the repeated frame of each
+  five), and on film it matches the fields back into the original frames, drops the repeated one and asks for
+  23.976 Hz. Titles and credits made at video rate still go through the deinterlacer. True interlaced video,
+  live, HD and PAL keep today's path. `LoadOptions.inverseTelecine` (`.auto` by default, `.off`, `.force`) and
+  `VideoDeinterlace.inverseTelecine` / `outputFrameRateFactor` are new. Measured on the Friends S1 DVDs: every
+  episode detected from its first frame and from every resume point tried, no false detection on true
+  interlaced video. The sample adds 0.3 s to the first frame over an 80 Mbit/s link and up to 2 s on slow
+  ones, where it then keeps the deinterlacer (issue and measurements by @andreiborisov).
 - **`liveReopenURL` lets a host hand the engine a fresh URL whenever it opens a live source again (AE#1100).**
   An HDHomeRun tuner opened twice with the same `SessionID` replays that session from its start, so every
   reopen of the loaded URL put the viewer minutes behind live. The engine now asks the closure before an

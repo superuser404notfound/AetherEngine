@@ -10,9 +10,11 @@ import AetherLibavutil
 /// and the device once per load; the published status follows the stage's own events.
 extension AetherEngine {
 
+    /// `outputFrameRate` overrides the stream's rate where the frames come out at another one: under
+    /// inverse telecine (#853) they arrive at 4/5 of it, and that is the per-frame budget the stage has.
     func upscaleRouteDecision(
         options: LoadOptions, videoStream: UnsafeMutablePointer<AVStream>?, dvProfile: Int?,
-        wirelessAirPlayRoute: Bool, demuxedAudioLive: Bool
+        wirelessAirPlayRoute: Bool, demuxedAudioLive: Bool, outputFrameRate: Double? = nil
     ) -> UpscaleRouteDecision {
         // Spares the off case the Metal device and the display read below.
         guard options.upscalesLowResolutionVideo else { return .notTaken(.preferenceOff) }
@@ -28,7 +30,7 @@ extension AetherEngine {
                 width: cp.pointee.width, height: cp.pointee.height)
             source = SourceGeometry(width: Int(cp.pointee.width), height: Int(cp.pointee.height),
                                     sarNum: Int(sar?.num ?? 0), sarDen: Int(sar?.den ?? 0))
-            frameRate = Self.detectFrameRate(stream: stream)
+            frameRate = outputFrameRate ?? Self.detectFrameRate(stream: stream)
             isSDR = UpscaleRouteDecision.isSDR(colorTransfer: cp.pointee.color_trc)
             isEightBit420 = UpscaleRouteDecision.isEightBit420(
                 pixelFormat: cp.pointee.format, bitsPerRawSample: cp.pointee.bits_per_raw_sample)

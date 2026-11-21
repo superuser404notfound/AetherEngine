@@ -333,6 +333,56 @@ Current rule: [cli.md › audiotap](cli.md#audiotap).
 
 With no harness here, a force unwrap that trapped on the FIRST buffer of any multichannel track shipped in 6.1.3 and survived to main (#400). The silent-downmix defect under it only showed once the trap was gone.
 
+### Inverse telecine (#853)
+
+Measured on 2026-11-21 on a MacBook Pro (M1 Pro, macOS) with a release `aetherctl play`, FFmpegBuild 3.17.0. Film: the Friends S1 NTSC DVD remuxes (MPEG-2 720x480, 29.97i, top field first, every frame `interlaced_frame=1`, `repeat_pict=0`). True interlaced video: clips made from the same discs, either motion-interpolated from the film to 59.94 fields (`minterpolate`), or a camera pan, a zoom and a still shot with one moving box over a frame of it at a true 60 Hz, all interleaved to 29.97i (`tinterlace`) and coded as MPEG-2 again.
+
+Current rule: [formats.md › Inverse telecine](formats.md#inverse-telecine).
+
+**Detection, final thresholds.**
+
+Samples were taken at the start position and, for the comparison below, at the middle of the file.
+
+| Material | Sample | Runs | Verdict |
+|---|---|---|---|
+| Friends S1, 24 episodes from their first frame | start | 24 | film in 24 |
+| Same | middle | 24 | film in 24 |
+| Six episodes from 2, 5, 10, 15 and 20 min | start | 30 | film in 30 |
+| Season 2 trailer (film cut with titles made at video rate) | both | 3 | film in 3 |
+| Three Friends scenes motion-interpolated to 59.94 fields | both | 13 | video in 13 |
+| Pan, zoom and still shot with one moving box over a Friends frame | both | 12 | video in 12 |
+| Synthetic 59.94 fields (`testsrc2`) | both | 2 | video in 2 |
+| Synthetic PAL 25i | | 1 | not sampled (25 fps) |
+
+**Why two signals.** `idet` after `fieldmatch` alone does not separate them: an episode's first 120 frames read 67-71% progressive (one second of black, then a fade-in made at field rate), while true video reads anywhere from 18% to 100% progressive, because its still stretches match trivially. The repeated frame of each five, at a steady phase, does separate them, but only judged by the worst 16x16 block. Judged by the frame mean, the interpolated scenes kept a five-frame rhythm and read as film in 10 of 13 samples. By the worst block the cadence share is 27-100% per film window and 0% on every true video sample.
+
+**The early video exit.** A cycle in which even the lowest difference is motion (worst block 8 or more) is 0-22% of film cycles, where the repeat sits near still, and 66-95% of true video cycles. Twenty such cycles with at most one repeat end a sample as video. Counting every cycle with any motion instead stopped one quiet, grainy film stretch (S01E12 from 5:00) as video after 155 frames.
+
+**What a sample reads.** From an episode's first frame film decides after 60-206 frames (the opening black and fade come first), from inside an episode after about 60. True video stops after 60-230 frames. The window was 120 decided frames in the first rounds; 60 halved what a start inside an episode downloads and changed no verdict above.
+
+**What it costs to the first frame, and where to take the sample.** Over a network the sample costs the video it downloads before the first frame, not its decoding. S01E05 served by `Scripts/slowrange.py` (a delay on every response, one rate shared by every connection), `FIRSTFRAME` of `aetherctl play`, median of 3 runs, sample time with its rewind in brackets:
+
+| Link | Start | Inverse telecine off | Sample at the start position | One window at the middle |
+|---|---|---|---|---|
+| 80 Mbit/s, 10 ms | 0:00 | 0.39 s | 0.72 s (0.31 s, film) | 2.17 s (0.90 s, film) |
+| 80 Mbit/s, 10 ms | 10:00 | 1.02 s | 1.22 s (0.82 s, film) | 2.26 s (0.95 s, film) |
+| 20 Mbit/s, 40 ms | 0:00 | 0.54 s | 1.84 s (1.13 s, film) | 2.96 s (2.25 s, budget spent) |
+| 20 Mbit/s, 40 ms | 10:00 | 2.96 s | 3.04 s (2.24 s, budget spent) | 3.04 s (2.23 s, budget spent) |
+| 8 Mbit/s, 100 ms | 0:00 | 0.84 s | 3.67 s (2.43 s, budget spent) | 9.95 s (4.65 s, budget spent) |
+| 8 Mbit/s, 100 ms | 10:00 | 5.71 s | 5.50 s (4.61 s, budget spent) | 10.14 s (4.61 s, budget spent) |
+
+- The middle window is never cheaper. Its two seeks and the reader's 4 MB blocks around them cost about a second more on the fast link, and on the slow one its rewind runs into its own timeout.
+- From a resume point the start-position sample costs little: the playback seeks there and buffers the same bytes anyway.
+- At 20 Mbit/s from a resume point, and at 8 Mbit/s always, the sample spends its 2 s and keeps the deinterlacer. A local file decides in 0.12-0.5 s on the M1 Pro.
+- So the sample is taken at the start position, and the middle window was dropped after this comparison.
+
+**Playback, seeks and scrub stills.**
+
+- The output runs at 24 frames a second (`--frame-times` reads `ft=24`, the `[SWDiag]` lines `dpts=41.7/41.7`), with no frame lost in a CLI run.
+- CPU per SD frame on one M1 Pro core (FFmpeg CLI, decode included): 4.5 ms for `fieldmatch` with comb scores, `bwdif` on the flagged frames and `decimate`, against 0.46 ms for `bwdif` alone. `fieldmatch` with comb scores is 2.9 ms of it, `decimate` 1.15 ms. At 29.97 frames in, that is about 14% of one core.
+- Seek to first frame, eight seeks per run on S01E05, two runs each: the clock hold after a seek (`[AudioOutput] preroll ready after N ms`) took 69-77 ms median with inverse telecine and 43-45 ms without. The graph rebuilt in about 1 ms either way; `decimate` needs about five frames before its first picture.
+- Scrub stills (`scrubpreview --stills`, five positions): 2-10 ms each, the same with and without, because stills keep the plain deinterlacer.
+
 ## Engine architecture
 
 Measurements behind [architecture.md](architecture.md), [architecture-native.md](architecture-native.md) and [architecture-software.md](architecture-software.md).

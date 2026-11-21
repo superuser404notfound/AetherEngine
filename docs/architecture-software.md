@@ -66,6 +66,8 @@ Source URL ──► Demuxer ──┬─► video decoder ──► [UpscalingF
 - One trigger is described in [AVC configuration changes](architecture-native.md#avc-configuration-changes).
 - `videoRoute` reports the move ([Effective video route](architecture.md#effective-video-route-videoroute)).
 
+**Inverse telecine on VOD.** Hard-telecined NTSC MPEG-2 film is sampled before the display criteria are written (`TelecineCadenceProbe`, #853). On film the deinterlace graph becomes `fieldmatch`, the deinterlacer for frames left combed, then `decimate` (on the GPU engine `decimate` runs before the upload, since it takes CPU frames only), and the session runs at 23.976 fps. See [formats › Inverse telecine](formats.md#inverse-telecine).
+
 **Interlace check on VOD.** Interlaced H.264 comes here to be deinterlaced. On seekable VOD (#232) the declared field order is first checked against decoded frames (`InterlaceProbe`). The deinterlace filter engages on `AV_FRAME_FLAG_INTERLACED` alone. So if that flag never appears in a sample, the detour would do nothing, and the stream goes back to the native path.
 
 **AV1 capability registration is lazy.** The engine registers the supplemental VideoToolbox AV1 decoder and checks `VTIsHardwareDecodeSupported` (`VTCapabilityProbe`) only when routing an AV1 source, so devices with hardware AV1 take the native path. Loading H.264, HEVC or audio-only content does not consult it.

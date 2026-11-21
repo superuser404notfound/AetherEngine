@@ -260,6 +260,36 @@ final class DocumentedConstantsTests: XCTestCase {
             .deletingLastPathComponent()
     }
 
+    // MARK: - Inverse telecine (#853)
+
+    /// docs/formats.md states the film decision, the block the repeat is judged on, the sample's budgets
+    /// and the SD bound.
+    func testInverseTelecineSampleMatchesDocumentation() throws {
+        let docs = try documentation()
+        XCTAssertEqual(TelecineCadenceAnalyzer.decidedWindow, 60)
+        XCTAssertEqual(TelecineCadenceAnalyzer.filmProgressiveShare, 0.90)
+        assertDocumented("over the last 60 decided frames, at least 90% read progressive after matching", docs)
+        XCTAssertEqual(TelecineCadenceAnalyzer.filmCadenceShare, 0.15)
+        XCTAssertEqual(TelecineCadenceAnalyzer.minimumCadenceHits, 4)
+        assertDocumented("keeps one phase in at least 15% of the cycle pairs (four at least)", docs)
+        XCTAssertEqual(TelecineCadenceAnalyzer.videoMovingCycles, 20)
+        XCTAssertEqual(TelecineCadenceAnalyzer.videoCadenceHits, 1)
+        assertDocumented("decides video early after 20 cycles in which every frame moved, with at most one such repeat", docs)
+        XCTAssertEqual(TelecineCadenceSampler.blockSide, 16)
+        assertDocumented("judged by the worst 16x16 block", docs)
+        XCTAssertEqual(TelecineCadenceProbe.startFrameCeiling, 300)
+        XCTAssertEqual(TelecineCadenceProbe.packetBudget, 3000)
+        XCTAssertEqual(TelecineCadenceProbe.wallClockBudget, 2.0)
+        assertDocumented("The sample stops at 300 frames, 3000 packets or 2 s", docs)
+        func gate(height: Int32) -> TelecineCadenceProbe.Gate {
+            TelecineCadenceProbe.gate(mode: .auto, isLive: false, isSeekable: true, codecID: AV_CODEC_ID_MPEG2VIDEO,
+                                      fieldOrder: AV_FIELD_TT, frameRate: 30000.0 / 1001.0, codedHeight: height)
+        }
+        XCTAssertEqual(gate(height: 576), .sample)
+        XCTAssertNotEqual(gate(height: 577), .sample)
+        assertDocumented("of 576 lines or fewer", docs)
+    }
+
     private func documentation() throws -> String {
         let root = Self.repoRoot
         guard let readme = try? String(contentsOf: root.appendingPathComponent("README.md"), encoding: .utf8),
