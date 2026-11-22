@@ -1029,8 +1029,10 @@ Nothing binds a render surface in a CLI run, so the absolute drop level belongs 
 ```
 [Deinterlace] inverse telecine on: film, progressive 100% of 60 decided frames, cadence 100%, 61 frames in 155 ms, 155 ms with the rewind (#853)
 [AetherEngine] load url=... rate=23.976
-[Deinterlace] engaged [hardware]: 720x480 pixFmt=0 (fieldmatch=order=auto:combmatch=full,decimate,format=nv12,hwupload,bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced) outTB=1001/48000 built in 3.3ms
+[Deinterlace] engaged [hardware]: 720x480 pixFmt=0 (format=nv12,hwupload,fieldmatch_videotoolbox=order=auto:combmatch=full,decimate_videotoolbox,bwdif_videotoolbox=mode=send_frame:parity=auto:deint=interlaced) outTB=1001/48000 built in 5.8ms
 ```
+
+That is the GPU cadence (#1108). When it cannot run (see [formats › Inverse telecine](formats.md#inverse-telecine)), `fieldmatch` and `decimate` sit before `format=nv12,hwupload` on the CPU instead, and a build failure logs a line saying so.
 
 With `--frame-times` the output reads `ft=24` a second and the `[SWDiag]` lines `dpts=41.7/41.7`; the deinterlacer alone reads `ft=60` at field rate. The sample's cost to the first frame over a throttled origin is in [measurements › Inverse telecine](measurements.md#inverse-telecine-853).
 
