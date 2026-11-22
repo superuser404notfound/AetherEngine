@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.73.0] - 2026-11-22
+
 ### Changed
 
 - **Inverse telecine runs on the GPU (AE#1108).** On the GPU engine `fieldmatch` and `decimate` now run as
