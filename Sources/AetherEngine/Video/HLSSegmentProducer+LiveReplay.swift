@@ -16,7 +16,7 @@ extension HLSSegmentProducer {
             // A truncated PES can carry valid timestamps beyond the retained audio frontier.
             let damaged = damagedLivePacketStream(entry.packet, origin: entry.origin) != nil
             if entry.isDuplicate || damaged || entry.untimedBoundaryVideo {
-                if damaged { logDamagedLivePacket(entry.packet, origin: entry.origin, action: "discarded") }
+                if damaged { logDamagedLivePacket(entry.packet, origin: entry.origin, action: .discarded) }
                 var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
                 trackedPacketFree(&packet)
             } else {

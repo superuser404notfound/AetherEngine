@@ -332,8 +332,8 @@ struct LiveSourceReplayTests {
         #expect(result.packetsWrittenCount == control.packetsWrittenCount)
         // This producer's own counts. The log capture hears every producer in the process, and a
         // parallel suite once logged both a discarded and a forwarded damaged packet at one DTS.
-        #expect(result.damagedPacketCount(stream: "video", action: "discarded") > 0)
-        #expect(result.damagedPacketCount(stream: "video", action: "forwarded") == 0)
+        #expect(result.damagedPacketCount(.video, .discarded) > 0)
+        #expect(result.damagedPacketCount(.video, .forwarded) == 0)
     }
 
     @Test("the damaged outgoing video boundary is withheld until its intact replay arrives")
@@ -343,14 +343,12 @@ struct LiveSourceReplayTests {
         let aud = try #require(head.range(of: Data([0, 0, 0, 1, 9, 0xF0]), options: .backwards))
         // TS transport-error indicator flags this PES without changing its compressed payload.
         head[aud.lowerBound / 188 * 188 + 1] |= 0x80
-        let capture = EngineLogCapture()
-        defer { capture.end() }
         let result = try await run(head + clip.replay + clip.tail, expected: "eof", expectedRebases: 0)
         let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
         #expect(result.packetsWrittenCount == control.packetsWrittenCount)
-        #expect(!capture.matching("live damaged boundary held:").isEmpty)
-        #expect(result.damagedPacketCount(stream: "video", action: "discarded") > 0)
-        #expect(result.damagedPacketCount(stream: "video", action: "forwarded") == 0)
+        #expect(result.damagedPacketCount(.video, .held) > 0, "the damaged boundary was held back")
+        #expect(result.damagedPacketCount(.video, .discarded) > 0)
+        #expect(result.damagedPacketCount(.video, .forwarded) == 0)
     }
 
     @Test("a corrupt first audio PES is held and discarded only after paired replay is verified")
@@ -366,8 +364,8 @@ struct LiveSourceReplayTests {
         let result = try await run(clip.head + replay + clip.tail, expected: "eof", expectedRebases: 0)
         let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
         #expect(result.packetsWrittenCount == control.packetsWrittenCount)
-        #expect(result.damagedPacketCount(stream: "audio", action: "held") > 0)
-        #expect(result.damagedPacketCount(stream: "audio", action: "discarded") > 0)
+        #expect(result.damagedPacketCount(.audio, .held) > 0)
+        #expect(result.damagedPacketCount(.audio, .discarded) > 0)
     }
 
     @Test("paired replay interrupted by EOF or read failure never re-enters either timeline")

@@ -516,14 +516,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     var replayReadyIndex = 0
     var replayPendingBytes = 0
     var replayDeferredError: Error?
-    private var damagedPacketLogCounts: [String: Int] = [:]
-
-    /// How many damaged live packets of `stream` ("video" / "audio") this producer handled with
-    /// `action` ("held", "forwarded", "discarded"). Pump state: read it once the pump has finished.
-    /// Tests read this instead of the log lines, which every producer in the process writes.
-    func damagedPacketCount(stream: String, action: String) -> Int {
-        damagedPacketLogCounts[stream + action] ?? 0
-    }
+    /// Every damaged live packet this producer held, forwarded or discarded, counted before the log
+    /// throttle. Pump state.
+    private var damagedPacketCounts: [DamagedPacketKey: Int] = [:]
     private static let maximumReplayPendingBytes = LivePacketReplayGuard.maximumPendingBytes
     private static let maximumReplayPendingPackets = LivePacketReplayGuard.maximumPendingPackets
 
@@ -3091,7 +3086,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     replayReady.removeAll(keepingCapacity: true)
                     replayReadyIndex = 0
                 }
-                logDamagedLivePacket(ready.packet, origin: ready.origin, action: "forwarded")
+                logDamagedLivePacket(ready.packet, origin: ready.origin, action: .forwarded)
                 logVideoPacketProgress(ready.sample)
                 tapForRecording(ready.packet)
                 recordPlayedMedia(ready.packet, origin: ready.origin)
@@ -3148,7 +3143,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     if !wasCheckingReplay, liveReplayGuard.isDroppingReplay {
                         noCutWatchdog?.setReplayChecking(true, at: Date())
                     }
-                    logDamagedLivePacket(read.packet, origin: read.origin, action: "held")
+                    logDamagedLivePacket(read.packet, origin: read.origin, action: .held)
                     noCutWatchdog?.noteReplayPacketRead(at: Date())
                     replayPending.append(ReplayBufferedPacket(packet: read.packet, origin: read.origin,
                                                                sample: sample, isDuplicate: decision.drop))
@@ -3190,7 +3185,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if damagedLivePacketStream(read.packet, origin: read.origin) != nil {
                     liveReplayGuard.noteDamagedPacket()
                 }
-                logDamagedLivePacket(read.packet, origin: read.origin, action: "held")
+                logDamagedLivePacket(read.packet, origin: read.origin, action: .held)
                 // Untimed fragments of this damaged boundary are provisional too;
                 // only verified replay permits discarding them without a signature.
                 replayPending.append(ReplayBufferedPacket(packet: read.packet, origin: read.origin,
@@ -3203,7 +3198,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 continue
             }
             // The recording sees the same unique source packets as playback.
-            logDamagedLivePacket(read.packet, origin: read.origin, action: "forwarded")
+            logDamagedLivePacket(read.packet, origin: read.origin, action: .forwarded)
             logVideoPacketProgress(sample)
             tapForRecording(read.packet)
             recordPlayedMedia(read.packet, origin: read.origin)
@@ -3211,25 +3206,42 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
     }
 
-    func damagedLivePacketStream(_ packet: UnsafePointer<AVPacket>, origin: PacketOrigin) -> String? {
+    enum DamagedPacketStream: String { case video, audio }
+    enum DamagedPacketAction: String { case held, forwarded, discarded }
+    struct DamagedPacketKey: Hashable {
+        let stream: DamagedPacketStream
+        let action: DamagedPacketAction
+    }
+
+    func damagedLivePacketStream(_ packet: UnsafePointer<AVPacket>, origin: PacketOrigin) -> DamagedPacketStream? {
         guard isLive, (packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0 else { return nil }
-        if origin == .main, packet.pointee.stream_index == videoStreamIndex { return "video" }
+        if origin == .main, packet.pointee.stream_index == videoStreamIndex { return .video }
         if packet.pointee.stream_index == audioConfig?.sourceStreamIndex,
-           (origin == .side) == (sideAudioDemuxer != nil) { return "audio" }
+           (origin == .side) == (sideAudioDemuxer != nil) { return .audio }
         return nil
     }
 
-    func logDamagedLivePacket(_ packet: UnsafePointer<AVPacket>, origin: PacketOrigin, action: String) {
+    func logDamagedLivePacket(_ packet: UnsafePointer<AVPacket>, origin: PacketOrigin, action: DamagedPacketAction) {
         guard let stream = damagedLivePacketStream(packet, origin: origin) else { return }
-        let key = stream + action
-        damagedPacketLogCounts[key, default: 0] += 1
-        let count = damagedPacketLogCounts[key]!
+        let key = DamagedPacketKey(stream: stream, action: action)
+        damagedPacketCounts[key, default: 0] += 1
+        let count = damagedPacketCounts[key]!
         guard count <= 3 || count.isMultiple(of: 64) else { return }
         let dts = packet.pointee.dts == Int64.min ? "missing" : String(packet.pointee.dts)
         let pts = packet.pointee.pts == Int64.min ? "missing" : String(packet.pointee.pts)
         let keyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
-        EngineLog.emit("[HLSSegmentProducer] live damaged packet: stream=\(stream) action=\(action) "
+        EngineLog.emit("[HLSSegmentProducer] live damaged packet: stream=\(stream.rawValue) action=\(action.rawValue) "
             + "count=\(count) dts=\(dts) pts=\(pts) keyframe=\(keyframe)", category: .session)
+    }
+
+    /// How many damaged packets of `stream` this producer handled with `action`. The counts are pump
+    /// state, so this may only be read once the pump has finished. Tests read it instead of the log
+    /// lines, which every producer in the process writes.
+    func damagedPacketCount(_ stream: DamagedPacketStream, _ action: DamagedPacketAction) -> Int {
+        finishCondition.lock()
+        defer { finishCondition.unlock() }
+        precondition(didFinishFlag, "damagedPacketCount read while the pump is running")
+        return damagedPacketCounts[DamagedPacketKey(stream: stream, action: action)] ?? 0
     }
 
     private var admittedVideoProgress = VideoPacketProgress()
