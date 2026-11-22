@@ -19,6 +19,14 @@ the public-API contract.
   8-bit 4:2:0, heights that are not a multiple of 4, and GPU filters that fail to build or error.
   `VideoDeinterlace.inverseTelecineIsHardware` says which one runs. Filters by classicjazz.
 
+### Fixed
+
+- **ASS drawings no longer show as rows of numbers.** An event in drawing mode (`\p1` and up, until
+  `\p0` or a `\r` reset) holds vector commands, which the plain-text and styled-run paths kept as
+  text, so anime typesetting boxes showed as "m 1554.65 51.38 l 1554.29 ...". That text is dropped
+  now, in the host cues, the native WebVTT renditions and mov_text samples alike. The tags are read
+  as libass reads them (`\p 1` draws, a bare `\p` ends drawing, `\p` inside `\t(...)` does nothing).
+
 ## [7.72.1] - 2026-11-22
 
 ### Changed
