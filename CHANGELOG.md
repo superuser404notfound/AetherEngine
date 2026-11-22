@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **VC-1 and WMV3 decode on several cores (AE#1107).** FFmpegBuild 3.18.0 makes FFmpeg's `vc1` and `wmv3`
+  decoders frame-threaded, and the software path already asks for frame threads, so they use them without an
+  engine change. Before, upstream declared no threading capability, and VC-1 decoded on one thread. A seek
+  that lands between keyframes catches up sooner. On 1080 Blu-ray VC-1 with 6 threads, progressive titles
+  decode about 4 times as fast, titles with field pictures about 2.3 times. The output equals
+  single-threaded decoding. Patch by classicjazz, proposed upstream as FFmpeg PR 26273.
 
 ## [7.72.0] - 2026-11-21
 

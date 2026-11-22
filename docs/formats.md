@@ -252,13 +252,15 @@ VP9 and VP8 always use the software presentation route, because AVPlayer's HLS p
 
 MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video and VC-1: AVPlayer's HLS-fMP4 pipeline accepts none of them, and libavcodec ships native decoders for all three.
 
+VC-1 and WMV3 decode with frame threads since FFmpegBuild 3.18.0 (AE#1107). Before that, upstream declared no threading capability for either decoder, so the engine asked for frame threads and VC-1 got one thread. The gain shows mostly at a seek, which decodes forward from the last keyframe. On 6 cores a progressive 1080 Blu-ray title gets there about 4 times as fast, a title with field pictures about 2.3 times. A stream whose pictures have slices gains little, because a sliced reference picture lets the next one start only when it is done.
+
 #### Legacy Microsoft codecs (FFmpegBuild 2.4.3, 3.1.0)
 
 - **Video (FFmpegBuild 2.4.3):** MS-MPEG4 v1 / v2 / v3 (the DivX 3.x that pre-2005 AVI rips carry) and WMV1 / WMV2 / WMV3 (WMV9). These always routed to `SoftwareVideoDecoder`. Before that release they failed the load there with `unsupportedCodec`, because no decoder was compiled in.
 - **Native `.wmv` / `.asf` files (FFmpegBuild 3.1.0):** play whole. That release added the `asf` demuxer and the entire WMA decoder family (Standard, Pro, Lossless, Voice). The video in such a file is usually WMV3 or VC-1, both already supported in Matroska and MPEG-TS.
 - **All or nothing, on purpose.** The demuxer ships only together with the WMA decoders. Without a matching decoder the demuxer would open the file and then have nothing to decode its audio with: `AudioBridge` init fails, the cascade ends in `droppedNoPipeline`, and the session serves video only and plays the file silently. That is worse than an honest failure.
 - WMA is not fMP4-legal in any flavour, so it always takes the AudioBridge, like MP2 and Blu-ray LPCM.
-- None of the six video codecs supports frame threading, so they decode single-threaded. The content that carries them is SD.
+- Of the six video codecs only WMV3 decodes with frame threads (FFmpegBuild 3.18.0, see [VC-1](#mpeg-4-part-2-mpeg-2-vc-1)). The other five decode single-threaded, and the content that carries them is SD.
 - Reported by cmcpherson274 (FFmpegBuild#3), whose library carries WMV only inside Matroska and MPEG-TS. So native `.wmv` / `.asf` support waited for a second field report.
 
 #### Flash codecs (FFmpegBuild 3.2.0)
