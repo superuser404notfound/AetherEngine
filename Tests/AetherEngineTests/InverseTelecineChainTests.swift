@@ -287,13 +287,36 @@ struct InverseTelecineChainTests {
         #expect(differing.isEmpty, "pictures that differ: \(differing)")
     }
 
-    @Test("AE#1108: the GPU cadence filters take 8-bit frames whose height is a multiple of 4, at least 32x16")
+    @Test("AE#1108: the GPU cadence filters take 8-bit 4:2:0 frames whose height is a multiple of 4, at least 32x16")
     func gpuCadenceGeometry() {
-        #expect(DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 720, height: 480, tenBit: false))
-        #expect(DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 1920, height: 1080, tenBit: false))
-        #expect(!DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 720, height: 486, tenBit: false))
-        #expect(!DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 720, height: 480, tenBit: true))
-        #expect(!DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 16, height: 480, tenBit: false))
+        func accepts(_ w: Int32, _ h: Int32, _ format: AVPixelFormat) -> Bool {
+            DeinterlaceFilter.hardwareInverseTelecineAccepts(width: w, height: h, pixelFormat: format.rawValue)
+        }
+        #expect(accepts(720, 480, AV_PIX_FMT_YUV420P))
+        #expect(accepts(1920, 1080, AV_PIX_FMT_YUV420P))
+        #expect(accepts(720, 480, AV_PIX_FMT_NV12))
+        #expect(!accepts(720, 486, AV_PIX_FMT_YUV420P), "height not a multiple of 4")
+        #expect(!accepts(720, 480, AV_PIX_FMT_YUV420P10LE), "10-bit")
+        #expect(!accepts(720, 480, AV_PIX_FMT_YUV422P), "4:2:2 would mix the fields' chroma in the conversion")
+        #expect(!accepts(720, 480, AV_PIX_FMT_YUV444P))
+        #expect(!accepts(720, 480, AV_PIX_FMT_GRAY8))
+        #expect(!accepts(16, 480, AV_PIX_FMT_YUV420P))
+    }
+
+    @Test("AE#1108: a running error in the GPU cadence graph keeps the GPU deinterlacer, with the cadence on the CPU",
+          .enabled(if: hardwareInverseTelecineAvailable, "needs fieldmatch_videotoolbox, decimate_videotoolbox and a Metal device"))
+    func gpuCadenceErrorKeepsTheGPUDeinterlacer() {
+        let filter = filter(mode: .auto, fieldRate: .field)
+        defer { filter.teardown() }
+        let frame = Frames.telecinedFrame(0)
+        defer { var f: UnsafeMutablePointer<AVFrame>? = frame; av_frame_free(&f) }
+        #expect(filter.ensureGraph(frame: frame, timeBase: Frames.timeBase))
+        #expect(filter.builtInverseTelecineHardware)
+        #expect(filter.noteGraphError(afterPull: -5))  // AVERROR(EIO)
+        #expect(filter.ensureGraph(frame: frame, timeBase: Frames.timeBase))
+        #expect(filter.engine == .hardware, "the GPU deinterlacer stays")
+        #expect(filter.activeDeinterlace?.inverseTelecine == true)
+        #expect(filter.activeDeinterlace?.inverseTelecineIsHardware == false, "the cadence moved to the CPU")
     }
 
     @Test("AE#1108: the report never claims GPU inverse telecine without inverse telecine on the GPU engine")

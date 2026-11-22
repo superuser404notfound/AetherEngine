@@ -15,8 +15,8 @@ the public-API contract.
 - **Inverse telecine runs on the GPU (AE#1108).** On the GPU engine `fieldmatch` and `decimate` now run as
   Metal kernels after the upload (`fieldmatch_videotoolbox`, `decimate_videotoolbox`, from FFmpegBuild 3.19.0)
   instead of on the CPU before it. The output is the same frame for frame, timestamps and every match and
-  drop included. The CPU chain stays as the fallback for builds without the filters, 10-bit frames, heights
-  that are not a multiple of 4, and a GPU graph that fails to build.
+  drop included. The CPU chain stays as the fallback for builds without the filters, frames that are not
+  8-bit 4:2:0, heights that are not a multiple of 4, and GPU filters that fail to build or error.
   `VideoDeinterlace.inverseTelecineIsHardware` says which one runs. Filters by classicjazz.
 
 ## [7.72.1] - 2026-11-22

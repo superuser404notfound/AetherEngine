@@ -83,7 +83,7 @@ enum TelecineFrameSynthesizer {
     /// The film frame `frame` reproduces exactly (mean luma difference below half a level), searched
     /// over `0..<filmFrames`; nil when it matches none (a deinterlaced or combed picture).
     static func matchingFilmFrame(_ frame: UnsafeMutablePointer<AVFrame>, filmFrames: Int) -> Int? {
-        // NV12 too: a GPU graph's output, downloaded, has the same luma plane.
+        // NV12 as well, since a GPU graph's output downloads to it with the same luma plane.
         guard frame.pointee.format == AV_PIX_FMT_YUV420P.rawValue || frame.pointee.format == AV_PIX_FMT_NV12.rawValue,
               let luma = frame.pointee.data.0 else { return nil }
         let rowBytes = Int(frame.pointee.linesize.0)
