@@ -88,11 +88,13 @@ enum SubtitleRectText {
     }
 
     /// Drop every `{...}` span: from a `{` to the first `}` after it, so `{a{b}c}` leaves `c}`. A `{`
-    /// with no `}` behind it keeps itself and the rest verbatim.
+    /// with no `}` behind it keeps itself and the rest verbatim, except in drawing mode, where the
+    /// rest goes too.
     ///
-    /// Text drawn in ASS drawing mode (after `\p1` or higher, until `\p0`) goes too: it is vector
-    /// commands (`m 10 20 l 30 40`), not words. Anime typesetting uses drawings for boxes and masks,
-    /// and these came out as rows of numbers.
+    /// Text drawn in ASS drawing mode goes: it is vector commands (`m 10 20 l 30 40`), not words.
+    /// Anime typesetting uses drawings for boxes and masks, and these came out as rows of numbers.
+    /// Drawing starts at `\p1` or higher and ends at `\p0`, a bare `\p` or a `\r` reset
+    /// (`drawingScale(inBlock:)` reads the tags).
     ///
     /// Audit SUB-101: this was `\\{[^}]*\\}` through `NSRegularExpression`, which rescans to the end
     /// of the text at every unclosed `{` (20k braces took 2.6 s, doubling cost 4x). One forward pass
