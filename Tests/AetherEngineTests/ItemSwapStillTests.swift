@@ -151,9 +151,18 @@ struct ItemSwapStillTests {
         // rebuild pauses first for that reason, but the playing read still has to work. The timeout
         // only has to catch an output that never vends: 2 s ran out once in a starved CI run (this
         // test took 22.7 s) with the item still playing.
+        let before = Self.playerReading(host)
         let frame = await host.captureDisplayedFrame(timeout: .seconds(15))
-        #expect(frame != nil, "no frame while \(engine.state)")
+        #expect(frame != nil, "no frame while \(engine.state); before \(before), after \(Self.playerReading(host))")
         #expect(engine.state == .playing)
+    }
+
+    static func playerReading(_ host: NativeAVPlayerHost) -> String {
+        let player = host.avPlayer
+        let item = player.currentItem
+        return "t=\(String(format: "%.3f", player.currentTime().seconds)) rate=\(player.rate) "
+            + "tcs=\(player.timeControlStatus.rawValue) item=\(item?.status.rawValue ?? -1) "
+            + "dur=\(String(format: "%.3f", item?.duration.seconds ?? -1))"
     }
 
     @Test("a paused native item still hands over the frame on screen", .enabled(if: ItemSwapStillTests.vendsPausedFrames))
