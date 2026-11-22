@@ -517,6 +517,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
     var replayPendingBytes = 0
     var replayDeferredError: Error?
     private var damagedPacketLogCounts: [String: Int] = [:]
+
+    /// How many damaged live packets of `stream` ("video" / "audio") this producer handled with
+    /// `action` ("held", "forwarded", "discarded"). Pump state: read it once the pump has finished.
+    /// Tests read this instead of the log lines, which every producer in the process writes.
+    func damagedPacketCount(stream: String, action: String) -> Int {
+        damagedPacketLogCounts[stream + action] ?? 0
+    }
     private static let maximumReplayPendingBytes = LivePacketReplayGuard.maximumPendingBytes
     private static let maximumReplayPendingPackets = LivePacketReplayGuard.maximumPendingPackets
 
