@@ -6,8 +6,11 @@ import Testing
 struct SoftwarePacketCacheStorageTests {
     @Test("Explicit disk selection retains a disk claim and real packet history")
     func diskKeepsBudgetAndHistory() throws {
+        // A ledger of its own: on the shared one, the sessions other tests run in parallel claim the
+        // free space too, and on a boot volume with 22 GB free that left this claim at 0 and the
+        // store nil. What the shared ledger does is pinned in its own tests.
         let (store, bytes, claim) = try #require(try SoftwarePlaybackHost.makePacketStore(
-            storage: .disk, forwardSegments: 2700))
+            storage: .disk, forwardSegments: 2700, claims: RetentionClaims()))
         defer { try? store.close(); claim?.release() }
         #expect(store is SoftwarePacketDiskFIFO)
         #expect(bytes > 0)
@@ -37,7 +40,7 @@ struct SoftwarePacketCacheStorageTests {
     @Test("Automatic preserves upstream platform selection")
     func automaticPlatformPolicy() throws {
         let (store, _, claim) = try #require(try SoftwarePlaybackHost.makePacketStore(
-            storage: .automatic, forwardSegments: 10))
+            storage: .automatic, forwardSegments: 10, claims: RetentionClaims()))
         defer { try? store.close(); claim?.release() }
         #if os(tvOS)
         #expect(store is SoftwarePacketMemoryFIFO)
