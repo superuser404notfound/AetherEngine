@@ -33,7 +33,7 @@ struct InverseTelecineChainTests {
         func pullAll() {
             while filter.pull(into: out) >= 0 {
                 pts.append(out.pointee.pts)
-                if filmFrames > 0 { film.append(Frames.matchingFilmFrame(out, filmFrames: filmFrames)) }
+                if filmFrames > 0 { film.append(Self.withCPUFrame(out) { Frames.matchingFilmFrame($0, filmFrames: filmFrames) }) }
                 av_frame_unref(out)
             }
         }
@@ -49,6 +49,47 @@ struct InverseTelecineChainTests {
             pullAll()
         }
         return (pts, film)
+    }
+
+    /// Hands `body` a CPU frame: `frame` itself, or a GPU graph's VideoToolbox frame downloaded to NV12.
+    private static func withCPUFrame<T>(_ frame: UnsafeMutablePointer<AVFrame>,
+                                        _ body: (UnsafeMutablePointer<AVFrame>) -> T?) -> T? {
+        guard frame.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue else { return body(frame) }
+        guard let cpu = av_frame_alloc() else { return nil }
+        var owned: UnsafeMutablePointer<AVFrame>? = cpu
+        defer { av_frame_free(&owned) }
+        guard av_hwframe_transfer_data(cpu, frame, 0) >= 0 else { return nil }
+        return body(cpu)
+    }
+
+    /// The luma of every output picture, downloaded when the graph runs on the GPU.
+    private func lumaPlanes(_ filter: DeinterlaceFilter, frames: [UnsafeMutablePointer<AVFrame>]) -> [[UInt8]] {
+        let out = av_frame_alloc()!
+        defer { var o: UnsafeMutablePointer<AVFrame>? = out; av_frame_free(&o) }
+        var planes: [[UInt8]] = []
+        func pullAll() {
+            while filter.pull(into: out) >= 0 {
+                let plane: [UInt8]? = Self.withCPUFrame(out) { cpu in
+                    guard let luma = cpu.pointee.data.0 else { return nil }
+                    let stride = Int(cpu.pointee.linesize.0)
+                    return (0..<Int(Frames.height)).flatMap { y in
+                        (0..<Int(Frames.width)).map { luma[y * stride + $0] }
+                    }
+                }
+                planes.append(plane ?? [])
+                av_frame_unref(out)
+            }
+        }
+        for frame in frames {
+            var f: UnsafeMutablePointer<AVFrame>? = frame
+            #expect(filter.ensureGraph(frame: frame, timeBase: Frames.timeBase))
+            #expect(filter.push(frame) >= 0)
+            av_frame_free(&f)
+            pullAll()
+        }
+        #expect(filter.sendEndOfStream() >= 0)
+        pullAll()
+        return planes
     }
 
     @Test("3:2 film comes back as its film frames, each once, at 23.976 fps")
@@ -179,11 +220,14 @@ struct InverseTelecineChainTests {
     @Test("the GPU engine keeps the cadence work on the CPU and runs at frame rate under inverse telecine",
           .enabled(if: hardwareAvailable, "needs a GPU deinterlacer and a Metal device"))
     func hardwareChainRunsAtFrameRate() {
+        // The CPU cadence chain, which builds without AE#1108's GPU filters or when they refuse the stream.
         let filter = filter(mode: .auto, fieldRate: .field)
+        filter.hwInverseTelecineDisabled = true
         defer { filter.teardown() }
         let result = run(filter, frames: (0..<50).map { Frames.telecinedFrame($0) })
         #expect(result.pts.count == 40, "send_frame under inverse telecine, not send_field: \(result.pts.count)")
         let probe = self.filter(mode: .auto, fieldRate: .field)
+        probe.hwInverseTelecineDisabled = true
         defer { probe.teardown() }
         let frame = Frames.telecinedFrame(0)
         defer { var f: UnsafeMutablePointer<AVFrame>? = frame; av_frame_free(&f) }
@@ -192,5 +236,73 @@ struct InverseTelecineChainTests {
         #expect(probe.activeDeinterlace?.inverseTelecine == true)
         #expect(probe.activeDeinterlace?.fieldRate == .frame)
         #expect(probe.activeDeinterlace?.isHardware == true)
+        #expect(probe.activeDeinterlace?.inverseTelecineIsHardware == false)
+    }
+
+    private static let hardwareInverseTelecineAvailable =
+        hardwareAvailable && DeinterlaceFilter.hardwareInverseTelecineFiltersLinked
+
+    @Test("AE#1108: on the GPU the cadence filters run after the upload and give back each film frame once",
+          .enabled(if: hardwareInverseTelecineAvailable, "needs fieldmatch_videotoolbox, decimate_videotoolbox and a Metal device"))
+    func gpuCadenceFiltersReturnTheFilmFrames() {
+        let filter = filter(mode: .auto, fieldRate: .field)
+        defer { filter.teardown() }
+        let result = run(filter, frames: (0..<50).map { Frames.telecinedFrame($0) }, filmFrames: Frames.filmPeriod)
+        #expect(filter.graphErrorCount == 0)
+        // The GPU deinterlacer halves the link's time base, as it does after the CPU cadence filters,
+        // so a 23.976 frame is two ticks of 1001/48000.
+        #expect(result.pts == (0..<40).map { Int64($0) * 2 }, "one frame per 1001/24000: \(result.pts)")
+        #expect(result.film == (0..<40).map { $0 % Frames.filmPeriod },
+                "each film frame exactly once, in order: \(result.film)")
+
+        let probe = self.filter(mode: .auto, fieldRate: .field)
+        defer { probe.teardown() }
+        let frame = Frames.telecinedFrame(0)
+        defer { var f: UnsafeMutablePointer<AVFrame>? = frame; av_frame_free(&f) }
+        #expect(probe.ensureGraph(frame: frame, timeBase: Frames.timeBase))
+        #expect(probe.builtInverseTelecineHardware)
+        #expect(probe.activeDeinterlace?.inverseTelecineIsHardware == true)
+        #expect(probe.outputTimeBase.num == 1001 && probe.outputTimeBase.den == 48000)
+    }
+
+    @Test("AE#1108: the GPU cadence filters give the same pictures as the CPU ones before the upload",
+          .enabled(if: hardwareInverseTelecineAvailable, "needs fieldmatch_videotoolbox, decimate_videotoolbox and a Metal device"))
+    func gpuCadenceMatchesCPUCadence() {
+        // Film with a stretch of true video in the middle, so fieldmatch also leaves frames combed
+        // and the GPU deinterlacer has work in both chains.
+        func source() -> [UnsafeMutablePointer<AVFrame>] {
+            (0..<60).map { k in (20..<30).contains(k) ? Frames.interlacedVideoFrame(k) : Frames.telecinedFrame(k) }
+        }
+        let gpu = filter(mode: .auto, fieldRate: .field)
+        defer { gpu.teardown() }
+        let cpu = filter(mode: .auto, fieldRate: .field)
+        cpu.hwInverseTelecineDisabled = true
+        defer { cpu.teardown() }
+        let gpuPlanes = lumaPlanes(gpu, frames: source())
+        let cpuPlanes = lumaPlanes(cpu, frames: source())
+        #expect(gpu.graphErrorCount == 0 && cpu.graphErrorCount == 0)
+        #expect(!gpuPlanes.isEmpty && !gpuPlanes.contains { $0.isEmpty })
+        #expect(gpuPlanes.count == cpuPlanes.count, "gpu \(gpuPlanes.count) cpu \(cpuPlanes.count)")
+        let differing = zip(gpuPlanes, cpuPlanes).enumerated().filter { $0.element.0 != $0.element.1 }.map(\.offset)
+        #expect(differing.isEmpty, "pictures that differ: \(differing)")
+    }
+
+    @Test("AE#1108: the GPU cadence filters take 8-bit frames whose height is a multiple of 4, at least 32x16")
+    func gpuCadenceGeometry() {
+        #expect(DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 720, height: 480, tenBit: false))
+        #expect(DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 1920, height: 1080, tenBit: false))
+        #expect(!DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 720, height: 486, tenBit: false))
+        #expect(!DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 720, height: 480, tenBit: true))
+        #expect(!DeinterlaceFilter.hardwareInverseTelecineAccepts(width: 16, height: 480, tenBit: false))
+    }
+
+    @Test("AE#1108: the report never claims GPU inverse telecine without inverse telecine on the GPU engine")
+    func reportKeepsGPUCadenceConsistent() {
+        #expect(!VideoDeinterlace(filter: "bwdif", isHardware: false, fieldRate: .frame, inverseTelecine: true,
+                                  inverseTelecineIsHardware: true).inverseTelecineIsHardware)
+        #expect(!VideoDeinterlace(filter: "bwdif_videotoolbox", isHardware: true, fieldRate: .field,
+                                  inverseTelecine: false, inverseTelecineIsHardware: true).inverseTelecineIsHardware)
+        #expect(VideoDeinterlace(filter: "bwdif_videotoolbox", isHardware: true, fieldRate: .frame,
+                                 inverseTelecine: true, inverseTelecineIsHardware: true).inverseTelecineIsHardware)
     }
 }

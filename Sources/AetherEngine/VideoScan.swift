@@ -37,12 +37,18 @@ public struct VideoDeinterlace: Sendable, Equatable {
     /// (titles and credits made at video rate). The output runs at 4/5 of the source rate
     /// (29.97 to 23.976 fps) and `fieldRate` is `.frame`.
     public let inverseTelecine: Bool
+    /// AE#1108: `fieldmatch` and `decimate` run on the GPU (`fieldmatch_videotoolbox`,
+    /// `decimate_videotoolbox`) rather than on the CPU ahead of the upload. Only ever true together
+    /// with `inverseTelecine` and `isHardware`. The output is the same either way, only the cost moves.
+    public let inverseTelecineIsHardware: Bool
 
-    public init(filter: String, isHardware: Bool, fieldRate: DeinterlaceFieldRate, inverseTelecine: Bool = false) {
+    public init(filter: String, isHardware: Bool, fieldRate: DeinterlaceFieldRate, inverseTelecine: Bool = false,
+                inverseTelecineIsHardware: Bool = false) {
         self.filter = filter
         self.isHardware = isHardware
         self.fieldRate = fieldRate
         self.inverseTelecine = inverseTelecine
+        self.inverseTelecineIsHardware = inverseTelecine && isHardware && inverseTelecineIsHardware
     }
 
     /// Frames the deinterlacer emits per frame it takes in. Under `inverseTelecine` the graph then

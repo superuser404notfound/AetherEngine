@@ -383,6 +383,20 @@ Samples were taken at the start position and, for the comparison below, at the m
 - Seek to first frame, eight seeks per run on S01E05, two runs each: the clock hold after a seek (`[AudioOutput] preroll ready after N ms`) took 69-77 ms median with inverse telecine and 43-45 ms without. The graph rebuilt in about 1 ms either way; `decimate` needs about five frames before its first picture.
 - Scrub stills (`scrubpreview --stills`, five positions): 2-10 ms each, the same with and without, because stills keep the plain deinterlacer.
 
+**The cadence filters on the GPU (AE#1108).** The GPU engine's chain with CPU `fieldmatch` and `decimate` before the upload, against `fieldmatch_videotoolbox` and `decimate_videotoolbox` after it. FFmpeg CLI on an M1, raw input (no decoder threads in the count), one filter thread, user plus system time per input frame, median of runs 2 to 5:
+
+| Source | CPU stages | GPU stages |
+|---|---|---|
+| 480i 3:2 film, clean | 1.8 ms CPU, 1.7 ms wall | 1.5 ms CPU, 2.6 ms wall |
+| 480i 3:2 film, noisy | 6.1 ms CPU, 6.3 ms wall | 1.8 ms CPU, 3.7 ms wall |
+| 576i 3:2 film | 2.3 ms CPU, 2.5 ms wall | 1.8 ms CPU, 3.2 ms wall |
+| 1080i 3:2 film | 11.5 ms CPU, 12.6 ms wall | 3.5 ms CPU, 7.3 ms wall |
+
+- The CPU time drops everywhere, most where `fieldmatch`'s comb test is expensive (grain, HD). The wall time grows on clean SD, because the filter thread waits for the GPU.
+- Counting user time alone, as the issue did on an M1 Max, understates the GPU chain's cost: the Metal submissions show up as system time (1.5 s against 0.4 s over 3000 frames of 576i).
+- With an MPEG-2 decode in the same process, the totals move by up to 0.6 ms from run to run, because the decoder's threads are counted too. The raw-input runs above repeat within 0.1 ms after the first.
+- Not measured on an Apple TV yet.
+
 ## Engine architecture
 
 Measurements behind [architecture.md](architecture.md), [architecture-native.md](architecture-native.md) and [architecture-software.md](architecture-software.md).

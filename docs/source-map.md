@@ -195,7 +195,7 @@ Notes:
 | `OrderedDelivery.swift` | Software FEL path (`DualLayerDolbyVision` trait): hands composed frames from the Metal completion queue to the renderer in decode order, with an epoch for seeks and a stall guard (#702). |
 | `CCDataParser.swift` | Parses the bare cc_data triplet stream from a demuxable CEA-608 caption track (#77). |
 | `CEA608Decoder.swift` | In-house CEA-608 line-21 decoder (field 1 / CC1), checked against FFmpeg `ccaption_dec.c` (#77). |
-| `DeinterlaceFilter.swift` | Software path: persistent bwdif / yadif libavfilter graph; engages on the first interlaced frame. Under inverse telecine `fieldmatch` and `decimate` run around it (#853). |
+| `DeinterlaceFilter.swift` | Software path: persistent bwdif / yadif libavfilter graph; engages on the first interlaced frame. Under inverse telecine `fieldmatch` and `decimate` run around it (#853), on the GPU engine as their Metal ports after the upload (AE#1108). |
 | `FFmpegDecoderContext.swift` | The one libavcodec decoder-context open (allocate, copy codecpar, configure, `max_pixels`, open, free on failure) behind the video, probe and subtitle decoders (audit DEC-R202). |
 | `EmbeddedSubtitleDecoder.swift` | Inline subtitle decode from demuxed packets. Opens DVB teletext with libzvbi_teletextdec text-format options (#107). |
 | `InterlaceProbe.swift` | Decodes a sample and applies the deinterlacer's own engagement test, so a declared field order that no frame backs up (PsF) stops costing a software decode (#232). |
