@@ -128,7 +128,7 @@ struct Issue1090LiveJoinAtPlaylistStartTests {
     // MARK: - Reader against a loopback origin
 
     /// Serves one fixed live listing (no ENDLIST) of 1 s segments from MEDIA-SEQUENCE 0 and records
-    /// when each segment was asked for.
+    /// when the listing and each segment were asked for.
     private final class RecordingOrigin: @unchecked Sendable {
         let port: UInt16
         private let listener: LoopbackListener
@@ -136,8 +136,10 @@ struct Issue1090LiveJoinAtPlaylistStartTests {
         private let segments: [Data]
         private let lock = NSLock()
         private var _requests: [(index: Int, at: Date)] = []
+        private var _firstPlaylistRequest: Date?
 
         var segmentRequests: [(index: Int, at: Date)] { lock.withLock { _requests } }
+        var firstPlaylistRequest: Date? { lock.withLock { _firstPlaylistRequest } }
 
         init?(segments: [Data]) {
             self.segments = segments
@@ -174,6 +176,7 @@ struct Issue1090LiveJoinAtPlaylistStartTests {
             else { return }
             let body: Data
             if path.hasSuffix("media.m3u8") {
+                lock.withLock { if _firstPlaylistRequest == nil { _firstPlaylistRequest = Date() } }
                 body = playlist
             } else if let name = path.components(separatedBy: "/").last, name.hasPrefix("seg"), name.hasSuffix(".ts"),
                       let index = Int(name.dropFirst(3).dropLast(3)), segments.indices.contains(index) {
@@ -247,10 +250,12 @@ struct Issue1090LiveJoinAtPlaylistStartTests {
         // starved runner only makes this later, and the suite's time limit catches a hang.
         try await waitFor { origin.segmentRequests.contains { $0.index >= 11 } }
         let requests = origin.segmentRequests
-        let joinedAt = try #require(requests.first { $0.index == 0 }?.at)
-        // Segment k (k >= 8) is due k - 7 s after the join, and the join began just before segment 0
-        // was asked for. Load can only make a request LATER, so this lower bound holds on any runner;
-        // unpaced, the whole listing would have been asked for within a fraction of a second.
+        // Segment k (k >= 8) is due k - 7 s after the join, and the pacer starts its clock once the listing
+        // has arrived, so after the first listing request. Load can only make a segment request LATER than
+        // that, so this lower bound holds on any runner; unpaced, the whole listing would have been asked
+        // for within a fraction of a second. Segment 0's request is no anchor: a starved runner asked for
+        // it 0.42 s after the pacer started, and every paced segment then read early.
+        let joinedAt = try #require(origin.firstPlaylistRequest)
         for request in requests where request.index >= 8 {
             let earliest = Double(request.index - 7) - 0.25
             #expect(request.at.timeIntervalSince(joinedAt) >= earliest,
