@@ -82,41 +82,86 @@ struct VODSeekCapabilityTests {
         var options = LoadOptions()
         options.preferredDecodePath = path
         options.suppressDisplayCriteria = true
+        // The clip is 6 s and plays in real time, and on the all-traits CI job one main-actor wait can
+        // take longer than that. Autostarted, it ran to .ended before the first check saw it seekable,
+        // and .ended is never seekable: both cases hung for 150 s at once (2026-11-21 and 2026-11-22).
+        // Mounted paused it cannot run out. What the test is about does not need it to have played:
+        // stopInternal clears isSourceSeekable and the software reload never wrote it back (#1086).
+        options.autoplay = false
         try await engine.load(url: URL(string: "http://127.0.0.1:\(origin.port)/two-audio.mkv")!, options: options)
-        step.value = "seekable and playing"
-        try await waitFor { engine.canSeek && engine.currentTime > 0.5 }
-        // The clip is 6 s and plays in real time. On a starved CI pool the switch took long enough for
-        // it to reach .ended, which refuses the seek for a reason this test is not about. Paused, it
-        // cannot run out.
-        step.value = "paused"
-        engine.pause()
-        try await waitFor { engine.state == .paused }
+        step.value = "seekable and paused"
+        try await step.wait(engine) { engine.canSeek && engine.state == .paused }
         let other = try #require(engine.audioTracks.first { $0.id != engine.activeAudioTrackIndex })
         step.value = "audio switch to \(other.id)"
         engine.selectAudioTrack(index: other.id)
-        try await waitFor { engine.activeAudioTrackIndex == other.id && engine.isSessionReady }
+        try await step.wait(engine) { engine.activeAudioTrackIndex == other.id && engine.isSessionReady }
         #expect(engine.isSourceSeekable == true)
         #expect(engine.canSeek)
         step.value = "seek to 4"
         await engine.seek(to: 4)
         step.value = "landing past 3.5"
-        try await waitFor { engine.currentTime > 3.5 }
+        try await step.wait(engine) { engine.currentTime > 3.5 }
         #expect(abs(engine.currentTime - 4) < 1)
     }
 
     nonisolated private static func reportIfStuck(_ step: StepMarker, path: DecodePath) async {
         do { try await Task.sleep(for: .seconds(150)) } catch { return }
-        Issue.record("audio switch test (\(path)) still at step '\(step.value)' after 150 s")
+        Issue.record("audio switch test (\(path)) still at step '\(step.value)' after 150 s; \(step.report())")
     }
 }
 
-/// Which step a long test is in, readable from the detached watchdog.
+/// Which step a long test is in, and what the engine looked like the last time that step's wait
+/// checked, readable from the watchdog off the main actor. The report says how long ago that check
+/// ran, so a main actor that stopped running the wait shows up as an old snapshot, not as a healthy one.
 private final class StepMarker: @unchecked Sendable {
     private let lock = NSLock()
     private var current: String
+    private var lastSeen: String?
+    private var lastSeenAt: ContinuousClock.Instant?
+    private var checks = 0
     init(_ initial: String) { current = initial }
+
     var value: String {
         get { lock.withLock { current } }
-        set { lock.withLock { current = newValue } }
+        set {
+            lock.withLock {
+                current = newValue
+                lastSeen = nil
+                lastSeenAt = nil
+                checks = 0
+            }
+        }
+    }
+
+    /// `waitFor` that records the engine's state before every check.
+    @MainActor
+    func wait(_ engine: AetherEngine, _ condition: () -> Bool) async throws {
+        try await waitFor {
+            observe(engine)
+            return condition()
+        }
+    }
+
+    @MainActor
+    private func observe(_ engine: AetherEngine) {
+        let snapshot = "state \(engine.state), phase \(engine.playbackPhase), canSeek \(engine.canSeek), "
+            + "sessionReady \(engine.isSessionReady), sourceSeekable \(String(describing: engine.isSourceSeekable)), "
+            + "buffering \(engine.isBuffering), seeking \(engine.isSeeking), live \(engine.isLive), "
+            + "sequentialOrigin \(engine.loadedOptions.sequentialOrigin), duration \(engine.duration), "
+            + "time \(engine.currentTime), audio \(String(describing: engine.activeAudioTrackIndex))"
+        let now = ContinuousClock.now
+        lock.withLock {
+            lastSeen = snapshot
+            lastSeenAt = now
+            checks += 1
+        }
+    }
+
+    func report() -> String {
+        lock.withLock {
+            guard let lastSeen, let lastSeenAt else { return "this step's wait never checked" }
+            let age = ContinuousClock.now - lastSeenAt
+            return "\(checks) checks, the last \(age) ago saw \(lastSeen)"
+        }
     }
 }
