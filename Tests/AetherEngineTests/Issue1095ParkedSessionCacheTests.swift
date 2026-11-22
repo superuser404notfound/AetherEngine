@@ -29,11 +29,13 @@ struct Issue1095ParkedSessionCacheTests {
         return url
     }
 
+    /// No deadline of its own: the park runs after the stop on another thread, and under full load
+    /// (the whole suite next to 16 busy processes) it took longer than the 6 s this once allowed,
+    /// so the second session started with nothing parked. The tests' time limit catches a hang.
     private func waitFor(_ condition: () -> Bool) async throws {
-        for _ in 0..<300 where !condition() {
+        while !condition() {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        #expect(condition())
     }
 
     private func makeSession(store: ParkedSegmentSessionStore,
