@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.72.1] - 2026-11-22
+
 ### Changed
 
 - **VC-1 and WMV3 decode on several cores (AE#1107).** FFmpegBuild 3.18.0 makes FFmpeg's `vc1` and `wmv3`
