@@ -3106,6 +3106,10 @@ public final class AetherEngine: ObservableObject {
     /// every live source, every source without declared sidecars, and every refused rewrite.
     var remoteHLSSubtitleProxy: RemoteHLSSubtitleProxy.Prepared?
 
+    /// AE#984 R2: moves with every pick of an injected rendition, so a pick still waiting for its
+    /// sidecar sees that a newer one took over and never selects.
+    var injectedRenditionSelectGeneration: UInt64 = 0
+
     /// AE#616: measures how far AVPlayer's item time leads the presented frame on the bypass, off the
     /// injected renditions. Nil whenever `remoteHLSSubtitleProxy` serves none.
     var remoteHLSCueClock: RemoteHLSCueClockObserver?

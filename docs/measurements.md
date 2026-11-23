@@ -1024,6 +1024,18 @@ Current rule: [api.md › Cue retention](api.md#cue-retention).
 - **The forward prefetch (AE#1015).** On a remote MKV or MP4 it downloads the video a second time: a minute of 1080p read 243.6 MB with an embedded SRT selected against 104.5 MB without.
 - **The bitmap landing role (AE#1022).** Measured on a 2.7 Mbit/s 1080p MKV over HTTP, four seeks: 168 MB against 87 MB without it, and 299 MB at the default reach.
 
+### A sidecar rendition picked before its file is in (AE#984)
+
+Measured with `aetherctl play --native-hls --sidecar en=<url> --subs en` on macOS against a local VOD origin: fMP4 HLS, 6 s segments, 300 s, the first segment 3 s late (a transcode spinning up), and the sidecar held by the origin.
+
+| Case | Before (7.73.0 `main`) | After |
+| --- | --- | --- |
+| Picked at load, sidecar 40 s | Nine 404 retries, then the item fails at ~30 s (`-1100` / `-12938`) | Ready at ~3 s, the same as with an instant sidecar; rendition selected at 40.3 s, first cue presented at 41 s |
+| Picked at load, sidecar at once | Ready at ~3 s | Ready at ~3 s; selected 0.3 s after the pick |
+| Picked at 5 s, sidecar 120 s | Media buffer stops at 198 s; no cue is ever presented in the 160 s run | Buffer fills to 300 s; rendition selected at 118 s, first cue at 121 s |
+
+golfista's bare-AVPlayer runs on tvOS 27 and macOS 27 match the first and third rows (item failed at 30.3 s; stall at media 114 s with no resume).
+
 ### API history notes
 
 Short notes on how an API behaved before its current rule. Each note starts with the API it belongs to; the current rule is that API's section in [api.md](api.md).

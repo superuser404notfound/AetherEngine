@@ -190,16 +190,17 @@ struct Issue984SidecarFetchTests {
     }
 }
 
-/// A loopback origin that serves fixed bodies by path, one request per connection, and records every
+/// A loopback origin that serves bodies by path, one request per connection, and records every
 /// request it is asked: its path and its Range header. A path it does not know answers 404.
-private final class SidecarOrigin: @unchecked Sendable {
+/// Shared with `Issue984PickedRenditionTests`.
+final class SidecarOrigin: @unchecked Sendable {
     struct Request: Equatable {
         let path: String
         let range: String?
     }
 
     private let listener: LoopbackListener
-    private let files: [String: String]
+    private var files: [String: String]
     private let delayMicros: useconds_t
     private let lock = NSLock()
     private var log: [Request] = []
@@ -216,6 +217,9 @@ private final class SidecarOrigin: @unchecked Sendable {
     }
 
     var requests: [Request] { lock.withLock { log } }
+
+    /// Serves `body` under `path` from the next request on.
+    func put(_ path: String, _ body: String) { lock.withLock { files[path] = body } }
 
     func url(_ path: String) -> URL { URL(string: "http://127.0.0.1:\(listener.port)\(path)")! }
 
@@ -238,7 +242,7 @@ private final class SidecarOrigin: @unchecked Sendable {
         lock.withLock { log.append(Request(path: path, range: range)) }
         if delayMicros > 0 { usleep(delayMicros) }
         let response: String
-        if let body = files[path] {
+        if let body = lock.withLock({ files[path] }) {
             response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\n"
                 + "Connection: close\r\n\r\n" + body
         } else {

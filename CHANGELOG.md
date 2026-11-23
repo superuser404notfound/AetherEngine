@@ -45,6 +45,17 @@ the public-API contract.
 
 ### Fixed
 
+- **A slow external subtitle no longer fails or stalls a server HLS stream (AE#984, round 2).** On the
+  `nativeRemoteHLS` path a picked sidecar rendition used to reach AVPlayer while the file was still
+  being fetched, and AVPlayer then got a 404 for it. Picked at load with a 40 s sidecar, the item failed
+  after about 30 s (`-12938`). Picked mid-play with a 120 s sidecar, AVPlayer stopped loading media
+  and never showed the cues. The engine now publishes the pick at once and hands AVPlayer the rendition
+  only when its file is in: the item plays from the start and the subtitles appear when the server
+  delivers them. The picked track is fetched first, the others only once the item is ready, and a
+  sidecar that failed is fetched again when it is picked again. On the loopback path a sidecar rendition
+  no longer runs into the 15 s pre-fill deadline and stays off for the session, and a window asked for
+  early is answered 404 instead of being served empty for good. Reported and measured by golfista.
+
 - **FLAC in 7.1(wide) and other non-default layouts no longer plays on the wrong speakers (AE#1120).**
   CoreMedia reads no channel layout from a FLAC track in fMP4 and assumes the FLAC default for the
   count, so a 7.1(wide) track played its front-of-centre pair on the side surrounds. Such a track now

@@ -170,9 +170,10 @@ enum RemoteHLSSubtitleProxy {
                     master, relativeTo: finalURL, port: server.port, token: server.pathToken,
                     absoluteOnly: true))
         }
-        // Decode up front: the rendition is fetched the moment the host selects it, and a whole-program
-        // .vtt is fetched once and never again.
-        provider.startFill()
+        // A whole-program .vtt is fetched once and never again, so it is decoded before AVPlayer sees it.
+        // AE#984 R2: only the rendition the host picks fills right away; the rest wait until the item is
+        // ready, because each one is an extraction the server runs next to the transcode's start.
+        provider.startFill(holdingUnpicked: true)
         return Prepared(server: server, provider: provider, masterURL: masterURL,
                         renditionNames: rewritten.renditionNames)
     }

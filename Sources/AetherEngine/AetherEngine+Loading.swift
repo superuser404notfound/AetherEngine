@@ -687,6 +687,16 @@ extension AetherEngine {
                       // No probe lists this route's audio, so the item's own tracks are the list.
                       readsBackAudioTracks: true))
 
+        // AE#984 R2: the injected renditions nobody picked were held so their extractions would not
+        // compete with the origin's start. Subscribed after `host.load`, which reset `isReady`, so a
+        // kept host's previous item cannot release them early.
+        if let provider = remoteHLSSubtitleProxy?.provider {
+            host.$isReady
+                .first { $0 }
+                .sink { _ in provider.releaseHeldFills() }
+                .store(in: &nativeCancellables)
+        }
+
         attachRemoteHLSCueClock(host: host, expectedGeneration: bypassGeneration)
 
         // AE#154: surface the item's legible AVMediaSelectionGroup as `subtitleTracks` so hosts with

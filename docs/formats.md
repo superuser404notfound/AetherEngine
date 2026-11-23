@@ -1320,6 +1320,7 @@ External subtitle files register with the engine and appear in `subtitleTracks` 
 - **Selection.** `selectSubtitleTrack(index:)` and `selectSecondarySubtitleTrack(index:)` accept external ids and route onto the whole-file decode internally. `activeSubtitleTrackIndex` publishes the external id like any other selection. `removeExternalSubtitleTrack(id:)` unregisters (an active selection is cleared).
 - **Renditions.** Load-declared external tracks join the native WebVTT renditions ([below](#native-subtitle-renditions-webvtt-for-pip-airplay-and-external-display)).
   - Their store is filled by one whole-file decode at load (one pass per container, covering every track pointing at it) and marked finished.
+  - A select waits for that decode before it hands AVPlayer the rendition (AE#984), however long the server takes. A sidecar that could not be read leaves it unselected. While the decode runs, a segment AVPlayer asks for anyway is answered 404, which it retries, rather than served empty, which it would keep for the session.
   - A finished store also backfills the fullscreen overlay instantly on select (no re-download; styled-ASS selections re-decode to keep raw markup).
   - A store that could not be filled stays unfinished rather than serving a complete but blank `.vtt`.
   - Tracks added after load are host-overlay only until the next load, because the rendition set is fixed in the master playlist at item creation.
@@ -1339,7 +1340,14 @@ The media never moves: AVPlayer still fetches A/V straight from the origin, whic
 - Renditions are declared `DEFAULT=NO,AUTOSELECT=NO` and without `FORCED`, the same discipline as the loopback master, so nothing self-engages.
 - The track keeps its external id, and selecting it drives `AVMediaSelection` rather than the overlay, so it survives PiP / AirPlay / an external display.
 - These keep the origin URL and overlay-only subtitles: live playlists (no `EXT-X-ENDLIST`), bitmap sidecars (`.sup`), an unparseable or unrewritable playlist, and an origin slower than the 5 s budget.
-- **A rendition is never held for its sidecar (AE#984).** AVPlayer will not load media past the point where it needs the selected subtitle segment. So holding that request for a slow file would freeze the picture of a healthy stream. Instead, while the sidecar is still decoding, the `.vtt` is answered 404. AVPlayer retries every few seconds while A/V keeps loading, and the complete file is served on the first retry after the decode. A sidecar that could not be read is served empty at once. The loopback master's whole-program renditions of load-declared sidecars follow the same rule.
+- **AVPlayer only sees a rendition whose sidecar is in (AE#984).** `selectSubtitleTrack` publishes the pick at once (`activeSubtitleTrackIndex`, `isLoadingSubtitles` while it waits), but selects the rendition on the item only once its sidecar is decoded. Measured with a bare AVPlayer, a selected rendition that is not ready yet is costly:
+  - picked before `readyToPlay`, it delays readiness by the whole wait and fails the item after about 30 s (`-12938`, HTTP 404);
+  - picked mid-play with a long wait, AVPlayer stops loading media at the point where it needs the subtitle segment;
+  - held instead of answered, it freezes the picture of a healthy stream.
+
+  A sidecar that cannot be read leaves the rendition unselected, and picking the track again fetches it once more.
+- **The picked sidecar is fetched first.** Fills run one at a time, because each one can be an extraction the server runs from the file it is transcoding. Only the picked track's fill starts at load; the others wait until the item is ready to play. A pick takes over from a running fill of another track, which goes back in the queue.
+- **A `.vtt` that is asked for early is answered 404, never held.** That only happens when something else selects the rendition (AVKit's own menu, for one). AVPlayer retries every few seconds, the complete file is served on the first retry after the decode, and a sidecar that could not be read is served empty at once.
 
 ### Track selection by language preference
 
