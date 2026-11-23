@@ -10,11 +10,16 @@ struct FrameDecodeContextOpenFailureTests {
     /// Counts the reads that reach the source.
     private final class CountingReader: IOReader, @unchecked Sendable {
         private let bytes: Data
+        /// Returned instead of EOF once the bytes run out, standing in for a dropped connection.
+        private let endError: Int32?
         private let lock = NSLock()
         private var position = 0
         private var readCount = 0
 
-        init(bytes: Data) { self.bytes = bytes }
+        init(bytes: Data, endError: Int32? = nil) {
+            self.bytes = bytes
+            self.endError = endError
+        }
 
         var reads: Int { lock.withLock { readCount } }
 
@@ -23,7 +28,7 @@ struct FrameDecodeContextOpenFailureTests {
             return lock.withLock {
                 readCount += 1
                 let n = min(Int(size), bytes.count - position)
-                guard n > 0 else { return 0 }
+                guard n > 0 else { return endError ?? 0 }
                 bytes.withUnsafeBytes { raw in _ = memcpy(buffer, raw.baseAddress! + position, n) }
                 position += n
                 return Int32(n)
@@ -85,6 +90,84 @@ struct FrameDecodeContextOpenFailureTests {
         }
         #expect(reader.reads == readsAfterFirstOpen, "later opens did not read the source again")
         #expect(!context.isOpen)
+    }
+
+    /// An FLV whose header announces audio and video, followed by 20 PCM audio tags and no video
+    /// tag. FLV makes its streams from the tags, so the audio stream resolves and
+    /// `avformat_find_stream_info` returns success without a video stream, whether the input ended
+    /// there or a read failed there.
+    private static func audioThenCutFLV() -> Data {
+        var data = Data([0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00])
+        let payload = [UInt8](repeating: 0, count: 882)  // 10 ms of 44.1 kHz 16-bit mono
+        let dataSize = 1 + payload.count
+        for index in 0..<20 {
+            let ms = index * 10
+            data.append(contentsOf: [0x08, UInt8(dataSize >> 16), UInt8(dataSize >> 8 & 0xFF), UInt8(dataSize & 0xFF),
+                                     UInt8(ms >> 16 & 0xFF), UInt8(ms >> 8 & 0xFF), UInt8(ms & 0xFF), 0x00,
+                                     0x00, 0x00, 0x00])
+            data.append(0x3E)  // PCM little endian, 44.1 kHz, 16-bit, mono
+            data.append(contentsOf: payload)
+            let tagSize = 11 + dataSize
+            data.append(contentsOf: [UInt8(tagSize >> 24), UInt8(tagSize >> 16 & 0xFF), UInt8(tagSize >> 8 & 0xFF),
+                                     UInt8(tagSize & 0xFF)])
+        }
+        return data
+    }
+
+    @Test("a read error before the video stream showed up is retried, not kept as no video")
+    func cutShortAnalysisIsRetried() {
+        let reader = CountingReader(bytes: Self.audioThenCutFLV(), endError: -5)  // AVERROR(EIO)
+        let context = FrameDecodeContext(reader: reader, formatHint: "flv")
+        defer { context.close() }
+
+        do {
+            try context.ensureOpen()
+            Issue.record("the open succeeded on a source with no video tag")
+        } catch {
+            #expect("\(error)" == "\(FrameDecodeError.streamAnalysisCutShort)")
+        }
+        let readsAfterFirstOpen = reader.reads
+        _ = reader.seek(offset: 0, whence: SEEK_SET)
+        #expect(throws: FrameDecodeError.self) { try context.ensureOpen() }
+        #expect(reader.reads > readsAfterFirstOpen, "the second open read the source again")
+    }
+
+    @Test("the same source read to its end is kept as no video")
+    func analysisToTheEndIsKept() {
+        let reader = CountingReader(bytes: Self.audioThenCutFLV())
+        let context = FrameDecodeContext(reader: reader, formatHint: "flv")
+        defer { context.close() }
+
+        do {
+            try context.ensureOpen()
+            Issue.record("the open succeeded on a source with no video tag")
+        } catch {
+            #expect("\(error)" == "\(FrameDecodeError.noVideoStream)")
+        }
+        let readsAfterFirstOpen = reader.reads
+        #expect(throws: FrameDecodeError.self) { try context.ensureOpen() }
+        #expect(reader.reads == readsAfterFirstOpen, "the second open did not read the source")
+    }
+
+    @Test("no video stream is final only when the stream analysis saw the whole stream list")
+    func missingVideoStreamClassification() {
+        func report(_ stop: ProbeReport.Stop, pmtMissing: Int = 0) -> ProbeReport {
+            ProbeReport(stop: stop, unresolved: 0, programs: pmtMissing, pmtMissing: pmtMissing,
+                        headerWaitReleasedAfter: nil, probeBytes: 0, closeToReturn: nil)
+        }
+        func error(_ probe: ProbeReport?) -> String { "\(FrameDecodeContext.missingVideoStreamError(probe: probe))" }
+        let final = "\(FrameDecodeError.noVideoStream)"
+        let retried = "\(FrameDecodeError.streamAnalysisCutShort)"
+
+        for stop in [ProbeReport.Stop.resolved, .probesize, .analyzeduration, .eof] {
+            #expect(error(report(stop)) == final, "\(stop)")
+            #expect(error(report(stop, pmtMissing: 1)) == retried, "\(stop) with a PMT missing")
+        }
+        for stop in [ProbeReport.Stop.readError, .stopped, .interrupted] {
+            #expect(error(report(stop)) == retried, "\(stop)")
+        }
+        #expect(error(nil) == final)
+        #expect(!FrameDecodeContext.isPermanentOpenFailure(FrameDecodeError.streamAnalysisCutShort))
     }
 
     @Test("only failures the source itself causes are permanent")

@@ -1390,9 +1390,10 @@ public final class Demuxer: @unchecked Sendable {
         }
     }
 
-    /// What the stream analysis of the current open did, for the `open timings` line. Nil until the
+    /// What the stream analysis of the current open did, for the `open timings` line and for the still
+    /// decoder, which tells a source without video from a cut analysis by it (AE#1118). Nil until the
     /// pass ran (an open that failed earlier, a side reader that skips it).
-    private var probeReport: ProbeReport?
+    private(set) var probeReport: ProbeReport?
 
     /// Reads the format context once `avformat_find_stream_info` has returned. Public fields only, so
     /// the line says how the pass ended without reaching inside it.

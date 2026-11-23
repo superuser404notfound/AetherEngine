@@ -195,11 +195,25 @@ final class FrameDecodeContext: @unchecked Sendable {
     /// re-read a remote source about 1.6 times a second for a whole session, beside playback.
     private var permanentOpenFailure: FrameDecodeError?
 
+    /// No video stream says something about the source only when the stream analysis saw the whole
+    /// stream list. `avformat_find_stream_info` returns success once any stream has its parameters,
+    /// even when a read error or a stop ended it, so an FLV or MPEG-PS cut after its first audio
+    /// packets looks like a source without video. So does an MPEG-TS program whose PMT never came.
+    /// Those are `.streamAnalysisCutShort`, and the next request tries again.
+    static func missingVideoStreamError(probe: ProbeReport?) -> FrameDecodeError {
+        guard let probe else { return .noVideoStream }
+        switch probe.stop {
+        case .readError, .stopped, .interrupted: return .streamAnalysisCutShort
+        case .resolved, .probesize, .analyzeduration, .eof:
+            return probe.pmtMissing > 0 ? .streamAnalysisCutShort : .noVideoStream
+        }
+    }
+
     /// Whether an open that failed with `error` can only fail the same way again on this source.
     static func isPermanentOpenFailure(_ error: any Error) -> Bool {
         switch error as? FrameDecodeError {
         case .noVideoStream, .noCodecParameters, .unsupportedCodec: true
-        case .allocationFailed, .decoderOpenFailed, nil: false
+        case .allocationFailed, .decoderOpenFailed, .streamAnalysisCutShort, nil: false
         }
     }
 
@@ -289,7 +303,7 @@ final class FrameDecodeContext: @unchecked Sendable {
 
         let videoIdx = demuxer.videoStreamIndex
         guard videoIdx >= 0, let stream = demuxer.stream(at: videoIdx) else {
-            throw FrameDecodeError.noVideoStream
+            throw Self.missingVideoStreamError(probe: demuxer.probeReport)
         }
         videoStreamIndex = videoIdx
         timeBase = stream.pointee.time_base
@@ -885,6 +899,9 @@ enum FrameDecodeError: Error, CustomStringConvertible, LocalizedError {
     case unsupportedCodec
     case allocationFailed
     case decoderOpenFailed
+    /// No video stream found, but a read error, a stop or a missing MPEG-TS PMT ended the stream
+    /// analysis before it saw the whole stream list. Retried, unlike `.noVideoStream`.
+    case streamAnalysisCutShort
 
     var description: String {
         switch self {
@@ -893,6 +910,7 @@ enum FrameDecodeError: Error, CustomStringConvertible, LocalizedError {
         case .unsupportedCodec: "FrameDecode: no decoder for the video codec"
         case .allocationFailed: "FrameDecode: avcodec_alloc_context3 failed"
         case .decoderOpenFailed: "FrameDecode: decoder open failed"
+        case .streamAnalysisCutShort: "FrameDecode: no video stream before the stream analysis was cut short"
         }
     }
 
