@@ -149,25 +149,24 @@ struct FrameDecodeContextOpenFailureTests {
         #expect(reader.reads == readsAfterFirstOpen, "the second open did not read the source")
     }
 
-    @Test("no video stream is final only when the stream analysis saw the whole stream list")
-    func missingVideoStreamClassification() {
-        func report(_ stop: ProbeReport.Stop, pmtMissing: Int = 0) -> ProbeReport {
-            ProbeReport(stop: stop, unresolved: 0, programs: pmtMissing, pmtMissing: pmtMissing,
+    @Test("a source failure is final only when the stream analysis ran to one of its own limits")
+    func sourceFailureClassification() {
+        func report(_ stop: ProbeReport.Stop) -> ProbeReport {
+            ProbeReport(stop: stop, unresolved: 0, programs: 0, pmtMissing: 0,
                         headerWaitReleasedAfter: nil, probeBytes: 0, closeToReturn: nil)
         }
-        func error(_ probe: ProbeReport?) -> String { "\(FrameDecodeContext.missingVideoStreamError(probe: probe))" }
-        let final = "\(FrameDecodeError.noVideoStream)"
         let retried = "\(FrameDecodeError.streamAnalysisCutShort)"
-
-        for stop in [ProbeReport.Stop.resolved, .probesize, .analyzeduration, .eof] {
-            #expect(error(report(stop)) == final, "\(stop)")
-            #expect(error(report(stop, pmtMissing: 1)) == retried, "\(stop) with a PMT missing")
+        for failure in [FrameDecodeError.noVideoStream, .unsupportedCodec] {
+            for stop in [ProbeReport.Stop.resolved, .probesize, .analyzeduration, .eof] {
+                #expect("\(FrameDecodeContext.sourceFailure(failure, probe: report(stop)))" == "\(failure)",
+                        "\(failure) after \(stop)")
+            }
+            for stop in [ProbeReport.Stop.readError, .stopped, .interrupted] {
+                #expect("\(FrameDecodeContext.sourceFailure(failure, probe: report(stop)))" == retried,
+                        "\(failure) after \(stop)")
+            }
+            #expect("\(FrameDecodeContext.sourceFailure(failure, probe: nil))" == retried, "\(failure), no report")
         }
-        for stop in [ProbeReport.Stop.readError, .stopped, .interrupted] {
-            #expect(error(report(stop)) == retried, "\(stop)")
-        }
-        #expect(error(nil) == final)
-        #expect(!FrameDecodeContext.isPermanentOpenFailure(FrameDecodeError.streamAnalysisCutShort))
     }
 
     @Test("only failures the source itself causes are permanent")
@@ -177,6 +176,8 @@ struct FrameDecodeContextOpenFailureTests {
         #expect(FrameDecodeContext.isPermanentOpenFailure(FrameDecodeError.unsupportedCodec))
         #expect(!FrameDecodeContext.isPermanentOpenFailure(FrameDecodeError.allocationFailed))
         #expect(!FrameDecodeContext.isPermanentOpenFailure(FrameDecodeError.decoderOpenFailed))
+        #expect(!FrameDecodeContext.isPermanentOpenFailure(FrameDecodeError.parametersCopyFailed(-12)))
+        #expect(!FrameDecodeContext.isPermanentOpenFailure(FrameDecodeError.streamAnalysisCutShort))
         #expect(!FrameDecodeContext.isPermanentOpenFailure(DemuxerError.openFailed(code: -1)))
     }
 }

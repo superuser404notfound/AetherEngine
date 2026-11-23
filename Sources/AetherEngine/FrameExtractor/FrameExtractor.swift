@@ -225,8 +225,7 @@ public actor FrameExtractor {
         let context = self.context
         let image = await runOnQueue { () -> CGImage? in
             do { try context.ensureOpen() } catch {
-                EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback,
-                    level: FrameDecodeContext.isPermanentOpenFailure(error) ? .verbose : .info)
+                FrameDecodeContext.logOpenFailure(error)
                 return nil
             }
             return context.decodeFrame(at: 0, mode: .snapshot, targetWidth: 0, maxSize: maxSize,
@@ -254,8 +253,7 @@ public actor FrameExtractor {
         let result = await runOnQueue { () -> (image: CGImage, decodedSeconds: Double?)? in
             if token.isCancelled || isCancelled() { return nil }
             do { try context.ensureOpen() } catch {
-                EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback,
-                    level: FrameDecodeContext.isPermanentOpenFailure(error) ? .verbose : .info)
+                FrameDecodeContext.logOpenFailure(error)
                 return nil
             }
             var decoded: Double?
@@ -369,8 +367,7 @@ public actor FrameExtractor {
                 do {
                     try context.ensureOpen()
                 } catch {
-                    EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback,
-                    level: FrameDecodeContext.isPermanentOpenFailure(error) ? .verbose : .info)
+                    FrameDecodeContext.logOpenFailure(error)
                     return FrameResult(image: nil)
                 }
                 let image = context.decodeFrame(

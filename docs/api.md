@@ -2199,7 +2199,7 @@ await frames.shutdown()                            // prompt teardown of the dec
 - Results land in a bounded LRU cache, thumbnails bucketed by second.
 - After 10 s idle the context closes and the cache drops. The next request reopens lazily.
 - An open that fails because of the source itself (no video stream, no codec parameters, no decoder for the video codec) is not retried. Every later request returns nil without reading the source again, for the life of the extractor. Other open failures, such as a refused or dropped connection, are retried on the next request.
-- "No video stream" counts as final only when the stream analysis saw the whole stream list. If a read error or a stop cut it short, or an MPEG-TS program's stream table (PMT) never arrived, the next request tries again.
+- Such a failure counts as final only when the stream analysis ran to its end or to its size or time limit. If a read error or a stop cut it short, the next request tries again.
 - `shutdown()` is the explicit, permanent teardown.
 
 | Method (`FrameMode`) | What it returns |

@@ -75,9 +75,9 @@ the public-API contract.
   Dolby Vision remux then downloaded slower than real time and stalled. Now the first such failure is kept
   for the life of the extractor, and later requests return nil without touching the source. The failure is
   logged once when it is kept; the per-request line drops to verbose. Other open failures, including a
-  failed codec-parameter copy, are retried as before. "No video stream" is kept only when the stream analysis
-  saw the whole stream list: a read error, a stop, or an MPEG-TS whose PMT never arrived ends the analysis
-  with no streams too, and those are retried. PR #1119 by robertontheair.
+  failed codec-parameter copy, are retried as before. A failure is kept only when the stream analysis ran to
+  its end or its limit: one cut short by a read error or a stop can also miss the video stream or its codec,
+  so it is retried. PR #1119 by robertontheair.
 
 ## [7.73.0] - 2026-11-22
 
