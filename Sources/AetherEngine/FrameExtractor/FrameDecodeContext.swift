@@ -189,15 +189,36 @@ final class FrameDecodeContext: @unchecked Sendable {
         reader?.close()
     }
 
+    /// An open failure no retry can fix, kept for the life of the context: the source has no video
+    /// stream, no codec parameters, or no decoder for its codec. Every open reads the source's header
+    /// again, over HTTP a new request to the origin, so a scrub that asked again on every request
+    /// re-read a remote source about 1.6 times a second for a whole session, beside playback.
+    private var permanentOpenFailure: FrameDecodeError?
+
+    /// Whether an open that failed with `error` can only fail the same way again on this source.
+    static func isPermanentOpenFailure(_ error: any Error) -> Bool {
+        switch error as? FrameDecodeError {
+        case .noVideoStream, .noCodecParameters, .unsupportedCodec: true
+        case .allocationFailed, .decoderOpenFailed, nil: false
+        }
+    }
+
     /// Open demuxer + decoder if not already open. Throws on failure, leaving the
-    /// context fully closed (no partial state to leak).
+    /// context fully closed (no partial state to leak). After a permanent failure
+    /// (`isPermanentOpenFailure`) it throws that error again without touching the source.
     func ensureOpen(control: ProbeControl? = nil) throws {
         guard !isOpen else { return }
+        if let permanentOpenFailure { throw permanentOpenFailure }
         do {
             try openInternal(control: control)
             isOpen = true
         } catch {
             close()
+            if Self.isPermanentOpenFailure(error), let failure = error as? FrameDecodeError {
+                permanentOpenFailure = failure
+                // Logged once here; later requests rethrow it without a log line (see FrameExtractor).
+                EngineLog.emit("[FrameExtractor] open failed permanently, stills off for this source: \(failure)", category: .swPlayback)
+            }
             throw error
         }
     }
@@ -362,7 +383,10 @@ final class FrameDecodeContext: @unchecked Sendable {
         } catch FFmpegDecoderContext.Failure.allocation {
             throw FrameDecodeError.allocationFailed
         } catch FFmpegDecoderContext.Failure.parameters {
-            throw FrameDecodeError.noCodecParameters
+            // `avcodec_parameters_to_context` only copies extradata and side data, so it fails on
+            // memory, not on the source. Reported as an allocation failure so `ensureOpen` retries it;
+            // `.noCodecParameters` (permanent) is kept for a stream that has none.
+            throw FrameDecodeError.allocationFailed
         } catch {
             throw FrameDecodeError.decoderOpenFailed
         }
