@@ -163,6 +163,9 @@ extension AetherEngine {
                             EngineLog.emit("[AetherEngine] AE#549: reactivating the renderer audio session before the resume",
                                            category: .engine)
                             await self.activateRendererAudioSession()
+                        } else if self.nativeHost != nil {
+                            // AE#1110: a host on the bare layer has no AVKit view to hand it back.
+                            await self.activateNativeAudioSession("interruption ended, before the resume")
                         }
                         // A pause pressed while the session was being reactivated wins.
                         guard self.userPauseCount == pausesBefore, self.loadGeneration == loadBefore else { return }

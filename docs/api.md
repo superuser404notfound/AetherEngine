@@ -620,6 +620,7 @@ It is not a `PlaybackErrorKind`, because those are terminal: `state` moves to `.
 | `pictureInPictureActive` | governs the background teardown decision at the moment it happens |
 | `logTag` | written into the shared-output book when the load joins it; a tag set later is missing from those log lines until the next `load()` |
 | `rendererAudioSessionActivationEnabled` | read by software and audio-renderer loads; see [Host-managed renderer audio activation](#host-managed-renderer-audio-activation) |
+| `nativeAudioSessionActivationEnabled` | read after the play gate of each native load and in-place native reload; see [Native activation for hosts on the bare player layer](#native-activation-for-hosts-on-the-bare-player-layer-ae1110) |
 
 #### `LoadOptions` that cost a reload to change
 
@@ -1954,6 +1955,7 @@ The engine can own the system Now-Playing card (lock screen, Control Center, the
 | `setExternalMetadata(_:)` | AVKit's on-screen info pane on the video path. Also the base identity of a card the engine publishes on the shared center. Safe before `load()`; replayed at host creation. |
 | `deactivatesAudioSessionOnStop` | Off by default. See [The audio session](#the-audio-session). |
 | `rendererAudioSessionActivationEnabled` | Default `true`. See [Host-managed renderer audio activation](#host-managed-renderer-audio-activation). |
+| `nativeAudioSessionActivationEnabled` | Default `false`. Turn on for a host on the bare player layer. See [Native activation for hosts on the bare player layer](#native-activation-for-hosts-on-the-bare-player-layer-ae1110). |
 | `logTag` | A short name for this instance (`tile2`), carried by the `[SharedOutput]` lines and by a `[AetherEngine:<tag>] state=` line per transition. On a host that runs several engines at once, set it on every engine before `load()` (the tag is captured when the engine joins). |
 
 A host that opts into everything needs no MediaPlayer code of its own:
@@ -2032,8 +2034,8 @@ The centers are process-wide. The engine writes `MPNowPlayingInfoCenter.default(
 
 - **Route-sharing policy differs by platform (#116).** tvOS declares `.longFormAudio`, iOS declares `.default`. `.longFormAudio` marks the process as a long-form audio client. That pins `AVPictureInPictureController.isPictureInPicturePossible` to false for any PiP controller a host builds around the engine's player layer, which is why iOS does not use it. Hosts do not need to re-declare the session for PiP.
 - **Why not at launch (#24).** Activating at launch pins the route to whatever the HDMI link reports at that moment. With tvOS Continuous Audio Connection off, the link idles at stereo. The route would be negotiated to 2 channels and stay there, downmixing non-Atmos multichannel for the whole session.
-- **Who activates.** On the native video path the host's `AVPlayerViewController` activates the session per playback. The renderer paths (software decode, audio-only) activate it themselves, off the main actor (AE#538). A host that mounts the bare `AVPlayerLayer` (`nativePlayerLayer`) instead of an `AVPlayerViewController` must make sure the session is active at playback.
-- **When a software video load activates (AE#1099).** After the play gate, the wait for the display mode switch, and before the first `play()` or the paused mount. The native path activates at `play()`, so both paths now negotiate the HDMI audio link with the panel already in its new mode. Before, the software path activated before it built its host, while the panel could still be switching. The silent Atmos stream that keeps a receiver in Atmos (`AtmosOutputActivator`) starts at the same point. A track reload has no play gate and still activates before its host is built. Audio-only loads activate before their host too.
+- **Who activates.** On the native video path the host's `AVPlayerViewController` activates the session per playback. The renderer paths (software decode, audio-only) activate it themselves, off the main actor (AE#538). A host that mounts the bare `AVPlayerLayer` (`nativePlayerLayer`, `AetherPlayerSurface`) instead of an `AVPlayerViewController` turns on `nativeAudioSessionActivationEnabled`, see below.
+- **When a software video load activates (AE#1099).** After the play gate, the wait for the display mode switch, and before the first `play()` or the paused mount. On the native path AVKit's player view activates at `play()` (or the engine at the same point, with `nativeAudioSessionActivationEnabled` on), so both paths now negotiate the HDMI audio link with the panel already in its new mode. Before, the software path activated before it built its host, while the panel could still be switching. The silent Atmos stream that keeps a receiver in Atmos (`AtmosOutputActivator`) starts at the same point. A track reload has no play gate and still activates before its host is built. Audio-only loads activate before their host too.
 - **Stereo from the receiver.** An AVR that caches its HDMI EDID wrongly after standby can still report 2 channels and force a downmix. Power-cycling the receiver fixes it.
 - **Atmos is unaffected** either way: E-AC-3 with JOC ships as MAT 2.0 over a 2-channel carrier.
 
@@ -2053,6 +2055,18 @@ The centers are process-wide. The engine writes `MPNowPlayingInfoCenter.default(
 - A session the host already put on `.playback` before that first load keeps its mode and policy.
 - Native AVKit activation is unchanged.
 - If the host also owns deactivation, leave `deactivatesAudioSessionOnStop` false (its default).
+
+### Native activation for hosts on the bare player layer (AE#1110)
+
+`nativeAudioSessionActivationEnabled` defaults to `false`. Set it to `true` before loading when the host shows the native path through the bare `AVPlayerLayer` (`AetherPlayerSurface`, `nativePlayerLayer`) instead of an `AVPlayerViewController`.
+
+- **Why.** AVKit's player view activates the session at `play()`. Without that view the host had to activate on its own, and it had no good moment. Before `load()` is before the display mode switch, so the HDMI audio link could be negotiated mid-switch (what AE#1099 removed on the software path). A sink on `videoRoute` turning native lands after `play()` whenever the play gate does not wait.
+- **When.** After the play gate and before the first `play()` or the paused mount, on a fresh native load and on an in-place native reload. That is the same point the software path uses.
+- **Remote HLS bypass.** `nativeRemoteHLS` has no play gate, so the engine activates right before its `play()` or paused mount, the latest point that route has.
+- **Resumes.** The end of an audio interruption, a second Play during one, and a remote Play from a pause reactivate too, since no AVKit view hands the session back.
+- **What.** `setActive(true)` only, through the engine's ordered session queue. The channel count stays AVPlayer's to negotiate.
+- **Hosts with `AVPlayerViewController`** leave it off. Their view already activates per playback.
+- **Hosts that own activation across several players** leave it off too, like `rendererAudioSessionActivationEnabled`.
 
 ## Stills and thumbnails
 

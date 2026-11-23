@@ -697,6 +697,9 @@ extension AetherEngine {
         // VOD path triggers play() at the tail of load(); this lean path early-returns, so self-start here. AVKit drives match-content; automaticallyWaitsToMinimizeStalling handles play-before-ready. Without this call the item reaches readyToPlay but timeControlStatus stays .paused.
         // State stays .loading; flips to .playing only when timeControlStatus sink sees AVPlayer rendering.
         // #124: a paused mount skips the self-start; the wired isReady waypoint settles .loading -> .paused.
+        // AE#1110: no play gate on this route, so right before play() is the latest point there is.
+        await activateNativeAudioSession("remote HLS bypass, no play gate")
+        try checkLoadCurrent(bypassGeneration)
         if Self.loadPerformsAutostart(options) {
             host.play()
         }
@@ -2093,6 +2096,29 @@ extension AetherEngine {
         await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
     }
 
+    /// AE#1110: the native path's counterpart, for a host on the bare player layer that opted in with
+    /// `nativeAudioSessionActivationEnabled`. Runs after the play gate of a fresh load and of an in-place
+    /// reload, before `play()` or the paused mount. The remote HLS bypass has no gate and runs it right
+    /// before its own `play()`; an interruption that ends runs it before the resume. Goes through the same
+    /// queue as every other session transition, so a deactivation from a stop in between stays ordered.
+    func activateNativeAudioSession(_ occasion: String) async {
+        guard nativeAudioSessionActivationEnabled else { return }
+        #if DEBUG
+        nativeAudioActivationForTesting?()
+        #endif
+        EngineLog.emit("[AetherEngine] AE#1110: native path activates the audio session (\(occasion))",
+                       category: .engine)
+        #if os(iOS) || os(tvOS)
+        await enqueueAudioSessionTransition {
+            do { try AVAudioSession.sharedInstance().setActive(true) }
+            catch {
+                EngineLog.emit("[AetherEngine] AE#1110: native audio session activation error: \(error)",
+                               category: .engine)
+            }
+        }.value
+        #endif
+    }
+
     func loadSoftware(
         url: URL,
         sourceHTTPHeaders: [String: String] = [:],
@@ -3036,6 +3062,7 @@ extension AetherEngine {
                 // #274: this reload preserved the criteria (resetDisplayCriteria: false) and re-applies none,
                 // so only a sole-writer host's re-write on the swapped item can still switch anything; the
                 // published (panel-clamped) format decides whether that can be a dynamic-range switch.
+                let playGateEntry = DispatchTime.now()
                 await awaitingDisplaySwitch(generation: gen) {
                     await displayCriteria.waitForSwitch(
                         startGrace: Self.playGateGrace(
@@ -3048,6 +3075,9 @@ extension AetherEngine {
                         settleCap: loadedOptions.isLive ? .standard : .awaitObservedEnd,
                         isCurrent: { self.loadGeneration == gen })
                 }
+                try checkLoadCurrent(gen)
+                await activateNativeAudioSession(   // AE#1110
+                    "reload, after the play gate, held \(elapsedMs(since: playGateEntry))ms")
                 try checkLoadCurrent(gen)
                 if transportIntentUnderReconstruction ?? resumesPlaying { nativeHost?.play() }
                 else { nativeHost?.pause() }
