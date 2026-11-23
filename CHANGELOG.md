@@ -18,8 +18,9 @@ the public-API contract.
   HTTP each open re-read the header from the origin. During playback with scrub previews that was about 1.6
   opens a second for the whole session, competing with playback for the origin. On a debrid origin a 4K
   Dolby Vision remux then downloaded slower than real time and stalled. Now the first such failure is kept
-  for the life of the extractor, and later requests return nil without touching the source. Other open
-  failures are retried as before.
+  for the life of the extractor, and later requests return nil without touching the source. The failure is
+  logged once when it is kept; the per-request line drops to verbose. Other open failures, including a
+  failed codec-parameter copy, are retried as before.
 
 ## [7.73.0] - 2026-11-22
 

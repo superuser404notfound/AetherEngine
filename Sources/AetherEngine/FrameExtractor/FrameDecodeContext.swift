@@ -216,6 +216,8 @@ final class FrameDecodeContext: @unchecked Sendable {
             close()
             if Self.isPermanentOpenFailure(error), let failure = error as? FrameDecodeError {
                 permanentOpenFailure = failure
+                // Logged once here; later requests rethrow it without a log line (see FrameExtractor).
+                EngineLog.emit("[FrameExtractor] open failed permanently, stills off for this source: \(failure)", category: .swPlayback)
             }
             throw error
         }
