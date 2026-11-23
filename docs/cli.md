@@ -1086,11 +1086,11 @@ With `--frame-times` the output reads `ft=24` a second and the `[SWDiag]` lines 
 **`--forward-buffer-segments 2700 --session-cache-mb N`** turns on the whole-source prefetch, which is what leaves a resident band behind a resume. Rewinding before the resume point is the AE#1109 repro: serve the file over HTTP, then
 
 ```bash
-aetherctl play --seconds 60 --start-position 200 --forward-buffer-segments 2700 --session-cache-mb 8192 \
-  --seek-every 20 --seek-count 1 --seek-pattern 0 http://127.0.0.1:8899/film.mkv
+aetherctl play --seconds 70 --start-position 300 --forward-buffer-segments 2700 --session-cache-mb 8192 \
+  --seek-every 30 --seek-count 1 --seek-pattern 0 http://127.0.0.1:8899/film.mkv
 ```
 
-Read `origin=` on the tick lines after the seek. It has to stop climbing once the stretch below the resume point is in, and the log has to show `AE#1109 seg-N...seg-M are resident`. Add `--picture-probe` on the timecode fixtures to check the seam where the new run meets the kept one.
+The file has to be much larger than the reader's 32 MB range window, or the window pulls the tail behind the park anyway and both arms read the same (a 48 MB fixture did). Read `origin=` on the tick lines after the seek. It has to stop climbing once the stretch below the resume point is in, and the log has to show `AE#1109 seg-N...seg-M are resident`. Add `--picture-probe` on the timecode fixtures to check the seam where the new run meets the kept one.
 
 **`--max-concurrent-requests N`** sets `LoadOptions.maxConcurrentSourceRequests` (#377): the most requests the reader may have open against the origin at once, across every path it fetches on. `1` also switches off the speculative parallel paths, which is the shape of a connection-metered CDN. Count the requests in the origin's own log, or read the `[AVIOReader]` connection lines, with and without the flag.
 

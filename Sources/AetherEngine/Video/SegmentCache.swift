@@ -520,6 +520,8 @@ final class SegmentCache: @unchecked Sendable {
         let reaches: [Int: VideoReach]
         let foldCounts: [Int: Int]
         let initSegment: Data
+        /// AE#1109: so a rewind before the adopted span can keep it like the session's own segments.
+        var lineages: [Int: SegmentLineage] = [:]
 
         var totalBytes: Int { bytes.values.reduce(0, +) }
     }
@@ -540,9 +542,11 @@ final class SegmentCache: @unchecked Sendable {
         let bytes = entryBytes
         let reaches = videoReaches
         let folds = foldCounts
+        let kept = lineages
         entries.removeAll(keepingCapacity: false)
         entryBytes.removeAll(keepingCapacity: false)
         videoReaches.removeAll(keepingCapacity: false)
+        lineages.removeAll(keepingCapacity: false)
         _totalBytes = 0
         condition.unlock()
 
@@ -557,7 +561,8 @@ final class SegmentCache: @unchecked Sendable {
         guard !moved.isEmpty else { return nil }
         return ParkedSegments(
             directory: directory, files: moved, bytes: movedBytes,
-            reaches: reaches.filter { moved[$0.key] != nil }, foldCounts: folds, initSegment: initData)
+            reaches: reaches.filter { moved[$0.key] != nil }, foldCounts: folds, initSegment: initData,
+            lineages: kept.filter { moved[$0.key] != nil })
     }
 
     /// AE#1095: takes over a parked session's segments below `frontier` as if this session had cut
@@ -583,7 +588,7 @@ final class SegmentCache: @unchecked Sendable {
             entries[entry.index] = entry.url
             entryBytes[entry.index] = entry.bytes
             videoReaches[entry.index] = parked.reaches[entry.index]
-            lineages[entry.index] = nil
+            lineages[entry.index] = parked.lineages[entry.index]
             _totalBytes += entry.bytes
             adoptedBytes += entry.bytes
             if entry.index > _highestStoredIndex { _highestStoredIndex = entry.index }
@@ -638,6 +643,7 @@ final class SegmentCache: @unchecked Sendable {
         entries.removeAll(keepingCapacity: false)
         entryBytes.removeAll(keepingCapacity: false)
         videoReaches.removeAll(keepingCapacity: false)
+        lineages.removeAll(keepingCapacity: false)
         initSegment = nil
         initVersions.removeAll(keepingCapacity: false)
         inProgress.removeAll(keepingCapacity: false)
@@ -834,6 +840,7 @@ final class SegmentCache: @unchecked Sendable {
                 removed += bytes
                 _totalBytes -= bytes
                 videoReaches.removeValue(forKey: index)
+                lineages.removeValue(forKey: index)
                 doomed.append(url)
             }
         }
@@ -931,6 +938,7 @@ final class SegmentCache: @unchecked Sendable {
         entries.removeValue(forKey: index)
         _totalBytes -= entryBytes.removeValue(forKey: index) ?? 0
         videoReaches.removeValue(forKey: index)
+        lineages.removeValue(forKey: index)
         condition.broadcast()
         condition.unlock()
         EngineLog.emit("[SegmentCache] seg-\(index) vanished from disk; entry dropped (AE#451)",
@@ -1082,9 +1090,12 @@ final class SegmentCache: @unchecked Sendable {
             _totalBytes -= entryBytes[k] ?? byteSize(of: url)
             entryBytes.removeValue(forKey: k)
             entries.removeValue(forKey: k)
+            videoReaches.removeValue(forKey: k)
+            lineages.removeValue(forKey: k)
             doomed.append(url)
         }
         _evictionCount += doomed.count
+        if !doomed.isEmpty { condition.broadcast() }
         condition.unlock()
         for url in doomed {
             try? FileManager.default.removeItem(at: url)
@@ -1354,24 +1365,58 @@ final class SegmentCache: @unchecked Sendable {
         return _parkedSinceStore
     }
 
-    /// AE#1109: the last index of the resident run starting at `index` that a producer writing on
-    /// `axis` may keep instead of cutting it again, or nil when there is no such run.
+    /// AE#1109: what a producer writing on one axis may keep from the resident run at an index.
+    struct KeepableRun: Equatable, Sendable {
+        /// Last index of the run that qualifies.
+        let frontier: Int
+        /// The resident segment right after it that does not qualify (written on another axis, the
+        /// first segment of its epoch, or of unknown lineage), nil when the run simply ends.
+        let breaker: Int?
+    }
+
+    /// AE#1109: the run of resident segments from `index` that a producer writing on `axis` could only
+    /// reproduce, or nil when `index` itself is not such a segment. The walk stops at the first hole,
+    /// at the first segment that does not qualify, or after `limit`.
     ///
-    /// Every segment of the run has to qualify, not just the first. The consumer is served whatever
-    /// sits at an index, so one segment written on another axis, or one that opened its epoch (a
-    /// gate that opened below its boundary and dropped the leading pictures before its keyframe),
-    /// would be played as the continuation of the producer's own run. A segment whose lineage is
-    /// unknown does not qualify either.
-    func keepableResidentRun(from index: Int, axis: SegmentLineage.Axis) -> Int? {
+    /// A segment written on another axis, or one that opened its epoch (a gate that opened below its
+    /// boundary and dropped the leading pictures before its keyframe), is not what this producer
+    /// would write there. Neither is a segment of unknown lineage.
+    func keepableResidentRun(from index: Int, axis: SegmentLineage.Axis,
+                             through limit: Int = .max) -> KeepableRun? {
         condition.lock()
         defer { condition.unlock() }
-        guard entries[index] != nil else { return nil }
-        var k = index
-        while entries[k] != nil {
-            guard let lineage = lineages[k], !lineage.opensEpoch, lineage.axis == axis else { return nil }
+        func qualifies(_ k: Int) -> Bool {
+            guard let lineage = lineages[k] else { return false }
+            return !lineage.opensEpoch && lineage.axis == axis
+        }
+        guard entries[index] != nil, qualifies(index) else { return nil }
+        var k = index + 1
+        while k <= limit, entries[k] != nil {
+            if !qualifies(k) { return KeepableRun(frontier: k - 1, breaker: k) }
             k += 1
         }
-        return k - 1
+        return KeepableRun(frontier: k - 1, breaker: nil)
+    }
+
+    /// AE#1109: evicts the segment that ends a kept run, so the consumer reaching it misses and the
+    /// provider restarts a producer there, instead of being served it as the continuation of the run.
+    /// Refused once the consumer has asked for it or anything past it.
+    @discardableResult
+    func dropForRecut(index: Int) -> Bool {
+        condition.lock()
+        guard !closed, currentTargetIndex < index, let url = entries.removeValue(forKey: index) else {
+            condition.unlock()
+            return false
+        }
+        _totalBytes -= entryBytes.removeValue(forKey: index) ?? 0
+        videoReaches.removeValue(forKey: index)
+        lineages.removeValue(forKey: index)
+        _evictionCount += 1
+        condition.broadcast()
+        condition.unlock()
+        try? FileManager.default.removeItem(at: url)
+        onResidentSetChanged?()
+        return true
     }
 
     /// AE#1109: sleeps until anything changes in the cache (a store, an eviction, a new consumer
@@ -1539,6 +1584,7 @@ final class SegmentCache: @unchecked Sendable {
                     _totalBytes -= bytes
                     entryBytes.removeValue(forKey: index)
                     videoReaches.removeValue(forKey: index)
+                    lineages.removeValue(forKey: index)
                     doomed.append(url)
                 }
             }
@@ -1568,6 +1614,7 @@ final class SegmentCache: @unchecked Sendable {
                     entryBytes.removeValue(forKey: k)
                     entries.removeValue(forKey: k)
                     videoReaches.removeValue(forKey: k)
+                    lineages.removeValue(forKey: k)
                     doomed.append(url)
                 }
             }
@@ -1580,6 +1627,7 @@ final class SegmentCache: @unchecked Sendable {
                 entryBytes.removeValue(forKey: k)
                 entries.removeValue(forKey: k)
                 videoReaches.removeValue(forKey: k)
+                lineages.removeValue(forKey: k)
                 doomed.append(url)
             }
         }

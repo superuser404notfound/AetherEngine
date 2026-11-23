@@ -15,9 +15,9 @@ the public-API contract.
 - **A rewind before the resume point no longer fetches the title again (AE#1109).** With the opt-in
   whole-source prefetch, a seek before the first resident segment restarted the producer there, and it
   then cut every resident segment again to the end of the source. It now parks in front of a resident run
-  that earlier producers wrote on the same timeline. On a 300 s test file resumed at 200 s and rewound to
-  0, the source traffic after the seek fell from 55 MB to 40 MB, and on a longer film the difference is
-  the rest of the film. Reported by samimt55.
+  that earlier producers wrote on the same timeline. On a 597 MB, 10 minute test file resumed at 300 s and
+  rewound to 0, the source traffic after the seek fell from 569 MB to 301 MB, which is the stretch that
+  had never been fetched plus a few MB of read window. Reported by samimt55.
 
 ## [7.73.0] - 2026-11-22
 
