@@ -12,6 +12,16 @@ the public-API contract.
 
 ### Added
 
+- **A host can keep the outgoing episode's picture across its next `load()` (AE#1113).**
+  `holdOutgoingPicture(on:)` pauses, reads the frame on screen by the audio switch's routes (native, software,
+  Dolby Vision compositor or reshaped still, HDR kept), and shows it on an `AetherStillView` the host places.
+  The hold survives the load, a route change included, and stays up until `releaseOutgoingPicture()`, so the
+  host can shrink and fade it into an Up Next tile. `stop()`, a failed next load and two safety timeouts
+  also take it down. It uses its own slot, so an audio switch never lands on the tile. The still now sits in
+  an autoresizing subview of the still view, so an animated resize carries the picture on the same curve.
+  An item that already played to its end now hands over its last frame too (it used to vend none).
+  Requested by secunit404.
+
 - **Bitmap subtitle cues can carry their text (AE#1114).** With `LoadOptions.recognizesBitmapSubtitleText`
   on, the engine reads each PGS / DVB / DVD cue on the overlay path with on-device Vision and republishes it
   with `SubtitleImage.recognizedText`: the lines top first, each with Vision's confidence and a box in the

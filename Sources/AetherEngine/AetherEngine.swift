@@ -4342,6 +4342,20 @@ public final class AetherEngine: ObservableObject {
     var heldPictureAwaitsSoftwareHost = false
     /// Which route the last held picture came from, for the log line and the tests that pin it.
     var heldPictureLastRoute: String?
+    /// AE#1113: the outgoing picture a host keeps across its own next `load()`. A slot of its own, so
+    /// an audio-switch hold never lands on the host's surface and a load's release of that hold
+    /// leaves this one up. See `holdOutgoingPicture(on:)`.
+    weak var outgoingPictureView: AetherStillView?
+    var outgoingPictureWatches: Set<AnyCancellable> = []
+    var outgoingPictureToken = 0
+    var outgoingPictureShownAt: ContinuousClock.Instant?
+    var outgoingPictureSawNextFrame = false
+    var outgoingPictureLastRoute: String?
+    var outgoingPictureLastRelease: String?
+    /// How long the hold may stand after the next item's first frame before the engine takes it down
+    /// itself, and how long it may stand without one. Only tests change them.
+    var outgoingPictureGraceSeconds: Double = AetherEngine.heldPictureTimeoutSeconds
+    var outgoingPictureCapSeconds: Double = AetherEngine.outgoingPictureCapSecondsDefault
     /// The stand-in's playlist budget (`RemoteHLSSubtitleProxy.budgetSeconds`). Only tests change it:
     /// a test that holds the origin and stops the load mid-fetch races this clock, and on a loaded CI
     /// runner the fetch timed out first and the load mounted the origin instead.
@@ -7904,6 +7918,7 @@ public final class AetherEngine: ObservableObject {
     public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
         cancelPendingAudioSelection()
         releaseHeldPicture(reason: "stop")
+        releaseOutgoingPicture(reason: "stop")
         nextLoadRequestsInPlaceItemHandover = false
         stopInternal(resetDisplayCriteria: resetDisplayCriteria,
                      finalTeardown: finalTeardown ?? resetDisplayCriteria,

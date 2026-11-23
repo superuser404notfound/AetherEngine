@@ -2,6 +2,12 @@ import Foundation
 import QuartzCore
 import AVFoundation
 
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
 /// A surface the engine can hold a picture on across an in-place item swap (AE#711 follow-up):
 /// `AetherPlayerView` when the engine renders into it, `AetherStillView` when the host renders the
 /// native path through AVKit and binds one for this alone.
@@ -22,11 +28,26 @@ protocol HeldStillSurface: AnyObject {
 /// presents every frame.
 @MainActor
 final class HeldStillPresenter {
+    /// Where a still goes. `AetherPlayerView` lays it into its own layer tree and sizes it in
+    /// `layout(_:)`. `AetherStillView` gives each still a subview of its own whose layer IS the still
+    /// (AE#1113): a host animates that view's frame (the Up Next tile), and a bare sublayer resized
+    /// from `layoutSubviews` runs Core Animation's own 0.25 s default instead of the host's curve,
+    /// so the picture would trail its tile. An autoresizing subview moves inside the host's animation.
+    enum Mount {
+        case sublayer(of: CALayer?, bounds: CGRect)
+        case subview(of: PlatformBaseView)
+    }
+
     private(set) var layer: AVSampleBufferDisplayLayer?
     private(set) var playerLayer: AVPlayerLayer?
     private var player: AVPlayer?
+    /// The subview a `.subview` mount put the still in, removed with it.
+    private var mountedView: PlatformBaseView?
 
     var isShowing: Bool { layer != nil || playerLayer != nil }
+
+    /// The still's own view on a `.subview` mount, for tests.
+    var mountedStillView: PlatformBaseView? { mountedView }
 
     /// The compositor form of `show`: a muted player seeks frame-exactly to `offset` past the video
     /// track's first frame, on the player's own clock (AVFoundation applies the init's edit list, so the
@@ -34,9 +55,9 @@ final class HeldStillPresenter {
     /// frame is displayable. False (and nothing shown)
     /// when the item fails, a `clear()` intervenes, or `budgetSeconds` runs out first.
     func show(file: URL, pastFirstFrameBy offset: Double, gravity: AVLayerVideoGravity,
-              on host: CALayer?, bounds: CGRect, budgetSeconds: Double) async -> Bool {
+              mount: Mount, budgetSeconds: Double) async -> Bool {
         clear()
-        guard let host else { return false }
+        guard Self.canMount(mount) else { return false }
         let player = AVPlayer()
         player.isMuted = true
         player.actionAtItemEnd = .pause
@@ -46,13 +67,15 @@ final class HeldStillPresenter {
         #endif
         let item = AVPlayerItem(url: file)
         player.replaceCurrentItem(with: item)
-        let still = AVPlayerLayer(player: player)
-        still.videoGravity = gravity
-        still.opacity = 0
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        host.addSublayer(still)
-        still.frame = bounds
+        guard let still = mountPlayerLayer(mount) else {
+            CATransaction.commit()
+            return false
+        }
+        still.player = player
+        still.videoGravity = gravity
+        still.opacity = 0
         CATransaction.commit()
         self.player = player
         playerLayer = still
@@ -89,11 +112,15 @@ final class HeldStillPresenter {
     }
 
     /// False when the frame cannot be wrapped for display; nothing is shown then.
-    func show(_ frame: CVPixelBuffer, gravity: AVLayerVideoGravity, isHDR: Bool,
-              on host: CALayer?, bounds: CGRect) -> Bool {
+    func show(_ frame: CVPixelBuffer, gravity: AVLayerVideoGravity, isHDR: Bool, mount: Mount) -> Bool {
         clear()
-        guard let host, let sample = Self.sample(frame) else { return false }
-        let still = AVSampleBufferDisplayLayer()
+        guard Self.canMount(mount), let sample = Self.sample(frame) else { return false }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        guard let still = mountSampleLayer(mount) else {
+            CATransaction.commit()
+            return false
+        }
         still.videoGravity = gravity
         if #available(tvOS 26.0, iOS 26.0, macOS 26.0, visionOS 26.0, *) {
             still.preferredDynamicRange = isHDR ? .high : .standard
@@ -102,10 +129,6 @@ final class HeldStillPresenter {
             still.wantsExtendedDynamicRangeContent = isHDR
             #endif
         }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        host.addSublayer(still)
-        still.frame = bounds
         still.sampleBufferRenderer.enqueue(sample)
         layer = still
         CATransaction.commit()
@@ -113,27 +136,88 @@ final class HeldStillPresenter {
     }
 
     func clear() {
-        if let playing = playerLayer {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            playing.removeFromSuperlayer()
-            CATransaction.commit()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let view = mountedView {
+            view.removeFromSuperview()
+            mountedView = nil
+        } else {
+            playerLayer?.removeFromSuperlayer()
+            layer?.removeFromSuperlayer()
+        }
+        CATransaction.commit()
+        if playerLayer != nil {
             player?.replaceCurrentItem(with: nil)
             player = nil
             playerLayer = nil
         }
-        guard let still = layer else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        still.removeFromSuperlayer()
-        CATransaction.commit()
-        still.sampleBufferRenderer.flush()
+        layer?.sampleBufferRenderer.flush()
         layer = nil
     }
 
+    /// Sizes a `.sublayer` mount's still. A `.subview` mount resizes itself with its parent.
     func layout(_ bounds: CGRect) {
+        guard mountedView == nil else { return }
         layer?.frame = bounds
         playerLayer?.frame = bounds
+    }
+
+    private static func canMount(_ mount: Mount) -> Bool {
+        if case .sublayer(nil, _) = mount { return false }
+        return true
+    }
+
+    private func mountSampleLayer(_ mount: Mount) -> AVSampleBufferDisplayLayer? {
+        switch mount {
+        case .sublayer(let host, let bounds):
+            guard let host else { return nil }
+            let still = AVSampleBufferDisplayLayer()
+            host.addSublayer(still)
+            still.frame = bounds
+            return still
+        case .subview(let parent):
+            #if canImport(UIKit)
+            let view = SampleStillView(frame: parent.bounds)
+            guard let still = view.layer as? AVSampleBufferDisplayLayer else { return nil }
+            #else
+            let still = AVSampleBufferDisplayLayer()
+            let view = LayerBackedStillView(frame: parent.bounds, backing: still)
+            #endif
+            install(view, in: parent)
+            return still
+        }
+    }
+
+    private func mountPlayerLayer(_ mount: Mount) -> AVPlayerLayer? {
+        switch mount {
+        case .sublayer(let host, let bounds):
+            guard let host else { return nil }
+            let still = AVPlayerLayer()
+            host.addSublayer(still)
+            still.frame = bounds
+            return still
+        case .subview(let parent):
+            #if canImport(UIKit)
+            let view = PlayerStillView(frame: parent.bounds)
+            guard let still = view.layer as? AVPlayerLayer else { return nil }
+            #else
+            let still = AVPlayerLayer()
+            let view = LayerBackedStillView(frame: parent.bounds, backing: still)
+            #endif
+            install(view, in: parent)
+            return still
+        }
+    }
+
+    private func install(_ view: PlatformBaseView, in parent: PlatformBaseView) {
+        #if canImport(UIKit)
+        view.isUserInteractionEnabled = false
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        #else
+        view.autoresizingMask = [.width, .height]
+        #endif
+        parent.addSubview(view)
+        mountedView = view
     }
 
     private static func sample(_ frame: CVPixelBuffer) -> CMSampleBuffer? {
@@ -157,3 +241,31 @@ final class HeldStillPresenter {
         return sample
     }
 }
+
+#if canImport(UIKit)
+/// A still's own view, so UIKit resizes the still inside the host's animation (see `Mount`).
+private final class SampleStillView: UIView {
+    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+}
+
+private final class PlayerStillView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+}
+#elseif canImport(AppKit)
+/// A still's own view, backed by the still layer itself (see `Mount`).
+private final class LayerBackedStillView: NSView {
+    private let backing: CALayer
+
+    init(frame: NSRect, backing: CALayer) {
+        self.backing = backing
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func makeBackingLayer() -> CALayer { backing }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+#endif

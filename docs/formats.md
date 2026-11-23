@@ -1594,7 +1594,7 @@ The API, its lifecycle and the cache-backed stills of the active session are in 
 **Dolby Vision Profile 5 and AV1 Profile 10.0** (IPT-PQ base layers with no HDR10 fallback) route through `DolbyVisionStillConverter`, an optional component compiled only with the `DolbyVisionStillReshaping` package trait (off by default, [Installation › Optional components](installation.md#optional-components)).
 
 - With the trait, the converter applies the full reconstruction from the RPU in `AV_FRAME_DATA_DOVI_METADATA`: the reshaping curves first, then `ycc_to_rgb` + the IPT-PQ LMS matrices, then a BT.2390 tone curve. Their stills come out with correct colour instead of the green / magenta cast a plain YCbCr read produces.
-- Built without it, such a source yields no still at all (nil, `supportsCacheBackedStills` false, no I-frame rendition, no held picture) rather than the planes read as YCbCr. [api › Scrub previews for Dolby Vision Profile 5](api.md#scrub-previews-for-dolby-vision-profile-5) is the preview for that case.
+- Built without it, such a source yields no still at all (nil, `supportsCacheBackedStills` false, no I-frame rendition) rather than the planes read as YCbCr. A held picture plays the frame through the system compositor instead ([api › Held pictures across an audio switch](api.md#held-pictures-across-an-audio-switch)). [api › Scrub previews for Dolby Vision Profile 5](api.md#scrub-previews-for-dolby-vision-profile-5) is the preview for that case.
 
 ## Disc (DVD / Blu-ray ISO)
 

@@ -2079,6 +2079,15 @@ final class NativeAVPlayerHost {
         defer { item.remove(output) }
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
+        // AE#1113: an item that played to its end vends nothing to a new output (measured on a Mac:
+        // 40 reads over 400 ms, none). A zero-tolerance seek 1 ms back makes it render its last frame
+        // again, in 17 ms; a seek to where it stands is a no-op and renders nothing.
+        if didReachEnd, avPlayer.rate == 0 {
+            let back = CMTimeSubtract(item.currentTime(), CMTime(value: 1, timescale: 1000))
+            if back.isNumeric, back > .zero {
+                _ = await avPlayer.seek(to: back, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+        }
         repeat {
             // A playing item vends at the host clock, a paused one only at the time it holds.
             let itemTime = avPlayer.rate == 0 ? item.currentTime()
