@@ -28,6 +28,13 @@ the public-API contract.
   rewound to 0, the source traffic after the seek fell from 569 MB to 301 MB, which is the stretch that
   had never been fetched plus a few MB of read window. Reported by samimt55.
 
+- **ASS drawings no longer show as rows of numbers.** An event in drawing mode (`\p1` and up, until
+  `\p0` or a bare `\p`) holds vector commands, which the plain-text and styled-run paths kept as
+  text, so anime typesetting boxes showed as "m 1554.65 51.38 l 1554.29 ...". That text is dropped
+  now, in the host cues, the native WebVTT renditions and mov_text samples alike. The tags are read
+  as libass reads them: `\p 1` draws, a `\p` inside `\t(...)` counts, and a `\r` reset does not
+  end drawing. PR #1111 by ChattyRS.
+
 ## [7.73.0] - 2026-11-22
 
 ### Changed
@@ -38,15 +45,6 @@ the public-API contract.
   drop included. The CPU chain stays as the fallback for builds without the filters, frames that are not
   8-bit 4:2:0, heights that are not a multiple of 4, and GPU filters that fail to build or error.
   `VideoDeinterlace.inverseTelecineIsHardware` says which one runs. Filters by classicjazz.
-
-### Fixed
-
-- **ASS drawings no longer show as rows of numbers.** An event in drawing mode (`\p1` and up, until
-  `\p0` or a bare `\p`) holds vector commands, which the plain-text and styled-run paths kept as
-  text, so anime typesetting boxes showed as "m 1554.65 51.38 l 1554.29 ...". That text is dropped
-  now, in the host cues, the native WebVTT renditions and mov_text samples alike. The tags are read
-  as libass reads them: `\p 1` draws, a `\p` inside `\t(...)` counts, and a `\r` reset does not
-  end drawing. PR #1111 by ChattyRS.
 
 ## [7.72.1] - 2026-11-22
 
