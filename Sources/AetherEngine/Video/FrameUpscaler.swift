@@ -132,6 +132,9 @@ final class FrameUpscaler: @unchecked Sendable {
     private let buildQueue: DispatchQueue?
     /// The scaler the stage runs now: the plan's, until a line-art overrun falls back to another.
     private var scaler: UpscaleScaler
+    private let sizePolicy: UpscaleSizePolicy?
+    /// Set once a line-art overrun fell back: the fallback stays for every later size.
+    private var fellBack = false
     /// The last frame's sample depth; the automatic route takes 8-bit only.
     private var lastInputEightBit = true
     /// Whether the line-art stage runs its restore pass: the top rung, dropped first on an overrun.
@@ -185,7 +188,10 @@ final class FrameUpscaler: @unchecked Sendable {
     static let stageBuildQueue = DispatchQueue(label: "AetherEngine.FrameUpscaler.build", qos: .userInitiated)
 
     /// Without `buildQueue` the stage is built here and a failure returns nil; with it, a failure disables.
-    init?(plan: UpscalePlan, frameInterval: Double, buildQueue: DispatchQueue? = nil) {
+    /// `sizePolicy` picks the scaler for a mid-stream size change; nil keeps the plan's.
+    init?(plan: UpscalePlan, frameInterval: Double, buildQueue: DispatchQueue? = nil,
+          sizePolicy: UpscaleSizePolicy? = nil) {
+        self.sizePolicy = sizePolicy
         guard let gpu = GPU() else {
             EngineLog.emit("[Upscale] stage unavailable: no Metal device or kernels", category: .swPlayback)
             return nil
@@ -487,6 +493,14 @@ final class FrameUpscaler: @unchecked Sendable {
     // MARK: - Rebuild and pass-through
 
     private func rebuild(for input: CVPixelBuffer, width: Int, height: Int) -> Bool {
+        // The options decide the scaler for the new size, unless an overrun already moved the stage down.
+        if let sizePolicy, !fellBack {
+            guard let next = sizePolicy.scaler(width: width, height: height) else {
+                notePassThrough("no upscale option takes \(width)x\(height)")
+                return false
+            }
+            scaler = next
+        }
         guard UpscaleRouteDecision.sizeAllowed(width: width, height: height, scaler: scaler) else {
             notePassThrough("\(width)x\(height) is " + (scaler == .automatic ? "not below 1080p" : "larger than 1920x1080"))
             return false
@@ -496,7 +510,8 @@ final class FrameUpscaler: @unchecked Sendable {
         guard let plan = UpscaleRouteDecision.makePlan(
                 source: SourceGeometry(width: width, height: height, sarNum: sar.0, sarDen: sar.1),
                 display: display, mlScaleFactors: Self.mlScaleFactors, scaler: scaler),
-              plan.targetWidth > width || plan.targetHeight > height else {
+              plan.targetWidth > width || plan.targetHeight > height,
+              plan.scaler != .lanczos || plan.scalesUpOnly else {
             notePassThrough("\(width)x\(height) is not smaller than the display")
             return false
         }
@@ -660,6 +675,7 @@ final class FrameUpscaler: @unchecked Sendable {
                            + (mlOnly ? " only" : " + MetalFX"), category: .swPlayback)
         }
         scaler = fallback.scaler
+        fellBack = true
         stage?.release()
         stage = nil
         buildGeneration += 1
@@ -1689,7 +1705,7 @@ private struct MLTimeout: Error, CustomStringConvertible {
 // MARK: - Buffers
 
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
-private func makePool(width: Int, height: Int, format: OSType) throws -> CVPixelBufferPool {
+func makePool(width: Int, height: Int, format: OSType) throws -> CVPixelBufferPool {
     try makePool(attributes: [kCVPixelBufferPixelFormatTypeKey as String: format], width: width, height: height)
 }
 
@@ -1711,7 +1727,7 @@ private func makePool(attributes: [String: Any], width: Int, height: Int) throws
 }
 
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
-private func pooledBuffer(_ pool: CVPixelBufferPool) throws -> CVPixelBuffer {
+func pooledBuffer(_ pool: CVPixelBufferPool) throws -> CVPixelBuffer {
     var buffer: CVPixelBuffer?
     let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer)
     guard status == kCVReturnSuccess, let buffer else { throw UpscaleError("pool buffer: \(status)") }

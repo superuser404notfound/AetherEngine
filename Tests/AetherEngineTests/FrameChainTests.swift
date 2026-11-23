@@ -539,6 +539,33 @@ struct LanczosUpscalerTests {
         print(String(format: "[LanczosUpscalerTests] 1920x1080 -> 3840x2160 (tenBit %@): mean %.2f ms, GPU %.2f ms",
                      tenBit ? "yes" : "no", up.stats.meanMs, up.stats.stageMeanMs.metalGPU))
     }
+
+    /// A size change picks the scaler again from the options: a 1080p-only session passes a 720p stretch
+    /// through and upscales again once 1080p is back; with line art asked for, a 720p start moves to line
+    /// art at 1080p, not to Lanczos.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func aSizeChangeAsksTheOptionsAgain() throws {
+        let display = CGSize(width: 3840, height: 2160)
+        let lanczos = try #require(UpscaleRouteDecision.makePlan(
+            source: SourceGeometry(width: 1920, height: 1080, sarNum: 1, sarDen: 1), display: display,
+            mlScaleFactors: { _, _ in [] }, scaler: .lanczos))
+        let up = try #require(FrameUpscaler(plan: lanczos, frameInterval: 1.0 / 24,
+                                            sizePolicy: UpscaleSizePolicy(lowResolution: false, requested: .automatic, fullHD: true)))
+        #expect(up.upscale(try ChainFrames.gradient(1920, 1080, tenBit: false), pts: .invalid) != nil)
+        #expect(up.upscale(try ChainFrames.gradient(1280, 720, tenBit: false), pts: .invalid) == nil)
+        #expect(!up.isDisabled)
+        let back = try #require(up.upscale(try ChainFrames.gradient(1904, 800, tenBit: false), pts: .invalid))
+        #expect(CVPixelBufferGetWidth(back) == 3840 && up.plan.scaler == .lanczos)
+
+        let lineArt = try #require(UpscaleRouteDecision.makePlan(
+            source: SourceGeometry(width: 1280, height: 720, sarNum: 1, sarDen: 1), display: display,
+            mlScaleFactors: { _, _ in [] }, scaler: .lineArt))
+        let drawn = try #require(FrameUpscaler(plan: lineArt, frameInterval: 1.0 / 24,
+                                               sizePolicy: UpscaleSizePolicy(lowResolution: true, requested: .lineArt, fullHD: true)))
+        _ = try #require(drawn.upscale(try ChainFrames.gradient(1920, 1080, tenBit: false), pts: .invalid))
+        #expect(drawn.plan.scaler == .lineArt)
+    }
 }
 
 private enum LineArtGate {

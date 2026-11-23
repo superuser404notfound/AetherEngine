@@ -81,15 +81,48 @@ struct LanczosUpscaleRouteTests {
         #expect(decide(display: CGSize(width: 1920, height: 1080)) == .notTaken(.displayNotLarger))
     }
 
-    @Test func aRebuildKeepsThePlanWhileItsOptionIsOn() throws {
+    private func policy(low: Bool = false, _ requested: UpscaleScaler = .automatic, fullHD: Bool = false) -> UpscaleSizePolicy {
+        UpscaleSizePolicy(lowResolution: low, requested: requested, fullHD: fullHD)
+    }
+
+    @Test func aRebuildKeepsThePlanOnlyWhileItsScalerIsStillAskedFor() throws {
         let fullHDPlan = try #require(decide().plan)
-        #expect(UpscaleRouteDecision.optionsCover(fullHDPlan, lowResolution: false, requested: .automatic, fullHD: true))
-        #expect(!UpscaleRouteDecision.optionsCover(fullHDPlan, lowResolution: true, requested: .automatic, fullHD: false))
-        #expect(UpscaleRouteDecision.optionsCover(fullHDPlan, lowResolution: true, requested: .lineArt, fullHD: false),
-                "a Lanczos plan line art fell back to belongs to line art")
+        #expect(policy(fullHD: true).covers(fullHDPlan))
+        #expect(!policy(low: true).covers(fullHDPlan))
+        #expect(policy(low: true, .lineArt).covers(fullHDPlan), "a Lanczos plan line art fell back to belongs to line art")
         let hd = try #require(decide(lowRes: true, source: geo(1280, 720)).plan)
-        #expect(!UpscaleRouteDecision.optionsCover(hd, lowResolution: false, requested: .automatic, fullHD: true))
-        #expect(UpscaleRouteDecision.optionsCover(hd, lowResolution: true, requested: .automatic, fullHD: false))
+        #expect(!policy(fullHD: true).covers(hd))
+        #expect(policy(low: true).covers(hd))
+        // Both on, a line-art 1080p session: turning the low-resolution option off drops the line-art plan.
+        let lineArt = try #require(decide(lowRes: true, scaler: .lineArt).plan)
+        #expect(policy(low: true, .lineArt, fullHD: true).covers(lineArt))
+        #expect(!policy(fullHD: true).covers(lineArt))
+    }
+
+    /// Most 1080p rips are cropped on both axes; they are 1080p all the same.
+    @Test func croppedFullHDCountsAs1080p() throws {
+        for (w, h) in [(1916, 1036), (1904, 800), (1440, 1080), (1280, 1072)] {
+            #expect(decide(source: geo(w, h)).plan?.scaler == .lanczos, "\(w)x\(h)")
+        }
+        #expect(decide(source: geo(1280, 720)) == .notTaken(.belowFullHD))
+        // With both on, Lanczos takes them from the automatic scaler (which would run MetalFX there).
+        #expect(decide(lowRes: true, source: geo(1916, 1036)).plan?.scaler == .lanczos)
+        #expect(decide(lowRes: true, fullHD: false, source: geo(1916, 1036)).plan?.scaler == .automatic)
+    }
+
+    @Test func theSizePolicyPicksPerSize() {
+        let both = policy(low: true, fullHD: true)
+        #expect(both.scaler(width: 1280, height: 720) == .automatic)
+        #expect(both.scaler(width: 1920, height: 1080) == .lanczos)
+        #expect(both.scaler(width: 3840, height: 2160) == nil)
+        #expect(policy(low: true, .lineArt, fullHD: true).scaler(width: 1920, height: 1080) == .lineArt)
+        #expect(policy(fullHD: true).scaler(width: 1280, height: 720) == nil)
+    }
+
+    /// A plan whose one axis would shrink is not taken: the Lanczos stage only scales up.
+    @Test func aPlanThatShrinksAnAxisIsNotTaken() {
+        #expect(decide(source: geo(1920, 1080, 2, 3), display: CGSize(width: 2560, height: 1440))
+                == .notTaken(.displayNotLarger))
     }
 
     @Test func turningTheFullHDOptionOnForACustomSourceNeedsAFreshLoad() {

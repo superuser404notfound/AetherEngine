@@ -282,7 +282,7 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 - the display is larger than the source,
 - not a wireless AirPlay route, and not a live session with demuxed audio.
 
-`upscaleScaler = .lineArt` also takes 10-bit and 1080p. `upscalesFullHDVideo` takes 1080p sources (8 or 10-bit) for `.lanczos`; with both options on, the source's size picks the scaler (`UpscaleRouteDecision.scaler(for:)`). A plan whose stage gave up earlier in this process (`UpscaleFailureMemory`) is not taken again at that rate or a faster one.
+`upscaleScaler = .lineArt` also takes 10-bit and 1080p. `upscalesFullHDVideo` takes sources larger than 1280x720 up to 1920x1080 (8 or 10-bit) for `.lanczos`; with both options on, the source's size picks the scaler (`UpscaleSizePolicy`), at load and on a mid-stream size change. A plan whose stage gave up earlier in this process (`UpscaleFailureMemory`) is not taken again at that rate or a faster one.
 
 **Where it runs.** A taken route moves the session to the software host, also when it would otherwise have played natively (`sourceSoftwareOnlyForUpscale`). The host wraps its decoder's frame handler (`UpscalingFrameHandler`), and `FrameUpscaler` runs on every decoded frame:
 

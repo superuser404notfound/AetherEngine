@@ -657,10 +657,12 @@ public struct LoadOptions: Sendable, Equatable {
     /// Ignored while `upscalesLowResolutionVideo` is off. A tuning field like it.
     public var upscaleScaler: UpscaleScaler = .automatic
 
-    /// Opt in to upscaling SDR 1080p sources (larger than `upscalesLowResolutionVideo` takes, at most
-    /// 1920x1080) to the display with `UpscaleScaler.lanczos`. An Apple TV scales such a picture to a 4K
-    /// display bilinearly on both playback paths (measured on an A15, tvOS 27.2); Lanczos-3 keeps clearly
-    /// more detail at about 6 ms per frame there. Like the low-resolution stage it moves the session to
+    /// Opt in to upscaling SDR 1080p sources (larger than 1280x720 on either axis, at most 1920x1080, so
+    /// cropped rips such as 1916x1036 count) to the display with `UpscaleScaler.lanczos`. An Apple TV
+    /// scales such a picture to a 4K display bilinearly on both playback paths (measured on an A15, tvOS
+    /// 27.2); Lanczos-3 keeps clearly more detail at about 8 ms of GPU per frame there. With
+    /// `upscalesLowResolutionVideo` also on it takes these sizes from the automatic scaler, which would
+    /// run MetalFX on a cropped 1080p source. Like the low-resolution stage it moves the session to
     /// `SoftwarePlaybackHost`, with the same exceptions (HDR, Dolby Vision, a display no larger than the
     /// source, a wireless AirPlay route, a demuxed-audio live stream). Separate from
     /// `upscalesLowResolutionVideo` because 1080p is most of a library, and the software path has costs a
@@ -2226,7 +2228,8 @@ public enum UpscaleScaler: Sendable, Hashable {
 public struct UpscaleStatus: Sendable, Equatable {
     /// The decoded (coded) size the stage receives.
     public let sourceSize: CGSize
-    /// The VideoToolbox super-resolution factor, nil when MetalFX alone scales.
+    /// The VideoToolbox super-resolution factor, nil when no VideoToolbox pass runs (MetalFX alone, line
+    /// art, Lanczos; `scaler` says which).
     public let mlScale: Float?
     /// The size the stage delivers: the source's display aspect fitted into the display.
     public let targetSize: CGSize

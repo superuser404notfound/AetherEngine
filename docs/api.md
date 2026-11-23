@@ -3102,7 +3102,7 @@ The load logs one `[Upscale] taken: <source> -> <target> (<stages>)` / `[Upscale
 
 #### `upscalesFullHDVideo`
 
-Opt in to upscaling SDR 1080p video (larger than `upscalesLowResolutionVideo` takes, at most 1920x1080) to the display's native pixel size, with Lanczos-3 (`UpscaleScaler.lanczos`).
+Opt in to upscaling SDR 1080p video to the display's native pixel size, with Lanczos-3 (`UpscaleScaler.lanczos`). It takes anything larger than 1280x720 on either axis and at most 1920x1080, so cropped rips (1916x1036, 1904x800) count as 1080p.
 
 **Why.** An Apple TV shows 1080p on a 4K display by scaling it bilinearly, on the native path and the software path alike (measured on an A15, tvOS 27.2, from 4K screenshots against the reference). Over 13 Netflix and SVT test scenes brought from 4K down to 1080p and back up, VMAF NEG reads 85.5 for that bilinear picture, 92.1 for MetalFX spatial scaling and 94.0 for Lanczos-3. [measurements.md › Lanczos for 1080p](measurements.md#lanczos-for-1080p) has the numbers.
 
@@ -3113,9 +3113,9 @@ Opt in to upscaling SDR 1080p video (larger than `upscalesLowResolutionVideo` ta
 - The software path. Like the low-resolution stage it moves the title onto `SoftwarePlaybackHost`, which for most 1080p titles means a route they would otherwise play natively. That path's rules apply: on tvOS E-AC-3 Atmos plays as a decoded bed, PiP goes through `softwarePiPSource`, no native subtitle renditions. This is why it is its own option: 1080p is most of a library.
 - About 8 ms of GPU time per frame for 1080p to 2160p on an A15 (Apple TV 4K, 3rd generation) in playback at 24 fps, where line art reads about 21 ms. About 3 ms on an M1.
 
-**Not taken** for the same sources as `upscalesLowResolutionVideo` (HDR, Dolby Vision, a display no larger than the source, a wireless AirPlay route, a demuxed-audio live stream), and for anything below 1080p (`[Upscale] not taken (source is below 1080p and upscalesLowResolutionVideo is off)`) or above 1920x1080.
+**Not taken** for the same sources as `upscalesLowResolutionVideo` (HDR, Dolby Vision, a display no larger than the source, a wireless AirPlay route, a demuxed-audio live stream), and for 720p or smaller (`[Upscale] not taken (source is 720p or smaller and upscalesLowResolutionVideo is off)`) or above 1920x1080. Lanczos only scales up: a plan that would shrink one axis (a non-square source on a smaller display) is not taken.
 
-**With both options on**, the source's size picks the scaler: below 1080p `upscaleScaler` runs, at 1080p Lanczos does. A `.lineArt` title keeps line art at 1080p.
+**With both options on**, the source's size picks the scaler (`UpscaleSizePolicy`): a `.lineArt` title keeps line art up to 1080p, anything larger than 720p gets Lanczos (also a cropped 1080p the automatic scaler would otherwise take with MetalFX), and the rest gets `upscaleScaler`. A size change mid-stream (an adaptive ladder, a live channel moving between 720p and 1080i) picks again by the same rule, unless an overrun already moved the stage down a rung.
 
 **How it behaves.** The same stage as the low-resolution one, with the same budget, logs and switch-off. The load logs `[Upscale] taken: 1920x1080 -> 3840x2160 (Lanczos)`, and `UpscaleStatus.scaler` is `.lanczos` with `mlScale` nil. A Lanczos stage that overruns has nothing below it and switches off.
 
@@ -3239,7 +3239,7 @@ So correcting it through `reloadAtCurrentPosition(applying:)` does nothing. Call
 | `AudioShaping` | `maxChannels` (nil or 1...8, never upmixes), `dialogueGainDB` (0...`maxDialogueGainDB`, 12), `compressor`, `loudnessTargetLUFS` (nil or within `loudnessTargetRange`, -36...-12; raises by at most `maxLoudnessGainDB`, 18 dB), `lfeMixDB` (nil or within `lfeMixRange`, -20...+10; the LFE level in a fold that drops it), `clamped`, `isActive`, `summary` (the wording the engine's log uses). |
 | `AudioShaping.Compressor` | `thresholdDB` (clamped to -60...0 dBFS), `ratio` (1...20), `makeupGainDB` (0...24 dB), `attackMilliseconds` (0.1...200), `releaseMilliseconds` (10...2000), `kneeDB` (0...18); a non-finite value reads back as a neutral default. `clamped`, and the `night` preset (-30 dB, 4:1, +10 dB makeup, 5 ms attack, 250 ms release, 6 dB knee). |
 | `AudioShapingState` | `.off`, `.applied`, `.unavailable`; see `$audioShapingState`. |
-| `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when MetalFX alone scales), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (see note 3), `scaler` (the `UpscaleScaler` the stage runs). See `$activeUpscale`. |
+| `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when no VideoToolbox pass runs: MetalFX alone, line art or Lanczos), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (see note 3), `scaler` (the `UpscaleScaler` the stage runs). See `$activeUpscale`. |
 | `UpscaleScaler` | `.automatic`, `.lineArt` or `.lanczos`, the scaler `LoadOptions.upscaleScaler` selects (`.lanczos` is also what `upscalesFullHDVideo` runs). See [`upscaleScaler`](#upscalescaler). |
 | `VideoProcessingOptions` | `targetPeakNits`, the display's peak in nit. `LoadOptions.videoProcessing`; see [`videoProcessing`](#videoprocessing). |
 | `VideoProcessingStatus` | `stages` (`[VideoProcessingStage]`), `sourcePeakNits`, `sourcePeak` (a `ToneMapSourcePeak`), `targetPeakNits`, `disabledReason` (set when the processing switched itself off mid-session). See [Picture processing status](#picture-processing-status). |

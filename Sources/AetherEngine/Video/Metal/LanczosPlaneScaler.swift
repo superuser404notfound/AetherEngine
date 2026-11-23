@@ -12,7 +12,7 @@ import Metal
 ///
 /// Measured against an Apple TV's own scaling, which is bilinear on both playback paths (A15, tvOS 27.2),
 /// over 13 Netflix and SVT scenes brought from 4K to 1080p and back: VMAF NEG 94.0 against 85.5, with
-/// MetalFX spatial at 92.1. A 2x Lanczos-3 luma kernel took 5.9 ms per frame on that A15 at 24 and 60 fps.
+/// MetalFX spatial at 92.1. On that A15 the stage reads about 8 ms of GPU per frame in playback at 24 fps.
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class LanczosPlaneScaler {
 
@@ -145,23 +145,9 @@ final class LanczosPlaneScaler {
 
     private func makeOutput(format: OSType) throws -> CVPixelBuffer {
         if outputPools[format] == nil {
-            let attrs: [String: Any] = [
-                kCVPixelBufferPixelFormatTypeKey as String: format,
-                kCVPixelBufferWidthKey as String: targetWidth, kCVPixelBufferHeightKey as String: targetHeight,
-                kCVPixelBufferMetalCompatibilityKey as String: true,
-                kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
-            ]
-            var pool: CVPixelBufferPool?
-            let status = CVPixelBufferPoolCreate(
-                kCFAllocatorDefault, [kCVPixelBufferPoolMinimumBufferCountKey as String: 3] as CFDictionary,
-                attrs as CFDictionary, &pool)
-            guard status == kCVReturnSuccess, let pool else { throw Failure("output pool: \(status)") }
-            outputPools[format] = pool
+            outputPools[format] = try makePool(width: targetWidth, height: targetHeight, format: format)
         }
-        var buffer: CVPixelBuffer?
-        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, outputPools[format]!, &buffer)
-        guard status == kCVReturnSuccess, let buffer else { throw Failure("pool buffer: \(status)") }
-        return buffer
+        return try pooledBuffer(outputPools[format]!)
     }
 }
 
@@ -220,7 +206,8 @@ enum LanczosShaderSource {
         constant LanczosTap &t = taps[gid.x];
         int first = int(t.first);
         int last = int(r.width) - 1;
-        uint y = r.originY + gid.y;
+        // A clipped chroma plane's row texture is taller than the picture there: repeat its last row.
+        uint y = r.originY + min(gid.y, r.height - 1);
         float4 acc = float4(0.0);
         for (int k = 0; k < 6; k++) {
             acc += t.w[k] * src.read(uint2(r.originX + uint(clamp(first + k, 0, last)), y));

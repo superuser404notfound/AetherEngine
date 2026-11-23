@@ -215,6 +215,8 @@ final class SoftwarePlaybackHost {
 
     /// #846: set by the load before `load(demuxer:...)`; non-nil runs the upscale stage on every decoded frame.
     var upscalePlan: UpscalePlan?
+    /// Which scaler a mid-stream size change gets (`FrameUpscaler`); nil keeps the plan's.
+    var upscaleSizePolicy: UpscaleSizePolicy?
 
     /// The stage built for the current plan (a `FrameUpscaler`), nil when none was.
     /// Typed loosely because the class does not exist in simulator builds or before OS 26.
@@ -1354,7 +1356,8 @@ final class SoftwarePlaybackHost {
         #if !targetEnvironment(simulator)
         if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
             let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
-            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval, buildQueue: FrameUpscaler.stageBuildQueue)
+            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval, buildQueue: FrameUpscaler.stageBuildQueue,
+                                            sizePolicy: upscaleSizePolicy)
             else { return handler }
             frameUpscaler = stage
             let pipeline = makeFramePipeline(handler) { buffer, pts, _ in stage.begin(buffer, pts: pts) }

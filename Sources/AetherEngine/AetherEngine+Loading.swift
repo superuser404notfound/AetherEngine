@@ -2182,16 +2182,13 @@ extension AetherEngine {
         let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
         let upscaleRebuild = UpscaleRouteDecision.forRebuild(
             sessionPlan: sourceUpscalePlan,
-            optionOn: sourceUpscalePlan.map {
-                UpscaleRouteDecision.optionsCover($0, lowResolution: loadedOptions.upscalesLowResolutionVideo,
-                                                  requested: loadedOptions.upscaleScaler,
-                                                  fullHD: loadedOptions.upscalesFullHDVideo)
-            } ?? false,
+            optionOn: sourceUpscalePlan.map { UpscaleSizePolicy(loadedOptions).covers($0) } ?? false,
             disabled: sourceUpscaleDisabled)
         host.configuredDVProfile = sourceDVProfile
         host.dolbyVisionHandling = loadedOptions.dolbyVisionHandling
         host.preferDualLayerDolbyVision = loadedOptions.preferDualLayerDolbyVision
         host.upscalePlan = upscaleRebuild.plan
+        host.upscaleSizePolicy = UpscaleSizePolicy(loadedOptions)
         let processingRebuild = VideoProcessingRouteDecision.forRebuild(
             sessionPlan: sourceVideoProcessingPlan, optionOn: loadedOptions.videoProcessing != nil,
             disabled: sourceVideoProcessingDisabled)
