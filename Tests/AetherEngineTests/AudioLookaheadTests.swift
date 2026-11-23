@@ -142,66 +142,75 @@ struct AudioLookaheadStateTests {
         #expect(AudioLookaheadPolicy.pauseArmOpens(wasOpen: true, lead: 0.1))
     }
 
+    private func directLive(rebuffering: Bool = false, running: Bool = true, fed: Double,
+                            clock: Double = 15.9, dry: Bool) -> AudioLookaheadPolicy.ClockAction {
+        AudioLookaheadPolicy.directLiveClockAction(
+            rebuffering: rebuffering, clockRunning: running, lastFedAudioPTS: fed,
+            clockSeconds: clock, sourceDry: { dry })
+    }
+
     @Test("AE#1121: ringless Live pauses on a dry source without the VOD pause arm")
     func directLivePausesOnDrySource() {
-        // Measured on `main`: a 6 s stall left aLead at -3.5 s with rebuf=n for the rest of the run.
-        #expect(AudioLookaheadPolicy.directLiveClockAction(
-            rebuffering: false, lastFedAudioPTS: 16.0, clockSeconds: 15.9, sourceDry: true)
-            == .pauseForRebuffer)
-        #expect(AudioLookaheadPolicy.directLiveClockAction(
-            rebuffering: false, lastFedAudioPTS: 15.4, clockSeconds: 15.9, sourceDry: true)
-            == .pauseForRebuffer)
+        // Measured before the fix: a 6 s stall left aLead at -3.5 s with rebuf=n for the rest of the run.
+        #expect(directLive(fed: 16.0, dry: true) == .pauseForRebuffer)
+        #expect(directLive(fed: 15.4, dry: true) == .pauseForRebuffer)
     }
 
     @Test("AE#1121: ringless Live leaves the clock alone while packets are still queued")
     func directLiveLowLeadWithQueuedPacketsIsDecodeLag() {
-        #expect(AudioLookaheadPolicy.directLiveClockAction(
-            rebuffering: false, lastFedAudioPTS: 16.0, clockSeconds: 15.9, sourceDry: false) == .none)
-        #expect(AudioLookaheadPolicy.directLiveClockAction(
-            rebuffering: false, lastFedAudioPTS: 18.0, clockSeconds: 15.9, sourceDry: true) == .none)
+        #expect(directLive(fed: 16.0, dry: false) == .none)
+        #expect(directLive(fed: 18.0, dry: true) == .none)
+    }
+
+    @Test("AE#1121: the dryness check only runs once the lead is under the underrun point")
+    func directLiveReadsDrynessOnlyWhenNeeded() {
+        var asked = 0
+        _ = AudioLookaheadPolicy.directLiveClockAction(
+            rebuffering: false, clockRunning: true, lastFedAudioPTS: 18.0, clockSeconds: 15.9,
+            sourceDry: { asked += 1; return true })
+        #expect(asked == 0)
     }
 
     @Test("AE#1121: ringless Live resumes at the rebuffer lead")
     func directLiveResumesAtRebufferLead() {
-        #expect(AudioLookaheadPolicy.directLiveClockAction(
-            rebuffering: true, lastFedAudioPTS: 17.0, clockSeconds: 16.0, sourceDry: false) == .none)
-        #expect(AudioLookaheadPolicy.directLiveClockAction(
-            rebuffering: true, lastFedAudioPTS: 18.0, clockSeconds: 16.0, sourceDry: true) == .resume)
+        #expect(directLive(rebuffering: true, running: false, fed: 17.0, clock: 16.0, dry: false) == .none)
+        #expect(directLive(rebuffering: true, running: false, fed: 18.0, clock: 16.0, dry: true) == .resume)
+    }
+
+    @Test("AE#1121: a clock restarted during the hold is judged by the underrun rule again")
+    func directLiveRestartedClockDuringHoldPausesAgain() {
+        // A host play() or setRate during the hold starts the synchronizer while the flag is still set.
+        #expect(directLive(rebuffering: true, running: true, fed: 16.0, dry: true) == .pauseForRebuffer)
+        #expect(directLive(rebuffering: true, running: false, fed: 16.0, dry: true) == .none)
+        #expect(directLive(rebuffering: true, running: true, fed: 17.0, dry: true) == .none)
     }
 
     @Test("AE#1121: a clock armed off video (no audio buffer yet) never pauses for audio")
     func directLiveWithoutFedAudioNeverPauses() {
-        #expect(AudioLookaheadPolicy.directLiveClockAction(
-            rebuffering: false, lastFedAudioPTS: .nan, clockSeconds: 3.0, sourceDry: true) == .none)
+        #expect(directLive(fed: .nan, clock: 3.0, dry: true) == .none)
     }
 
     @Test("AE#1121: the source wait ends where the running clock would reach the underrun lead")
     func directLiveWaitEndsAtUnderrun() throws {
         let wait = try #require(AudioLookaheadPolicy.directLiveSourceWaitSeconds(
-            clockArmed: true, clockRunning: true, rebuffering: false,
-            lastFedAudioPTS: 12.0, clockSeconds: 10.0, rate: 1))
+            clockArmed: true, clockRunning: true, lastFedAudioPTS: 12.0, clockSeconds: 10.0, rate: 1))
         #expect(abs(wait - (2.0 - AudioLookaheadPolicy.underrunPauseLeadSeconds)) < 1e-9)
         let fast = try #require(AudioLookaheadPolicy.directLiveSourceWaitSeconds(
-            clockArmed: true, clockRunning: true, rebuffering: false,
-            lastFedAudioPTS: 12.0, clockSeconds: 10.0, rate: 2))
+            clockArmed: true, clockRunning: true, lastFedAudioPTS: 12.0, clockSeconds: 10.0, rate: 2))
         #expect(abs(fast - wait / 2) < 1e-9)
         #expect(AudioLookaheadPolicy.directLiveSourceWaitSeconds(
-            clockArmed: true, clockRunning: true, rebuffering: false,
-            lastFedAudioPTS: 9.0, clockSeconds: 10.0, rate: 1)
+            clockArmed: true, clockRunning: true, lastFedAudioPTS: 9.0, clockSeconds: 10.0, rate: 1)
             == AudioLookaheadPolicy.directLiveMinimumWaitSeconds)
     }
 
     @Test("AE#1121: nothing can underrun while the clock stands, so the source wait has no limit")
     func directLiveWaitUnboundedWhileClockStands() {
-        func wait(armed: Bool = true, running: Bool = true, rebuffering: Bool = false,
-                  fed: Double = 12, rate: Float = 1) -> Double? {
+        func wait(armed: Bool = true, running: Bool = true, fed: Double = 12, rate: Float = 1) -> Double? {
             AudioLookaheadPolicy.directLiveSourceWaitSeconds(
-                clockArmed: armed, clockRunning: running, rebuffering: rebuffering,
-                lastFedAudioPTS: fed, clockSeconds: 10, rate: rate)
+                clockArmed: armed, clockRunning: running, lastFedAudioPTS: fed, clockSeconds: 10, rate: rate)
         }
         #expect(wait(armed: false) == nil)
         #expect(wait(running: false) == nil)
-        #expect(wait(rebuffering: true) == nil)
         #expect(wait(fed: .nan) == nil)
         #expect(wait(rate: 0) == nil)
     }

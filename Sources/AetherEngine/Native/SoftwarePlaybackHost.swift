@@ -4433,9 +4433,10 @@ final class SoftwarePlaybackHost {
                 guard isPlaying() || rebuffering else { return }
                 action = AudioLookaheadPolicy.directLiveClockAction(
                     rebuffering: rebuffering,
+                    clockRunning: aOut.rate != 0,
                     lastFedAudioPTS: lastEnqueuedAudioPtsSec,
                     clockSeconds: aOut.currentTimeSeconds,
-                    sourceDry: directLiveSource.packets.snapshot.packetCount == 0)
+                    sourceDry: { directLiveSource.packets.queuedPacketCount == 0 })
             } else {
                 pauseArmOpen = AudioLookaheadPolicy.pauseArmOpens(wasOpen: pauseArmOpen, lead: lead)
                 guard pauseArmOpen, isPlaying() || rebuffering else { return }
@@ -4582,11 +4583,14 @@ final class SoftwarePlaybackHost {
                     let maximumWait: TimeInterval?
                     if parkedVideo.isEmpty {
                         // AE#1121: Live wakes when its clock would reach the underrun point, so the
-                        // pause at the top of the next iteration catches a stalled source.
+                        // pause at the top of the next iteration catches a stalled source. Background
+                        // audio never takes that pause, so it keeps sleeping until data arrives.
                         maximumWait = directLiveSource == nil ? nil
                             : AudioLookaheadPolicy.directLiveSourceWaitSeconds(
-                                clockArmed: clockArmed(), clockRunning: isPlaying(),
-                                rebuffering: rebuffering, lastFedAudioPTS: lastEnqueuedAudioPtsSec,
+                                clockArmed: clockArmed(),
+                                clockRunning: isPlaying() && !backgroundAudioOnly()
+                                    && (audioOutput?.rate ?? 0) != 0,
+                                lastFedAudioPTS: lastEnqueuedAudioPtsSec,
                                 clockSeconds: audioOutput?.currentTimeSeconds ?? .nan,
                                 rate: currentRate())
                     } else if directLiveSource != nil {

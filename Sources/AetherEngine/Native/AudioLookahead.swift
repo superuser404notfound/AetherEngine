@@ -82,15 +82,25 @@ enum AudioLookaheadPolicy {
     /// feeder's rule applies unchanged, without the VOD pause arm: a live source that sits under the
     /// underrun lead with nothing queued is about to chop either way. A session whose audio never
     /// produced a buffer (the clock armed off video, #337) has no lead to lose and never pauses.
+    ///
+    /// `clockRunning` is whether the synchronizer actually advances. A host `play()` or `setRate` during
+    /// the hold restarts it while the hold is still on, and such a clock is judged by the underrun rule
+    /// again. `sourceDry` is read only when the lead is under the underrun point, since it takes the
+    /// read-ahead's lock.
     static func directLiveClockAction(
         rebuffering: Bool,
+        clockRunning: Bool,
         lastFedAudioPTS: Double,
         clockSeconds: Double,
-        sourceDry: Bool
+        sourceDry: () -> Bool
     ) -> ClockAction {
         guard lastFedAudioPTS.isFinite, clockSeconds.isFinite else { return .none }
-        return clockAction(rebuffering: rebuffering, lastFedAudioPTS: lastFedAudioPTS,
-                           clockSeconds: clockSeconds, atRingEnd: sourceDry, sourceEnded: false)
+        let lead = lastFedAudioPTS - clockSeconds
+        if rebuffering {
+            if lead >= rebufferResumeLeadSeconds { return .resume }
+            guard clockRunning else { return .none }
+        }
+        return lead < underrunPauseLeadSeconds && sourceDry() ? .pauseForRebuffer : .none
     }
 
     /// The shortest source wait `directLiveSourceWaitSeconds` hands out, so a clock that is already
@@ -100,17 +110,17 @@ enum AudioLookaheadPolicy {
     /// AE#1121: how long the ringless live loop may wait on an empty source before its clock reaches
     /// the underrun point. The loop is the only thread that can pause the clock, and an unbounded wait
     /// there let a stalled source run the clock past every sample it had. nil sleeps until data
-    /// arrives: nothing can underrun while the clock stands (paused, rebuffering, unarmed) or while no
+    /// arrives: nothing can underrun while the clock stands (paused, held for a rebuffer, unarmed),
+    /// while nothing here may pause it (background audio paces on its own renderer), or while no
     /// audio has been fed.
     static func directLiveSourceWaitSeconds(
         clockArmed: Bool,
         clockRunning: Bool,
-        rebuffering: Bool,
         lastFedAudioPTS: Double,
         clockSeconds: Double,
         rate: Float
     ) -> TimeInterval? {
-        guard clockArmed, clockRunning, !rebuffering, rate > 0,
+        guard clockArmed, clockRunning, rate > 0,
               lastFedAudioPTS.isFinite, clockSeconds.isFinite else { return nil }
         let untilUnderrun = (lastFedAudioPTS - clockSeconds - underrunPauseLeadSeconds) / Double(rate)
         return max(untilUnderrun, directLiveMinimumWaitSeconds)
