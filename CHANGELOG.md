@@ -45,6 +45,14 @@ the public-API contract.
 
 ### Fixed
 
+- **Software live without a DVR window rebuffers when the source falls behind (AE#1121).** Its clock used
+  to run past every sample the source had delivered. The sound stopped, every late frame was dropped, and
+  `playbackPhase` stayed `.playing` until the host reloaded. The loop now pauses the clock once the source
+  is dry and the audio lead is under 0.15 s, shows `.rebuffering`, and resumes at 2 s, the rule the DVR
+  feeder already had. On a paced 1080p25 TS origin a 6 s stall used to leave audio and video 3.5 s behind
+  the clock for the rest of the session. Now it costs one rebuffer and no dropped frame. A source that
+  delivers in exactly real time keeps its 2.5 s lead and never pauses.
+
 - **A rewind before the resume point no longer fetches the title again (AE#1109).** With the opt-in
   whole-source prefetch, a seek before the first resident segment restarted the producer there, and it
   then cut every resident segment again to the end of the source. It now parks in front of a resident run

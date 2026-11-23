@@ -570,9 +570,19 @@ Ordinary live software playback with audio uses `DirectLiveAudioReadAhead` on th
 
 - A forward-only memory FIFO lets audio move ahead of a full video renderer.
 - Bounded parking of compressed video, plus short consumer waits, keep already-read video ready to run when source I/O waits.
-- The timed waits apply only while video is parked. Otherwise the consumer sleeps until source data, EOF, a failure or cancellation wakes it.
+- The short waits apply only while video is parked (no wait when the parked head may decode, 10 ms otherwise). Without parked video the consumer sleeps until source data, EOF, a failure or cancellation wakes it, or until the running clock would reach the underrun point (see below).
 - Video decoding yields between packets, so it cannot drain a whole parked batch before available audio gets a turn.
-- The live clock never takes on VOD pause/rebuffer behaviour. The audio lead target is a ceiling, not a prefill required before start.
+- The audio lead target is a ceiling, not a prefill required before start.
+
+**Rebuffer on a dry source (AE#1121).** When the forward FIFO is empty and the audio lead falls under `underrunPauseLeadSeconds` (0.15 s), the loop pauses the clock and publishes `isRebuffering`. It resumes at `rebufferResumeLeadSeconds` (2 s). This is the DVR feeder's [edge rebuffer](#live-audio-look-ahead-and-edge-rebuffer) rule, with the empty FIFO standing in for the dry ring (`AudioLookaheadPolicy.directLiveClockAction`).
+
+- Without it, a source slower than real time let the clock run past every sample it had. Sound stopped, every late frame was dropped, and the phase stayed `.playing` until the host reloaded. Measured with `aetherctl play --live --sw` on a paced 1080p25 TS origin, a 6 s stall left audio and video 3.5 s behind the clock for the rest of the session, and an origin at 80 % speed lost 0.2 s per second without end. With the rule the stall costs one rebuffer, the 80 % origin one rebuffer every 10 s, and neither drops a frame.
+- Unlike the VOD loop there is no pause arm. A queue to read dryness off already separates a dry source from decode lag, and the live join starts with about 2.5 s of lead, so a source that delivers in exactly real time never comes near 0.15 s.
+- The consumer is the only thread that can pause the clock. While the clock runs, its wait on an empty source ends where the clock would reach the underrun point (`directLiveSourceWaitSeconds`), so a full stall is caught too. While the clock stands (paused, held for the rebuffer, not armed yet) the wait has no limit, so an empty source still does not poll. Background audio never takes the pause (it paces on its own renderer), so it sleeps the same way.
+- A host `play()` or `setRate` during the hold starts the clock while the hold is still on. Such a running clock is judged by the underrun rule again, so a source that is still dry pauses it once more.
+- A resume can come before 2 s of lead. A paused clock takes no video, so parked video fills its 4 MiB budget, and the loop lifts the hold rather than wait on a renderer that only a running clock drains. At high bitrates (around 20 Mbit/s) that budget holds about 1.5 s.
+- A clock that armed off video because the audio never produced a buffer (#337) has no lead to lose and never pauses.
+- There is no catch-up after the resume. A session that stalled plays behind the edge by the length of the stall, until a source reconnect lands at the edge again through the timeline fold.
 
 **Memory budgets.** The forward store and the parked-video queue use fixed in-memory pacing budgets, independent of `sessionCacheByteBudget`, free disk space and disk-retention claims.
 

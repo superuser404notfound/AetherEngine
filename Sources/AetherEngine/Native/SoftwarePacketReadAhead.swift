@@ -203,6 +203,13 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         thread.start()
     }
 
+    /// Packets stored and not read yet. The live loop asks this on its hot path (AE#1121), where a full
+    /// `snapshot` would also drain cache timing and walk the coverage maps under the producer's lock.
+    var queuedPacketCount: Int {
+        condition.lock(); defer { condition.unlock() }
+        return count
+    }
+
     var snapshot: Snapshot {
         condition.lock(); defer { condition.unlock() }
         applyCacheTimingLocked()

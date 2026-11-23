@@ -407,7 +407,7 @@ On-demand MPEG-DASH (AE#859): one static Period, each representation a single `S
 
 | File | What it does |
 | --- | --- |
-| `AudioLookahead.swift` | Software live feeder: audio look-ahead pump policy and cursor state. Audio lead independent of video decode speed, live-edge underrun rebuffer (#107). |
+| `AudioLookahead.swift` | Software live feeder: audio look-ahead pump policy and cursor state. Audio lead independent of video decode speed, live-edge underrun rebuffer (#107), the clock rule and source wait of live without DVR (AE#1121). |
 | `Issue93ItemDeathRevive.swift` | Bounded revive budget (`ItemDeathReviveGate`) for items killed by accumulated -12889 media timeouts (`failedToPlayToEndTime`, #93 round 3). |
 | `MasterFallbackDecision.swift` | Pure master → media playlist fallback decision (#98, #130). Maps a master-rejection item failure (-11868 external SDR, -11848 HDR on SDR, -1002 all variants filtered at parse) to a reactive re-serve. |
 | `NativeAVPlayerHost.swift` | Native path: AVPlayer host bound to the loopback HLS-fMP4 URL. Awaits the real seek landing (deadline-bounded, first resume wins, #129) and hides the stale clock during a seek. |
