@@ -335,6 +335,8 @@ The GPU filter is `bwdif_videotoolbox`, a Metal port of bwdif from FFmpegBuild, 
 
 When the linked FFmpegBuild has no `bwdif_videotoolbox`, or its graph fails to build, the engine uses FFmpeg's `yadif_videotoolbox` instead. A GPU graph that errors while it runs falls back to the CPU. `$sourceVideoStreamFormat`'s `deinterlace.filter` names the one that runs.
 
+What the graph costs the decoder's thread is logged as `[Deinterlace] timing` every 240 input frames ([architecture › Deinterlace timing log](architecture-software.md#how-a-session-reaches-this-host)).
+
 `AetherEngine.load` decides the route (`VideoRoutingPolicy`), per source, from `VTCapabilityProbe`, the codec id, the declared field order, and on VOD the decode sample that verifies it.
 
 #### Inverse telecine

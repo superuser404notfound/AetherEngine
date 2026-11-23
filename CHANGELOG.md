@@ -19,6 +19,12 @@ the public-API contract.
   which has no gate, activates right before `play()`, and resumes after an interruption reactivate. Off by default, so
   hosts with `AVPlayerViewController` see no change. Requested by secunit404.
 
+- **`[Deinterlace] timing` says what the deinterlace graph costs the decoder's thread (AE#1112).** Every 240
+  input frames: push, pull and the copy out of FFmpeg's pool per input frame, the worst frame, this thread's
+  decode time, and the total against the input and output frame interval. Inverse telecine runs in the same
+  graph, so its line reads 240 in, 192 out against a 41.7 ms output interval. Diagnostics only, no picture or
+  routing changes. Requested by classicjazz.
+
 ### Fixed
 
 - **A rewind before the resume point no longer fetches the title again (AE#1109).** With the opt-in

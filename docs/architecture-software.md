@@ -68,6 +68,22 @@ Source URL ──► Demuxer ──┬─► video decoder ──► [UpscalingF
 
 **Inverse telecine on VOD.** Hard-telecined NTSC MPEG-2 film is sampled before the display criteria are written (`TelecineCadenceProbe`, #853). On film the deinterlace graph becomes `fieldmatch`, the deinterlacer for frames left combed, then `decimate`, and the session runs at 23.976 fps. On the GPU engine the two run after the upload as `fieldmatch_videotoolbox` and `decimate_videotoolbox` (AE#1108), with the CPU filters before the upload as the fallback. See [formats › Inverse telecine](formats.md#inverse-telecine).
 
+**Deinterlace timing log (AE#1112).** Every 240 input frames the decoder logs what the deinterlace graph cost its thread, inverse telecine included, since `fieldmatch` and `decimate` sit in the same graph:
+
+```
+[Deinterlace] timing: last 240 frames in, 192 out (bwdif_videotoolbox, inverse telecine GPU): push 0.00 ms, pull 2.74 ms, transfer 0.66 ms per input frame, max 13.48 ms; decode 0.54 ms; decoder thread held 3.95 ms per input frame against a 33.4 ms input / 41.7 ms output interval
+```
+
+- `push` is `av_buffersrc_add_frame_flags`. It only queues the frame (no `AV_BUFFERSRC_FLAG_PUSH`), so it reads near zero.
+- `pull` is every `av_buffersink_get_frame` after it. The whole graph runs here: the upload, the GPU filters with their waits, and the CPU cadence filters.
+- `transfer` is the `VTPixelTransferSession` copy of each output frame out of FFmpeg's pool, on the GPU engine. The CPU engine shows `convert` instead, the `sws_scale` into a pixel buffer.
+- `max` is the worst single input frame's push, pulls and copies.
+- `decode` is the time this thread spent in `avcodec_send_packet` and `avcodec_receive_frame`. Under frame threading most decoding happens on libavcodec's worker threads, so this is the wait, not the whole decode.
+- `held` is the sum. The input interval is the mean PTS step between pushed frames (a step over 1 s is a seek and does not count). The output interval scales it by frames in over frames out, so it reads half at field rate and 5/4 after `decimate`.
+- The label names the filter and where inverse telecine runs (`GPU`, `CPU` or `off`), so a line reads without the `engaged` line a log ring may have dropped. A new chain starts a new window.
+
+Numbers from a Mac: [measurements.md › Deinterlace graph cost](measurements.md#deinterlace-graph-cost-ae1112).
+
 **Interlace check on VOD.** Interlaced H.264 comes here to be deinterlaced. On seekable VOD (#232) the declared field order is first checked against decoded frames (`InterlaceProbe`). The deinterlace filter engages on `AV_FRAME_FLAG_INTERLACED` alone. So if that flag never appears in a sample, the detour would do nothing, and the stream goes back to the native path.
 
 **AV1 capability registration is lazy.** The engine registers the supplemental VideoToolbox AV1 decoder and checks `VTIsHardwareDecodeSupported` (`VTCapabilityProbe`) only when routing an AV1 source, so devices with hardware AV1 take the native path. Loading H.264, HEVC or audio-only content does not consult it.
