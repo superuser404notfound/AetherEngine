@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A still extractor stops re-reading a source it cannot decode stills from (AE#1118).** When a
+  `FrameExtractor` open failed because of the source itself (no video stream, no codec parameters, or no
+  decoder for the video codec), every later thumbnail or preview request opened the source again, and over
+  HTTP each open re-read the header from the origin. During playback with scrub previews that was about 1.6
+  opens a second for the whole session, competing with playback for the origin. On a debrid origin a 4K
+  Dolby Vision remux then downloaded slower than real time and stalled. Now the first such failure is kept
+  for the life of the extractor, and later requests return nil without touching the source. Other open
+  failures are retried as before.
 
 ## [7.73.0] - 2026-11-22
 

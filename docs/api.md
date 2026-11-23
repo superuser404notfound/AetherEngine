@@ -2154,6 +2154,7 @@ await frames.shutdown()                            // prompt teardown of the dec
 - The decode context opens lazily on first use; `prewarm()` opens it early.
 - Results land in a bounded LRU cache, thumbnails bucketed by second.
 - After 10 s idle the context closes and the cache drops. The next request reopens lazily.
+- An open that fails because of the source itself (no video stream, no codec parameters, no decoder for the video codec) is not retried. Every later request returns nil without reading the source again, for the life of the extractor. Other open failures, such as a refused or dropped connection, are retried on the next request.
 - `shutdown()` is the explicit, permanent teardown.
 
 | Method (`FrameMode`) | What it returns |
