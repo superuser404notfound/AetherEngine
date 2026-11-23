@@ -1557,6 +1557,7 @@ The reader:
 | `--reload-decode-path automatic\|software` | Makes the rebuild's correction the decode path. | none |
 | `--reader-axis absolute\|join\|mismatched` | Which byte axis the reader speaks (AE#460 round 3). | `absolute` |
 | `--join-offset-mb N` | Where the join sits, for `join` and `mismatched`. | 4 |
+| `--vod-sequential SECONDS` | Loads the spool as a closed recording instead of live (AE#1117). See below. | off (live) |
 
 **The measurement.** Every ten seconds it prints `physFP` and its slope. It closes with that slope stated against the source's own mux rate:
 
@@ -1567,7 +1568,7 @@ VERDICT: physFP 105 -> 402 MB over 240s = 1.24 MB/s (source mux rate 0.95 MB/s, 
 - A ratio near 1 means the session keeps one byte for every byte it plays. On a source that never ends, that grows without bound.
 - A ratio near 0 means the footprint is the session's, not the stream's.
 
-Results from this harness are in [Measurements › customio --live](measurements.md#customio---live-spool-ae445-ae460-ae461).
+Results from this harness are in [Measurements › customio --live](measurements.md#customio---live-spool-ae445-ae460-ae461-ae1117).
 
 **Which reader arm runs decides what the ratio is about.**
 
@@ -1575,6 +1576,13 @@ Results from this harness are in [Measurements › customio --live](measurements
 - `--foundation-reader` uses `FileHandle.readData`, which strands one autoreleased `Data` per read on any thread that never drains a pool. Whatever it retains is the HOST's.
 
 Run both. The Foundation arm is the control that proves the pool drains; the POSIX arm measures the engine. An arm that allocates brings a cause of its own, so only an arm that allocates nothing can tell an engine defect from the harness's own retention.
+
+**`--vod-sequential SECONDS` (AE#1117).** This is the shape of a host that reads a finished HLS recording itself and hands the bytes over as one MPEG-TS stream. The load goes out with `isLive = false`, `sequentialOrigin = true` and the value as `declaredDurationSeconds`. Use it with `--no-wrap`, since a looped file would restart the timeline, and pace it above the file's bitrate (`--rate-kbps` about twice the mux rate). The producer then runs ahead to its forward window and parks, the way a host that fetches a few segments ahead keeps it. Because the pacer is not what the engine consumed, the verdict's ratio is taken against the bytes actually read (`read ... MB/s`), not against `--rate-kbps`.
+
+```
+aetherctl customio --live --no-wrap --rate-kbps 15000 --seconds 960 --vod-sequential 1080 fixture.ts
+VERDICT: physFP 72 -> 64 MB over 903s = -0.01 MB/s (source mux rate 1.79 MB/s, read 0.88 MB/s, retention ratio -0.01)
+```
 
 **Read the retention ratio over a long run, not a short one.** The slope anchors at 60 s to skip the load step. That is exactly where `--reload-at 60` puts a SECOND step: the software pipeline's own baseline. A 100 s run reads ratio 1.31, which means nothing. A 260 s run shows `physFP` stepping 25 to 66 MB across the switch and then flat at 67 for 140 s: ratio 0.18 and still falling, which is a step being amortized, not a session retaining anything.
 
@@ -1646,7 +1654,7 @@ VERDICT: correction refused, session untouched and still playing
 
 `--host-carry removeFirst|subdata` is the third arm. It names a cause instead of measuring the engine.
 
-A `Data` parse carry consumed from the front with `removeFirst` only advances the slice's lower bound, so its backing store keeps every byte below it. A footprint that grows on an exact x1.25 ladder (Foundation's growth factor, not FFmpeg's) points at that carry. The AE#445 round 3 measurement is in [Measurements › customio --live](measurements.md#customio---live-spool-ae445-ae460-ae461).
+A `Data` parse carry consumed from the front with `removeFirst` only advances the slice's lower bound, so its backing store keeps every byte below it. A footprint that grows on an exact x1.25 ladder (Foundation's growth factor, not FFmpeg's) points at that carry. The AE#445 round 3 measurement is in [Measurements › customio --live](measurements.md#customio---live-spool-ae445-ae460-ae461-ae1117).
 
 - `--host-carry removeFirst` puts exactly that carry on the harness's delivery path, so the tool that measures the engine at ratio 0.00 can also produce ratio 1.00 on demand.
 - `--host-carry subdata` is the same carry re-based, which is the fix.
