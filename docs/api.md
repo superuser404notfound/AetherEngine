@@ -710,6 +710,8 @@ try await player.reloadAtCurrentPosition()
 
 1. **`reloadAtCurrentPosition()` with nothing to reload.** On a custom source it throws `sessionNotReloadable` when there is no session or the reader is forward-only (AE#526). On a URL source with no session it returns without doing anything. Read `sessionReloadRefusal` first to tell the two apart.
 2. **`prepareForItemReplacement()`** is for a host that mounts the engine's own player layer. Without it, that layer shows black across the nil-item gap of a foreground episode or playlist change. The next `load()` consumes it, `stop()` cancels it, and it has no effect when the outgoing session is not native. PiP hosts do not need it: an active PiP window already forces the handover (AE#158).
+
+   It keeps the outgoing item's picture, not a still of it. A host that shrinks the outgoing picture into a tile uses `holdOutgoingPicture(on:)` instead, and not both: with the handover the full-size paused picture stays under the tile until the next item mounts. See [Held pictures across an episode change](#held-pictures-across-an-episode-change).
 3. **`stop` parameters.** `resetDisplayCriteria: false` keeps the panel in its current mode across an item handoff. `finalTeardown` (default: the value of `resetDisplayCriteria`) says the host is leaving playback, not handing off to another `load()`. Only a final teardown honours `deactivatesAudioSessionOnStop`. To keep the panel mode and still release the session, pass `resetDisplayCriteria: false, finalTeardown: true`.
 
 A custom source (`IOReader`, the disc-folder readers) is described under [Custom byte sources](#custom-byte-sources-ioreader).
@@ -1816,8 +1818,9 @@ If you need it, say so on the tracker instead of working around it.
 | Symbol | Notes |
 | --- | --- |
 | `videoGravity` | Fill mode of whichever layer is mounted (`AVPlayerLayer` or the software display layer). Settable; this is the aspect-fit / aspect-fill control. |
-| `AetherStillView`, `bindStillView(_:)`, `unbindStillView(_:)` | Holds the outgoing picture across an item swap, for a host that renders the native path through AVKit rather than `AetherPlayerView`. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). |
+| `AetherStillView`, `bindStillView(_:)`, `unbindStillView(_:)` | Holds the outgoing picture across the item swap of an audio switch, for a host that renders the native path through AVKit rather than `AetherPlayerView`. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). An `AetherStillView` is also the surface for `holdOutgoingPicture(on:)`. |
 | `heldPictureFrameWaitSeconds` | The longest a native audio switch waits for the outgoing frame it holds. Default 0.5 s. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). |
+| `holdOutgoingPicture(on:)`, `releaseOutgoingPicture()` | Holds the outgoing picture on an `AetherStillView` the host places, across the host's own next `load()`, until the host releases it. For an episode change that shrinks and fades the old picture. See [Held pictures across an episode change](#held-pictures-across-an-episode-change). |
 | `nativePlayerLayer` | The engine's own `AVPlayerLayer`, for a host building `AVPictureInPictureController` around a layer rather than around `currentAVPlayer`. |
 | `$softwarePiPSource` | `SoftwarePiPSource` for sample-buffer PiP on the software path. See [Picture in Picture on the software path](#picture-in-picture-on-the-software-path). |
 | `$softwareDisplaySize` | The rectangle the software path's picture is shown at: the coded size under the decoder's pixel aspect. It follows the stream (not latched), so a mid-stream resolution change reshapes it. nil on every other path. |
@@ -1854,6 +1857,33 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
   - `heldPictureFrameWaitSeconds` changes the bound. 0 holds nothing on the native path, and values above 3 s are read as 3 s.
   - The Dolby Vision bullet above and the software path are not affected.
 - Nothing is held in PiP or on external playback.
+
+### Held pictures across an episode change
+
+`holdOutgoingPicture(on:)` keeps the outgoing episode's picture on screen while the host loads the next one, on an `AetherStillView` the host gives it. The host can shrink and fade that view, and it decides when the picture comes down (AE#1113).
+
+```swift
+let tile = AetherStillView(frame: playerBounds)   // placed above the video, below the controls
+await engine.holdOutgoingPicture(on: tile)
+try await engine.load(url: nextEpisode, options: options)
+// Animate tile's frame and alpha. Start when the next item shows its first frame:
+//   engine.$hasFirstFrameReadyForDisplay turns true after the load
+engine.releaseOutgoingPicture()   // once the fade is done
+```
+
+- **What is held.** The frame on screen, read by the same routes an audio switch uses: the native output, the software renderer, and for Dolby Vision without a displayable base layer the compositor or the reshaped still. An HDR source is held as HDR. Panel mode across the load is unchanged, since a `load()` keeps the display criteria anyway.
+- **It pauses playback first.** The native output vends a paused frame in about 20 ms and a playing one only after ~300 ms. An item that already played to its end vends nothing to a new output, so the engine steps it 1 ms back, which makes it render its last frame again (about 17 ms on a Mac), and puts it back at its end after the read. The call returns once the picture is up; call `load()` after it.
+- **Dolby Vision through the compositor.** That still plays from a file in the session's cache, which the next `load()` deletes. The hold moves the file out first and deletes it when the picture comes down.
+- **Its own surface.** Pass a view of its own, not the one bound with `bindStillView(_:)`. An audio switch never lays its still on a view that holds the host's picture; it holds nothing there instead.
+- **It survives every `load()`,** whichever route the next item takes (native to software and back).
+- **When it comes down.**
+  - The host calls `releaseOutgoingPicture()`. This is the normal end.
+  - `stop()` runs, or a newer `holdOutgoingPicture(on:)` replaces it.
+  - The next load fails or its caller cancels it (`state` becomes `.error` or `.idle`).
+  - Safety nets: 8 s after the next item's first frame, or 60 s with no next first frame at all.
+- **Animating the view.** Each still sits in an autoresizing subview of the still view, so a change of the view's frame inside an animation carries the picture along on the same curve. Before, the still was a bare sublayer and would have run Core Animation's own 0.25 s default. Alpha fades the whole view, and the still keeps the view's `videoGravity`. The resize is pinned by a macOS test; the curve on tvOS is not measured yet.
+- **Returns false** in PiP, on external playback, without video, or when no frame could be read. Nothing is held then. Playback was paused if a read ran, so a host that does not load after all calls `play()`.
+- Not checked on a device yet: whether an HDR or Dolby Vision still in a small tile keeps the panel's mode on every TV.
 
 ### Picture in Picture on the software path
 

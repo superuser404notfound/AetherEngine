@@ -39,8 +39,9 @@ struct PictureWaitCancellationTests {
         let url = try #require(URL(string: "http://127.0.0.1:\(port)/still.mp4"))
         let start = ContinuousClock.now
         let task = Task { @MainActor in
-            await presenter.show(file: url, pastFirstFrameBy: 0, gravity: .resizeAspect, on: host,
-                                 bounds: CGRect(x: 0, y: 0, width: 160, height: 90), budgetSeconds: 600)
+            await presenter.show(file: url, pastFirstFrameBy: 0, gravity: .resizeAspect,
+                                 mount: .sublayer(of: host, bounds: CGRect(x: 0, y: 0, width: 160, height: 90)),
+                                 budgetSeconds: 600)
         }
         task.cancel()
         #expect(await task.value == false)

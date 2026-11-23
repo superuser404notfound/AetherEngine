@@ -58,7 +58,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+InterruptionGuard.swift` | F5: keeps a transport `play()` during an audio-session interruption from restarting a renderer path's clock. |
 | `AetherEngine+LiveAudioDrop.swift` | AE#641: a live channel whose audio the bridge builds but cannot decode plays video-only instead of stalling. |
 | `AetherEngine+RendererClockTestHooks.swift` | DEBUG-only hooks for the aetherctl `--host-calls stallclock` drill (AE#549): a master clock stopped by something other than the host. |
-| `AetherEngine+HeldPicture.swift` | Holds the current picture on a `HeldStillSurface` across an in-place item swap (audio-track switch), with a timeout if the next item never shows a frame. |
+| `AetherEngine+HeldPicture.swift` | Holds the current picture on a `HeldStillSurface` across an in-place item swap (audio-track switch), with a timeout if the next item never shows a frame. Also the host's own hold across its next `load()` (`holdOutgoingPicture(on:)`, AE#1113), a separate slot released by the host. |
 | `AetherEngine+CompositorPreview.swift` | `showScrubPreview(atSeconds:in:)` and `ScrubPreviewPlacement`: compositor-drawn scrub previews for DV Profile 5 / AV1 10.0. |
 | `AetherEngine+DualLayerOutputRoute.swift` | Session lifecycle of `DualLayerOutputRoute` (`LoadOptions.dualLayerRoute == .avPlayerOutput`): prepare, start, forward-buffer cap. |
 | `AetherEngine+EnhancementLayerProbe.swift` | `probeDolbyVisionEnhancementLayer` and `DolbyVisionEnhancementLayer`: FEL or MEL from a Profile 7 source's first RPU. |
@@ -669,8 +669,8 @@ Notes:
 | File | What it does |
 | --- | --- |
 | `AetherPlayerView.swift` | One view for both paths: hosts either `AVPlayerLayer` (native) or `AVSampleBufferDisplayLayer` (software). |
-| `AetherStillView.swift` | Public transparent surface a host using AVKit binds (`bindStillView(_:)`), so a picture can be held across an item swap. |
-| `HeldStill.swift` | `HeldStillSurface` and the presenter that shows and clears a held picture on it (AE#711). |
+| `AetherStillView.swift` | Public transparent surface a host using AVKit binds (`bindStillView(_:)`), so a picture can be held across an item swap. Also the tile a host passes to `holdOutgoingPicture(on:)`. |
+| `HeldStill.swift` | `HeldStillSurface` and the presenter that shows and clears a held picture on it (AE#711). On an `AetherStillView` each still gets an autoresizing subview of its own, so it follows the view's animated frame (AE#1113). |
 | `AetherScrubPreviewView.swift` | Public scrub preview surface for DV Profile 5 / AV1 10.0, played through its own muted `AVPlayer`. |
 | `PictureInPictureAreaTracker.swift` | macOS: follows the system PiP window's size for a software session so the display layer fits it (AE#810). |
 
