@@ -16,6 +16,7 @@ Contents:
 
 - [Software decoder pipeline](#software-decoder-pipeline)
   - [How a session reaches this host](#how-a-session-reaches-this-host)
+  - [Deinterlace timing log](#deinterlace-timing-log-ae1112)
   - [VP9 hardware decode](#vp9-hardware-decode) and [VideoToolbox output metadata](#videotoolbox-output-metadata)
   - [Clock and transport](#clock-and-transport) and [rebuffering on the on-demand loop](#rebuffering-on-the-on-demand-loop)
   - [Audio channel layout and timestamps](#audio-channel-layout-and-timestamps)
@@ -74,6 +75,27 @@ Source URL ──► Demuxer ──┬─► video decoder ──► [UpscalingF
 
 - AV1 decode details and AV1 Dolby Vision: [formats.md, AV1](formats.md#av1) and [AV1 Dolby Vision](formats.md#av1-dolby-vision).
 - Atmos on this host: [Audio on the software host](#audio-on-the-software-host).
+
+### Deinterlace timing log (AE#1112)
+
+Every 240 input frames the decoder logs what the deinterlace graph cost its thread, inverse telecine included, since `fieldmatch` and `decimate` sit in the same graph:
+
+```
+[Deinterlace] timing: last 240 frames in, 192 out (bwdif_videotoolbox, inverse telecine GPU): push 0.00 ms, pull 2.74 ms, transfer 0.66 ms per input frame, max 13.48 ms; decode 0.54 ms; decoder thread held 3.95 ms per input frame against a 33.4 ms input / 41.7 ms output interval
+```
+
+- `builds` appears only when a graph was built in the window: the first frame, after a seek, at an inverse telecine cadence break. It gives the count and their total time, which also counts into `max` and `held`.
+- `push` is `av_buffersrc_add_frame_flags` (plus the check that the standing graph still fits the frame). It only queues the frame (no `AV_BUFFERSRC_FLAG_PUSH`), so it reads near zero.
+- `pull` is every `av_buffersink_get_frame` after it. The whole graph runs here: the upload, the GPU filters with their waits, and the CPU cadence filters.
+- `transfer` is the `VTPixelTransferSession` copy of each output frame out of FFmpeg's pool, on the GPU engine. The CPU engine shows `convert` instead, the `sws_scale` into a pixel buffer.
+- `max` is the worst single input frame's build, push, pulls and copies.
+- `out` counts every frame the graph returned, including second fields dropped for a missing timestamp on live TS, so the output interval reflects the graph's own rate.
+- `decode` is the time this thread spent in `avcodec_send_packet` and `avcodec_receive_frame`. Under frame threading most decoding happens on libavcodec's worker threads, so this is the wait, not the whole decode.
+- `held` is the sum. The input interval is the mean PTS step between pushed frames (a seek starts the measurement again, and a step over 1 s counts as a gap). The output interval scales it by frames in over frames out, so it reads half at field rate and 5/4 after `decimate`.
+- A frame that never reaches the graph (a failed push) and the last frames an end-of-stream drain pulls do not count.
+- The label names the filter and where inverse telecine runs (`GPU`, `CPU` or `off`), so a line reads without the `engaged` line a log ring may have dropped. A new chain starts a new window.
+
+Numbers from a Mac: [measurements.md › Deinterlace graph cost](measurements.md#deinterlace-graph-cost-ae1112).
 
 ### VP9 hardware decode
 

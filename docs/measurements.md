@@ -401,6 +401,23 @@ Samples were taken at the start position and, for the comparison below, at the m
 
 Measurements behind [architecture.md](architecture.md), [architecture-native.md](architecture-native.md) and [architecture-software.md](architecture-software.md).
 
+### Deinterlace graph cost (AE#1112)
+
+Measured on 2026-11-23 on a MacBook Air (M1, macOS) with a release `aetherctl play`, FFmpegBuild 3.19.0, the default GPU engine. The figures are the steady `[Deinterlace] timing` windows of two runs per chain (the first window of a run includes the graph's start and reads a higher `max`). Per input frame, in ms.
+
+Current rule: [architecture-software.md › Deinterlace timing log](architecture-software.md#deinterlace-timing-log-ae1112).
+
+| Source | Chain | Out per 240 in | pull | transfer | decode | held | Input / output interval |
+|---|---|---|---|---|---|---|---|
+| 1080i MPEG-2, 29.97 (`testsrc2`, 15 Mbit/s) | `bwdif_videotoolbox`, field rate | 480 | 6.1-6.2 | 3.8-3.9 | 1.4-1.7 | 11.3-11.8 | 33.4 / 16.7 |
+| 480i MPEG-2, 3:2 telecined 23.976 film | GPU inverse telecine + `bwdif_videotoolbox` | 192 | 2.7-2.8 | 0.6-0.7 | 0.5 | 3.9 | 33.4 / 41.7 |
+| Same file, `--inverse-telecine off` | `bwdif_videotoolbox`, field rate | 480 | 2.6-2.7 | 1.7-1.8 | 0.7 | 5.0-5.2 | 33.4 / 16.7 |
+
+- `push` read 0.00-0.01 ms on every chain: the buffer source only queues, the graph runs in `pull`.
+- The copy out of FFmpeg's pool costs about a third of the graph at 1080i (3.9 ms for two output frames).
+- `decode` is this thread's wait in libavcodec, not the decode itself: MPEG-2 decodes on frame threads.
+- None of this is an Apple TV figure. The decoder thread's share of a 16.7 ms field interval is what an Apple TV log should be read against.
+
 ### Segment cutting by decode time
 
 Observed: comparing a packet's DTS against PTS-valued boundaries split GOPs across segments and showed blocky corruption after a rebuffer. That is why every segment now opens on its own random-access point.

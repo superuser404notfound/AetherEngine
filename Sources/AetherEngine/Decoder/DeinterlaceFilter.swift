@@ -136,6 +136,8 @@ final class DeinterlaceFilter {
 
     /// True while the built graph runs inverse telecine (#853).
     private(set) var builtInverseTelecine = false
+    /// Graphs built so far, so a caller can tell a build from the check of a graph already standing (AE#1112).
+    private(set) var graphBuilds = 0
 
     /// True while that inverse telecine runs on the GPU (AE#1108).
     private(set) var builtInverseTelecineHardware = false
@@ -498,6 +500,7 @@ final class DeinterlaceFilter {
         }
 
         built = true
+        graphBuilds &+= 1
         graph = g
         srcCtx = src
         sinkCtx = sink

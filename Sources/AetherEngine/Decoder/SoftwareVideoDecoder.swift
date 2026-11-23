@@ -177,6 +177,13 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// Engaged lazily on first interlaced frame; every subsequent frame routes through it. Guarded by `lock`.
     private let deinterlacer = DeinterlaceFilter()
 
+    /// AE#1112: the `[Deinterlace] timing` window. Guarded by `lock`, like the graph it times.
+    private var deinterlaceTiming = DeinterlaceTimingWindow()
+
+    private static func elapsedMs(since startNs: UInt64) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds &- startNs) / 1_000_000
+    }
+
     /// Deinterlacer selection + cadence from LoadOptions. Set by the host BEFORE `open`;
     /// applied to the filter there (mutating it mid-stream would need a graph rebuild).
     var deinterlaceConfig = DeinterlaceConfig()
@@ -434,7 +441,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // happens first and the send never runs.
         if let epoch, epoch != _feedEpoch { lock.unlock(); return }
         guard let ctx = codecContext else { lock.unlock(); return }
+        var sendStart = DispatchTime.now().uptimeNanoseconds
         var sendRet = avcodec_send_packet(ctx, packet)
+        if deinterlacer.isActive { deinterlaceTiming.addDecode(ms: Self.elapsedMs(since: sendStart)) }
         lock.unlock()
 
         if Self.disposition(forSendResult: sendRet) == .drainAndRetry {
@@ -442,7 +451,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             lock.lock()
             // Audit DEC-1: the drain drops the lock between frames, so a flush can land in it.
             if let epoch, epoch != _feedEpoch { lock.unlock(); return }
+            sendStart = DispatchTime.now().uptimeNanoseconds
             sendRet = codecContext == nil ? FFmpegErr.einval : avcodec_send_packet(ctx, packet)
+            if deinterlacer.isActive { deinterlaceTiming.addDecode(ms: Self.elapsedMs(since: sendStart)) }
             lock.unlock()
         }
         if Self.disposition(forSendResult: sendRet) == .dropped, !loggedSendFailure {
@@ -469,8 +480,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         while true {
             lock.lock()
             guard codecContext != nil else { lock.unlock(); break }
+            let receiveStart = DispatchTime.now().uptimeNanoseconds
             let ret = avcodec_receive_frame(ctx, f)
-            guard ret >= 0 else { lock.unlock(); break }
+            let receiveMs = Self.elapsedMs(since: receiveStart)
+            guard ret >= 0 else {
+                if deinterlacer.isActive { deinterlaceTiming.addDecode(ms: receiveMs) }
+                lock.unlock()
+                break
+            }
 
             // AE#499: fill the fields the VUI left open from the container's declaration BEFORE any
             // consumer reads the frame, for the same reason the timestamp repair below runs here.
@@ -522,6 +539,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             }
 
             let isInterlaced = (f.pointee.flags & (1 << 3)) != 0  // AV_FRAME_FLAG_INTERLACED
+            if isInterlaced || deinterlacer.isActive { deinterlaceTiming.addDecode(ms: receiveMs) }
             // #853: decimate stamps its output from the graph's first frame plus one tick per frame, so a
             // source frame that never arrived would shift every later picture against the audio. Flush
             // what the graph holds and let this frame build a fresh one that anchors on it.
@@ -531,16 +549,41 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 deinterlacer.teardown()
             }
             if isInterlaced || deinterlacer.isActive {
-                if deinterlacer.ensureGraph(frame: f, timeBase: timeBase),
-                   deinterlacer.push(f) >= 0 {
-                    decodedFormatKey?.deinterlace = deinterlacer.activeDeinterlace
-                    av_frame_unref(f)
-                    if filtered == nil { filtered = av_frame_alloc() }
-                    if let out = filtered { emitFilteredFramesLocked(out) }
-                    lock.unlock()
-                    continue
+                let buildsBefore = deinterlacer.graphBuilds
+                let ensureStart = DispatchTime.now().uptimeNanoseconds
+                let graphReady = deinterlacer.ensureGraph(frame: f, timeBase: timeBase)
+                let ensureMs = Self.elapsedMs(since: ensureStart)
+                if deinterlacer.graphBuilds != buildsBefore {
+                    deinterlaceTiming.addBuild(ms: ensureMs)
+                } else {
+                    deinterlaceTiming.addPush(ms: ensureMs)
+                }
+                if graphReady {
+                    let pushStart = DispatchTime.now().uptimeNanoseconds
+                    let pushRet = deinterlacer.push(f)
+                    deinterlaceTiming.addPush(ms: Self.elapsedMs(since: pushStart))
+                    if pushRet >= 0 {
+                        let active = deinterlacer.activeDeinterlace
+                        decodedFormatKey?.deinterlace = active
+                        let pts = f.pointee.pts
+                        av_frame_unref(f)
+                        if filtered == nil { filtered = av_frame_alloc() }
+                        if let out = filtered { emitFilteredFramesLocked(out) }
+                        if let active {
+                            let seconds = pts != Int64.min && timeBase.den > 0
+                                ? Double(pts) * Double(timeBase.num) / Double(timeBase.den) : nil
+                            if let report = deinterlaceTiming.finishInput(
+                                label: DeinterlaceTimingWindow.label(for: active), ptsSeconds: seconds
+                            ) {
+                                EngineLog.emit(report.logLine, category: .swPlayback)
+                            }
+                        }
+                        lock.unlock()
+                        continue
+                    }
                 }
                 // No deinterlacer in linked build or graph failure: fall through and render as-is (combing, but playing).
+                deinterlaceTiming.discardPending()
             }
             // emit() must stay under `lock`: close() frees swsContext/pixelBufferPool under the same lock;
             // emitting unlocked raced a stop() into a use-after-free of the sws context.
@@ -556,11 +599,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// A pull error other than EAGAIN or EOF drops the graph (DEC-202).
     private func emitFilteredFramesLocked(_ out: UnsafeMutablePointer<AVFrame>) {
         while true {
+            let pullStart = DispatchTime.now().uptimeNanoseconds
             let ret = deinterlacer.pull(into: out)  // filter holds 1-2 frames lookahead; push can yield EAGAIN
+            deinterlaceTiming.addPull(ms: Self.elapsedMs(since: pullStart))
             guard ret >= 0 else {
                 deinterlacer.noteGraphError(afterPull: ret)
                 break
             }
+            deinterlaceTiming.addOutput()
             // Untimestamped output is unschedulable: yadif's SECOND field is
             // cur.pts + next.pts, which is NOPTS whenever either source frame
             // lacked a PTS (live TS delivers those); an invalid-PTS sample
@@ -580,7 +626,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // Filtered PTS rides the sink's time_base, NOT the stream's: yadif/bwdif
             // halve the link time_base, and send_field puts the two fields of a frame
             // on odd/even ticks of that halved base (see DeinterlaceFilter class doc).
-            emit(out, timeBase: deinterlacer.outputTimeBase)
+            emit(out, timeBase: deinterlacer.outputTimeBase, fromGraph: true)
             av_frame_unref(out)
         }
     }
@@ -591,17 +637,18 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// `DeinterlaceFilter.outputTimeBase` for filtered ones (halved by yadif/bwdif; with
     /// send_field the fields sit on odd/even ticks, so rescaling into the stream base would
     /// collapse each pair to duplicate timestamps).
-    private func emit(_ f: UnsafeMutablePointer<AVFrame>, timeBase tb: AVRational) {
+    /// `fromGraph` marks a deinterlaced frame, whose copy into a pixel buffer `[Deinterlace] timing` counts.
+    private func emit(_ f: UnsafeMutablePointer<AVFrame>, timeBase tb: AVRational, fromGraph: Bool = false) {
         // Per-frame autorelease pool: the decode/feed loops are single long-running dispatch
         // blocks, so without this, ObjC transients (VTPixelTransferSession internals, CV
         // bridging) accumulate in the block's last-resort pool and only pop at session end,
         // AFTER close() tore the session down, crashing the pop with an over-release
         // (EXC_BAD_ACCESS in AutoreleasePoolPage::releaseUntil on engine.sw.feed), and
         // bloating memory for the whole channel visit meanwhile.
-        autoreleasepool { emitInner(f, timeBase: tb) }
+        autoreleasepool { emitInner(f, timeBase: tb, fromGraph: fromGraph) }
     }
 
-    private func emitInner(_ f: UnsafeMutablePointer<AVFrame>, timeBase tb: AVRational) {
+    private func emitInner(_ f: UnsafeMutablePointer<AVFrame>, timeBase tb: AVRational, fromGraph: Bool) {
         let cmPTS = SourceTimestampBounds.cmTime(ticks: f.pointee.pts, timeBase: tb)
         skipLock.lock()
         _framesDecoded &+= 1
@@ -627,7 +674,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // same attributes the sw path has always displayed); still no sws, no CPU copy.
             guard let raw = f.pointee.data.3 else { return }
             let src = Unmanaged<CVPixelBuffer>.fromOpaque(UnsafeRawPointer(raw)).takeUnretainedValue()
-            if let copied = transferToOwnPool(src) {
+            let transferStart = fromGraph ? DispatchTime.now().uptimeNanoseconds : 0
+            let transferred = transferToOwnPool(src)
+            if fromGraph { deinterlaceTiming.addTransfer(ms: Self.elapsedMs(since: transferStart)) }
+            if let copied = transferred {
                 pixelBuffer = copied
             } else {
                 // Transfer unavailable: pass the pool buffer through (frozen-plane risk, but
@@ -641,7 +691,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             attachColorSpace(from: f, to: pixelBuffer)
             attachPixelAspectRatio(from: f, to: pixelBuffer)
         } else {
-            guard let converted = convertFrameToPixelBuffer(f) else { return }
+            let convertStart = fromGraph ? DispatchTime.now().uptimeNanoseconds : 0
+            let converted = convertFrameToPixelBuffer(f)
+            if fromGraph { deinterlaceTiming.addConvert(ms: Self.elapsedMs(since: convertStart)) }
+            guard let converted else { return }
             pixelBuffer = converted
         }
         if attachesAV1DolbyVisionRPU {
@@ -743,6 +796,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         // An EOF'ed graph takes no more input, whatever the caller's flush asks for.
         deinterlacer.teardown()
+        // The last frames had no input frame of their own; a seek follows.
+        deinterlaceTiming.noteDiscontinuity()
     }
 
     func flush(resetFilterGraph: Bool) {
@@ -756,6 +811,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         deliveryLock.unlock()
         // Deinterlacer temporal references are stale across seeks; drop the graph (lazily rebuilt on next interlaced frame).
         if resetFilterGraph { deinterlacer.teardown() }
+        deinterlaceTiming.noteDiscontinuity()
         rpuTable.removeAll()
         if let ctx = codecContext { avcodec_flush_buffers(ctx) }
         let pipeline = conversionPipeline

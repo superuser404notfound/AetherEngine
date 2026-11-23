@@ -1036,6 +1036,8 @@ Nothing binds a render surface in a CLI run, so the absolute drop level belongs 
 
 That is the GPU cadence (#1108). When it cannot run (see [formats › Inverse telecine](formats.md#inverse-telecine)), `fieldmatch` and `decimate` sit before `format=nv12,hwupload` on the CPU instead, and a build failure logs a line saying so.
 
+Every 240 source frames a `[Deinterlace] timing` line follows (AE#1112). Under inverse telecine it reads `240 frames in, 192 out` and an output interval of 41.7 ms; the fields are explained in [architecture-software › Deinterlace timing log](architecture-software.md#deinterlace-timing-log-ae1112).
+
 With `--frame-times` the output reads `ft=24` a second and the `[SWDiag]` lines `dpts=41.7/41.7`; the deinterlacer alone reads `ft=60` at field rate. The sample's cost to the first frame over a throttled origin is in [measurements › Inverse telecine](measurements.md#inverse-telecine-853).
 
 ### Frame times (`--frame-times`, `--present-times`)
