@@ -94,6 +94,12 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         tracks.firstIndex { $0.externalID == id }
     }
 
+    /// AE#984: whether AVPlayer's last request for this rendition was answered "not yet".
+    func renditionWasRefused(ordinal: Int) -> Bool {
+        guard ordinal >= 0, ordinal < stores.count else { return false }
+        return stores[ordinal].wasRefusedWhilePending
+    }
+
     /// AE#984: what a `.vtt` request for this rendition would get right now.
     func renditionServe(ordinal: Int) -> NativeSubtitleCueStore.WholeProgramServe? {
         guard ordinal >= 0, ordinal < stores.count else { return nil }
@@ -182,13 +188,14 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         if serve == .retryLater {
             // The engine selects a rendition only once its sidecar is in, so a request for a pending one
             // means something else selected it (AVKit's own menu). Its sidecar goes next.
-            fillQueue.prioritize(store)
+            store.noteRefusedWhilePending()
             EngineLog.emit(
                 "[AetherEngine] AE#984: subtitle rendition ord=\(ordinal) requested before its sidecar is "
                 + "decoded; answering 404 so AVPlayer asks again, and fetching it next", category: .hlsServer)
             return nil
         }
         let cues = store.allCues()
+        store.noteServed()
         if serve != .complete {
             let why = serve == .failedFill ? "could not be read" : "has no decode running"
             EngineLog.emit(

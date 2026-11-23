@@ -98,6 +98,25 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
     }
     var externalFillState: ExternalFill { lock.lock(); defer { lock.unlock() }; return externalFill }
 
+    /// AE#984: set by the fill queue that owns this store's decode. A rendition request that finds the
+    /// decode still running calls it, because the engine's own select never asks for a pending one:
+    /// something else (AVKit's menu) selected the track, so its sidecar should go next.
+    var onRequestWhilePending: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return requestWhilePendingHandler }
+        set { lock.lock(); requestWhilePendingHandler = newValue; lock.unlock() }
+    }
+    private var requestWhilePendingHandler: (@Sendable () -> Void)?
+
+    /// AE#984: whether the last whole-program answer for this rendition was "not yet". AVPlayer stops
+    /// asking after enough of them, so a later select has to deselect and reselect to make it fetch.
+    func noteRefusedWhilePending() {
+        lock.lock(); refusedWhilePending = true; let handler = requestWhilePendingHandler; lock.unlock()
+        handler?()
+    }
+    func noteServed() { lock.lock(); refusedWhilePending = false; lock.unlock() }
+    var wasRefusedWhilePending: Bool { lock.lock(); defer { lock.unlock() }; return refusedWhilePending }
+    private var refusedWhilePending = false
+
     /// AE#984: what a whole-program `.vtt` request gets from this store right now.
     enum WholeProgramServe: Equatable, Sendable {
         /// Every cue is in: serve the file.

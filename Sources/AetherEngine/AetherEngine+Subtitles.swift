@@ -3465,24 +3465,26 @@ extension AetherEngine {
                     serve: { provider.renditionServe(ordinal: ordinal) }, isCurrent: isCurrent)
                 guard outcome != .superseded else { return }
                 self.isLoadingSubtitles = false
-                let waited = String(format: "%.1f", Date().timeIntervalSince(began))
+                let waitedSeconds = String(format: "%.1f", Date().timeIntervalSince(began))
                 if outcome == .failed {
                     // Nothing to draw, and selecting it would hand AVPlayer an empty file it keeps for
                     // the session. A later pick of the same track fetches the sidecar again. The pick
                     // stays published, as on the overlay path when a sidecar decode fails.
                     EngineLog.emit(
                         "[AetherEngine] AE#984: the sidecar for injected rendition \"\(name)\" could not be "
-                        + "read after \(waited)s; leaving it unselected", category: .engine)
+                        + "read after \(waitedSeconds)s; leaving it unselected", category: .engine)
                     return
                 }
                 EngineLog.emit(
-                    "[AetherEngine] AE#984: sidecar for injected rendition \"\(name)\" ready after \(waited)s",
+                    "[AetherEngine] AE#984: sidecar for injected rendition \"\(name)\" ready after \(waitedSeconds)s",
                     category: .engine)
             }
-            if waited, item.currentMediaSelection.selectedMediaOption(in: group) == option {
+            let refused = provider.flatMap { p in ordinal.map { p.renditionWasRefused(ordinal: $0) } } ?? false
+            if waited || refused, item.currentMediaSelection.selectedMediaOption(in: group) == option {
                 // Something else selected it while it was pending, so AVPlayer may hold a 404 or an empty
-                // answer for it. A deselect and reselect makes it fetch the file again (golfista: refetched
-                // within a second). A plain re-pick of a finished rendition skips this and stays a no-op.
+                // answer for it, and after enough 404s it stops asking. A deselect and reselect makes it
+                // fetch the file again (golfista: refetched within a second). A plain re-pick of a
+                // finished rendition AVPlayer already has skips this and stays a no-op.
                 item.select(nil, in: group)
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 guard isCurrent() else { return }

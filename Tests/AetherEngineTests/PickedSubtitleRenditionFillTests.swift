@@ -113,6 +113,45 @@ struct PickedSubtitleRenditionFillTests {
         #expect(provider.nativeSubtitleVTT(ordinal: 1, segmentIndex: 0)?.contains("/b.vtt") == true)
     }
 
+    @Test("A request for a rendition never overtakes the host's pick that is still on its way",
+          .timeLimit(.minutes(3)))
+    func requestDoesNotOvertakeHostPick() async throws {
+        let paths = ["/a.vtt", "/b.vtt"]
+        let origin = try #require(SidecarOrigin(files: Dictionary(
+            uniqueKeysWithValues: paths.map { ($0, Self.vtt($0)) }), delaySeconds: 1))
+        defer { origin.stop() }
+        let provider = Self.provider(origin, paths: paths)
+        defer { provider.cancelFill() }
+
+        provider.startFill(holdingUnpicked: true)
+        provider.prioritizeFill(ordinal: 0)      // the host picked A
+        #expect(provider.nativeSubtitleVTT(ordinal: 1, segmentIndex: 0) == nil)   // AVPlayer still on B
+        #expect(provider.renditionWasRefused(ordinal: 1))
+        await provider.awaitFill()
+        #expect(origin.requests.map(\.path).first == "/a.vtt")
+        #expect(provider.renditionServe(ordinal: 0) == .complete)
+
+        // Once the host's pick is in, a request for B is a pick of its own.
+        _ = provider.nativeSubtitleVTT(ordinal: 1, segmentIndex: 0)
+        await provider.awaitFill()
+        #expect(origin.requests.map(\.path) == ["/a.vtt", "/b.vtt"])
+        #expect(provider.nativeSubtitleVTT(ordinal: 1, segmentIndex: 0)?.contains("/b.vtt") == true)
+        #expect(!provider.renditionWasRefused(ordinal: 1), "a full answer clears the refusal")
+    }
+
+    @Test("Starting the fills again over the same stores keeps them pending throughout",
+          .timeLimit(.minutes(3)))
+    func restartKeepsStoresPending() async throws {
+        let origin = try #require(SidecarOrigin(files: ["/a.vtt": Self.vtt("A")]))
+        defer { origin.stop() }
+        let provider = Self.provider(origin, paths: ["/a.vtt"])
+        defer { provider.cancelFill() }
+
+        provider.startFill(holdingUnpicked: true)
+        provider.startFill(holdingUnpicked: true)
+        #expect(provider.renditionServe(ordinal: 0) == .retryLater)
+    }
+
     @Test("Cancelling the fills tells a waiting select they are not coming", .timeLimit(.minutes(3)))
     func cancelMarksStrandedStoresFailed() async throws {
         let origin = try #require(SidecarOrigin(files: ["/a.vtt": Self.vtt("A")]))

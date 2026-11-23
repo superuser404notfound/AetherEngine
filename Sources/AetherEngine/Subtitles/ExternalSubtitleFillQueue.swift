@@ -29,9 +29,18 @@ final class ExternalSubtitleFillQueue: @unchecked Sendable {
     /// Replaces whatever ran before. Every store is marked pending at once, so a `.vtt` request that
     /// lands before its decode is answered "not yet" rather than held.
     func start(_ jobs: [Job], holdingUnpicked: Bool) {
-        cancel()
+        // A store this run fills again goes straight from pending to pending: marking it failed in
+        // between would end a select that is waiting for it.
+        let refilled = Set(jobs.flatMap(\.targets).map { ObjectIdentifier($0.store) })
+        cancel(keepingPending: refilled)
         guard !jobs.isEmpty else { return }
         jobs.forEach { $0.markPending() }
+        for target in jobs.flatMap(\.targets) {
+            target.store.onRequestWhilePending = { [weak self, weak store = target.store] in
+                guard let self, let store else { return }
+                self.prioritizeRequested(store)
+            }
+        }
         lock.lock()
         cancelled = false
         allJobs = jobs
@@ -44,7 +53,9 @@ final class ExternalSubtitleFillQueue: @unchecked Sendable {
 
     /// Stops the running decode and drops the rest. A store left unfinished is marked failed: nothing
     /// will fill it now, and a select waiting for it must hear that rather than wait for good.
-    func cancel() {
+    func cancel() { cancel(keepingPending: []) }
+
+    private func cancel(keepingPending kept: Set<ObjectIdentifier>) {
         lock.lock()
         let wasRunning = !cancelled
         cancelled = true
@@ -56,20 +67,20 @@ final class ExternalSubtitleFillQueue: @unchecked Sendable {
         lock.unlock()
         task?.cancel()
         guard wasRunning else { return }
-        for target in stranded.flatMap(\.targets) { target.store.markExternalFillFailed() }
+        for target in stranded.flatMap(\.targets) where !kept.contains(ObjectIdentifier(target.store)) {
+            target.store.markExternalFillFailed()
+        }
     }
 
     /// The host picked the track `store` backs. Its job moves to the front and takes over from a
     /// running job that serves only other tracks; that one goes back in right behind it, so its decode
     /// is the next to resume. A store that failed earlier (a 120 s idle timeout on a server still
-    /// extracting) gets one more attempt. Returns false when nothing is queued for the store.
-    @discardableResult
-    func prioritize(_ store: NativeSubtitleCueStore) -> Bool {
+    /// extracting) gets one more attempt.
+    func prioritize(_ store: NativeSubtitleCueStore) {
         var preempted: Task<Void, Never>?
         lock.lock()
-        guard !cancelled else { lock.unlock(); return false }
+        guard !cancelled else { lock.unlock(); return }
         pickedStore = store
-        var queuedForStore = true
         if let index = queued.firstIndex(where: { Self.job($0, serves: store) }) {
             queued.insert(queued.remove(at: index), at: 0)
         } else if store.externalFillState == .failed,
@@ -79,19 +90,32 @@ final class ExternalSubtitleFillQueue: @unchecked Sendable {
             queued.insert(retry, at: 0)
             EngineLog.emit("[AetherEngine] AE#984: a sidecar was picked after its fill failed; "
                            + "fetching it once more", category: .engine)
-        } else {
-            queuedForStore = running.map { Self.job($0.job, serves: store) } ?? false
         }
         if let current = running, !Self.job(current.job, serves: store),
            queued.first.map({ Self.job($0, serves: store) }) == true {
             preempted = current.task
-            queued.insert(current.job, at: 1)
+            // Only what it has not finished: a container's per-target pass may have filled some.
+            let rest = current.job.targets.filter { !$0.store.isFinished }
+            if !rest.isEmpty {
+                queued.insert(Job(url: current.job.url, headers: current.job.headers, targets: rest,
+                                  formatHint: current.job.formatHint), at: 1)
+            }
             running = nil
         }
         lock.unlock()
         preempted?.cancel()
         runNext()
-        return queuedForStore
+    }
+
+    /// A rendition request found `store` still decoding. That is a pick too, but one the host did not
+    /// make, so it never overtakes a host pick whose sidecar is still on its way.
+    private func prioritizeRequested(_ store: NativeSubtitleCueStore) {
+        lock.lock()
+        let hostPickPending = pickedStore.map { $0 !== store && !$0.isFinished
+            && $0.externalFillState == .pending } ?? false
+        lock.unlock()
+        guard !hostPickPending else { return }
+        prioritize(store)
     }
 
     /// Lets the jobs nobody picked run.

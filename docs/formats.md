@@ -1322,7 +1322,7 @@ External subtitle files register with the engine and appear in `subtitleTracks` 
   - Their store is filled by one whole-file decode at load (one pass per container, covering every track pointing at it) and marked finished.
   - The decodes run one at a time, and a pick moves its own to the front (AE#984).
   - A select waits for that decode before it hands AVPlayer the rendition, however long the server takes. It used to give up after 15 s and never select the track. A sidecar that could not be read leaves it unselected, and picking it again fetches it once more.
-  - A segment of a failed sidecar is served empty at once. A segment of one still decoding keeps the short readiness wait: a 404 on a selected rendition before `readyToPlay` fails the item, as measured on the bypass below.
+  - A segment of a failed sidecar is served empty at once. A segment of one still decoding keeps the short readiness wait: a 404 on a selected rendition before `readyToPlay` fails the item, as measured on the bypass below. The request also moves that sidecar to the front, as on the bypass.
   - A finished store also backfills the fullscreen overlay instantly on select (no re-download; styled-ASS selections re-decode to keep raw markup).
   - A store that could not be filled stays unfinished rather than serving a complete but blank `.vtt`.
   - Tracks added after load are host-overlay only until the next load, because the rendition set is fixed in the master playlist at item creation.
@@ -1349,7 +1349,7 @@ The media never moves: AVPlayer still fetches A/V straight from the origin, whic
 
   A sidecar that cannot be read leaves the rendition unselected, and picking the track again fetches it once more. The pick stays published either way, as on the overlay path when a sidecar decode fails.
 - **The picked sidecar is fetched first.** Fills run one at a time, because each one can be an extraction the server runs from the file it is transcoding. Only the picked track's fill starts at load; the others wait until the item is ready to play. A pick takes over from a running fill of another track, which resumes right after it.
-- **A `.vtt` that is asked for early is answered 404, never held.** That only happens when something else selects the rendition (AVKit's own menu, for one), so the request also moves that sidecar to the front. AVPlayer retries every few seconds and gets the complete file on the first retry after the decode. A long wait still costs what is measured above, which is why the engine's own select never takes this route. A sidecar that could not be read is served empty at once.
+- **A `.vtt` that is asked for early is answered 404, never held.** That only happens when something else selects the rendition (AVKit's own menu, for one), so the request also moves that sidecar to the front, unless the host's own pick is still on its way. AVPlayer retries every few seconds and gets the complete file on the first retry after the decode. A long wait still costs what is measured above, which is why the engine's own select never takes this route. After such 404s AVPlayer can stop asking, so a later pick of that track deselects and reselects it to make AVPlayer fetch it again. A sidecar that could not be read is served empty at once.
 
 ### Track selection by language preference
 
