@@ -93,7 +93,7 @@ enum SubtitleRectText {
     ///
     /// Text drawn in ASS drawing mode goes: it is vector commands (`m 10 20 l 30 40`), not words.
     /// Anime typesetting uses drawings for boxes and masks, and these came out as rows of numbers.
-    /// Drawing starts at `\p1` or higher and ends at `\p0`, a bare `\p` or a `\r` reset
+    /// Drawing starts at `\p1` or higher and ends at `\p0` or a bare `\p`, for the rest of the event
     /// (`drawingScale(inBlock:)` reads the tags).
     ///
     /// Audit SUB-101: this was `\\{[^}]*\\}` through `NSRegularExpression`, which rescans to the end
@@ -125,13 +125,14 @@ enum SubtitleRectText {
     }
 
     /// The drawing scale an override block leaves in force, or nil when it changes nothing. Read the
-    /// way libass reads it, and the last tag that sets it wins:
+    /// way libass's `ass_parse_tags` reads it, and the last tag that sets it wins:
     ///
-    /// - `\p<n>` sets it to `n`: the argument's leading integer after any spaces, so `\p 1` draws, and
-    ///   0 when there is none, so a bare `\p` ends drawing.
-    /// - `\r` and `\r<style>` reset it to 0, as they reset every override (`\rnd` is a different tag).
-    /// - `\pos(...)` and `\pbo<n>` are other tags, and tags inside the parentheses of `\t(...)` are
-    ///   not read (`\p` cannot be animated).
+    /// - `\p<n>` sets it to `n`, parsed like `strtoll`: leading spaces and a sign are fine, so `\p 1`
+    ///   draws, and a bare `\p` or a negative value is 0 and ends drawing.
+    /// - Tags inside `\t(...)` count, because libass parses them like any other tag and `\p` has no
+    ///   animation guard. Inside the parentheses of any other tag they are only an argument.
+    /// - `\pos(...)` and `\pbo<n>` are other tags. `\r` does not end drawing: libass resets the
+    ///   scale only at the start of an event (`init_render_context`), not in `ass_reset_render_context`.
     static func drawingScale<Bytes: Collection>(inBlock block: Bytes) -> Int? where Bytes.Element == UInt8 {
         var scale: Int?
         var tag: [UInt8] = []
@@ -139,26 +140,32 @@ enum SubtitleRectText {
         var depth = 0
         func finish() {
             defer { tag.removeAll(keepingCapacity: true) }
-            guard let first = tag.first else { return }
-            if first == 0x72 { // "r"
-                if !tag.starts(with: "rnd".utf8) { scale = 0 }
-                return
+            guard tag.first == 0x70, !tag.starts(with: "pos".utf8), !tag.starts(with: "pbo".utf8) else { return }
+            var digits = tag.dropFirst().drop(while: { $0 == 0x20 || $0 == 0x09 })
+            var negative = false
+            if let sign = digits.first, sign == 0x2B || sign == 0x2D {
+                negative = sign == 0x2D
+                digits = digits.dropFirst()
             }
-            guard first == 0x70, !tag.starts(with: "pos".utf8), !tag.starts(with: "pbo".utf8) else { return }
             var value = 0
-            for byte in tag.dropFirst().drop(while: { $0 == 0x20 || $0 == 0x09 }) {
+            for byte in digits {
                 guard (0x30...0x39).contains(byte) else { break }
                 value = min(value * 10 + Int(byte - 0x30), 1_000)
             }
-            scale = value
+            scale = negative ? 0 : value
         }
         for byte in block {
-            if byte == 0x5C, depth == 0 { // a backslash outside parentheses starts a new tag
+            if byte == 0x5C, depth == 0 { // a backslash outside an argument list starts a new tag
                 finish()
                 inTag = true
                 continue
             }
-            if byte == 0x28 { depth += 1 }
+            // libass skips spaces between the backslash and the tag name.
+            if inTag, tag.isEmpty, byte == 0x20 || byte == 0x09 { continue }
+            if byte == 0x28 {
+                // `\t(` holds tags that libass parses again, so its parentheses do not hide them.
+                if !(inTag && tag.first == 0x74) { depth += 1 }
+            }
             if byte == 0x29 { depth = max(0, depth - 1) }
             if inTag { tag.append(byte) }
         }

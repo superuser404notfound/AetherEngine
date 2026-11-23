@@ -42,15 +42,14 @@ struct ASSDrawingTextTests {
         #expect(SubtitleRectText.drawingScale(inBlock: "\\an7\\pos(1,2)".utf8) == nil)
     }
 
-    @Test("a \\r reset ends drawing mode, as in libass")
-    func resetEndsDrawing() {
-        #expect(SubtitleRectText.cleanASSBody("{\\p1}m 0 0 l 100 0 100 100{\\r}Sign text") == "Sign text")
-        #expect(SubtitleRectText.cleanASSBody("{\\p1}m 0 0 l 1 1{\\rAlt}Sign text") == "Sign text")
-        #expect(SubtitleRectText.styledRuns(fromASSEventLine: "0,0,Signs,,0,0,0,,{\\p1}m 0 0 l 1 1{\\r}Sign")?
-            .runs.map(\.text).joined() == "Sign")
-        // A reset and a new drawing in one block: the last one wins.
+    @Test("a \\r reset does not end drawing mode, as in libass")
+    func resetKeepsDrawing() {
+        // libass zeroes the drawing scale only when an event starts, never in its \r reset.
+        #expect(SubtitleRectText.cleanASSBody("{\\p1}m 0 0 l 100 0 100 100{\\r}m 5 5 l 6 6") == nil)
+        #expect(SubtitleRectText.cleanASSBody("{\\p1}m 0 0 l 1 1{\\rAlt\\p0}Sign text") == "Sign text")
+        #expect(SubtitleRectText.styledRuns(fromASSEventLine: "0,0,Signs,,0,0,0,,{\\p1}m 0 0 l 1 1{\\r}m 2 2") == nil)
+        #expect(SubtitleRectText.drawingScale(inBlock: "\\r".utf8) == nil)
         #expect(SubtitleRectText.drawingScale(inBlock: "\\r\\p1".utf8) == 1)
-        #expect(SubtitleRectText.drawingScale(inBlock: "\\rnd2".utf8) == nil)
     }
 
     @Test("the \\p argument is read as libass reads it")
@@ -60,10 +59,22 @@ struct ASSDrawingTextTests {
         #expect(SubtitleRectText.drawingScale(inBlock: "\\p2.5".utf8) == 2)
     }
 
-    @Test("a \\p inside \\t(...) is not drawing mode")
-    func animatedDrawingTagIgnored() {
-        #expect(SubtitleRectText.cleanASSBody("{\\t(0,200,\\p1)}Hello") == "Hello")
+    @Test("a \\p inside \\t(...) counts, as in libass")
+    func drawingTagInsideTransform() {
+        // libass parses the tags in \t(...) again, and \p has no animation guard there.
+        #expect(SubtitleRectText.cleanASSBody("{\\t(0,200,\\p1)}m 0 0 l 1 1") == nil)
+        #expect(SubtitleRectText.drawingScale(inBlock: "\\t(0,200,\\p1)".utf8) == 1)
+        #expect(SubtitleRectText.drawingScale(inBlock: "\\t(\\clip(1,2,3,4)\\p2)".utf8) == 2)
         #expect(SubtitleRectText.drawingScale(inBlock: "\\t(0,200,\\p1)\\p0".utf8) == 0)
+        // Any other tag's parentheses are only an argument.
+        #expect(SubtitleRectText.drawingScale(inBlock: "\\clip(\\p1)".utf8) == nil)
+    }
+
+    @Test("the tag name and its number are read like libass's strtoll")
+    func drawingTagSpacingAndSign() {
+        #expect(SubtitleRectText.drawingScale(inBlock: "\\ p1".utf8) == 1)
+        #expect(SubtitleRectText.drawingScale(inBlock: "\\p+2".utf8) == 2)
+        #expect(SubtitleRectText.drawingScale(inBlock: "\\p-1".utf8) == 0)
     }
 
     @Test("a stray brace while drawing doesn't bring the commands back")
