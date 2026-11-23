@@ -218,7 +218,8 @@ extension AetherEngine: SharedNowPlayingClient {
         #if os(iOS) || os(tvOS)
         // The system may have deactivated the session during the pause; AVPlayer resumed on an inactive
         // session plays nothing. Synchronous on purpose: play() must not race ahead of the activation.
-        if rendererAudioSessionActivationEnabled, state != .playing {
+        // AE#1110: an opted-in native host owns no AVKit view that would do it.
+        if rendererAudioSessionActivationEnabled || nativeAudioSessionActivationEnabled, state != .playing {
             do { try AVAudioSession.sharedInstance().setActive(true) }
             catch { EngineLog.emit("[NowPlaying] audio session reactivation failed: \(error)", category: .engine) }
         }

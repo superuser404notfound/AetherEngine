@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import AetherEngine
@@ -11,10 +12,16 @@ import Testing
 @MainActor
 struct Issue1110NativeAudioAfterPlayGateTests {
 
-    private func makeEngine(optedIn: Bool) throws -> (AetherEngine, ProbeTestBox<[String]>) {
+    /// The gate's own publishes go into the journal too, so "after the gate" is checked, not assumed:
+    /// on macOS no mode switch happens and the flag reads false on both sides of a gate that never waits.
+    private func makeEngine(optedIn: Bool) throws
+        -> (AetherEngine, ProbeTestBox<[String]>, AnyCancellable) {
         let engine = try AetherEngine()
         engine.nativeAudioSessionActivationEnabled = optedIn
         let journal = ProbeTestBox<[String]>([])
+        let gate = engine.$isAwaitingDisplaySwitch.dropFirst().removeDuplicates().sink { waiting in
+            journal.update { $0.append(waiting ? "gate entered" : "gate left") }
+        }
         engine.nativeAudioActivationForTesting = { [weak engine] in
             let host = engine?.nativeHost
             journal.update {
@@ -23,7 +30,7 @@ struct Issue1110NativeAudioAfterPlayGateTests {
                           + "gate=\(engine?.isAwaitingDisplaySwitch ?? false)")
             }
         }
-        return (engine, journal)
+        return (engine, journal, gate)
     }
 
     private func load(_ engine: AetherEngine, autoplay: Bool) async throws {
@@ -34,37 +41,41 @@ struct Issue1110NativeAudioAfterPlayGateTests {
 
     @Test("An autostarting load activates once, after the gate, before it plays")
     func autostartActivatesAfterGate() async throws {
-        let (engine, journal) = try makeEngine(optedIn: true)
-        defer { engine.stop() }
+        let (engine, journal, gate) = try makeEngine(optedIn: true)
+        defer { gate.cancel(); engine.stop() }
         try await load(engine, autoplay: true)
 
         #expect(engine.playbackBackend == .native)
-        #expect(journal.value == ["activation host=true playIntent=false gate=false"])
+        #expect(journal.value == ["gate entered", "gate left",
+                                  "activation host=true playIntent=false gate=false"])
         #expect(engine.nativeHost?.transportIntentIsPlaying == true)
     }
 
     @Test("A paused mount still activates, so a later play() finds an active session")
     func pausedMountActivatesAfterGate() async throws {
-        let (engine, journal) = try makeEngine(optedIn: true)
-        defer { engine.stop() }
+        let (engine, journal, gate) = try makeEngine(optedIn: true)
+        defer { gate.cancel(); engine.stop() }
         try await load(engine, autoplay: false)
 
-        #expect(journal.value == ["activation host=true playIntent=false gate=false"])
+        #expect(journal.value == ["gate entered", "gate left",
+                                  "activation host=true playIntent=false gate=false"])
         #expect(engine.nativeHost?.transportIntentIsPlaying == false)
     }
 
     @Test("An in-place reload activates again after its own gate")
     func reloadActivatesAfterGate() async throws {
-        let (engine, journal) = try makeEngine(optedIn: true)
-        defer { engine.stop() }
+        let (engine, journal, gate) = try makeEngine(optedIn: true)
+        defer { gate.cancel(); engine.stop() }
         try await load(engine, autoplay: true)
         let host = try #require(engine.nativeHost)
 
         try await engine.reloadAtCurrentPosition()
 
         #expect(engine.nativeHost === host)
-        #expect(journal.value.count == 2)
-        #expect(journal.value.last?.hasSuffix("gate=false") == true)
+        let activations = journal.value.filter { $0.hasPrefix("activation") }
+        #expect(activations.count == 2)
+        #expect(Array(journal.value.suffix(3)) == ["gate entered", "gate left",
+                                                   "activation host=true playIntent=false gate=false"])
     }
 
     @Test("Off by default: an AVKit host keeps activating through its player view")

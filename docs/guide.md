@@ -413,7 +413,9 @@ Audio-only sessions and hosts that turned the engine's criteria off clear leftov
 
 **If your app plays no audio of its own, set `engine.deactivatesAudioSessionOnStop = true`.**
 
-The background: the engine sets the audio session category at the first load, but never activates the session on the native path. AVKit activates it for each playback, and that is what lets tvOS negotiate the HDMI audio route ([#24](https://github.com/superuser404notfound/AetherEngine/issues/24)). So by default the engine never releases it either.
+The background: the engine sets the audio session category at the first load, but by default never activates the session on the native path. AVKit activates it for each playback, and that is what lets tvOS negotiate the HDMI audio route ([#24](https://github.com/superuser404notfound/AetherEngine/issues/24)). So by default the engine never releases it either.
+
+**If you show the native path through `AetherPlayerSurface` (the bare player layer), set `engine.nativeAudioSessionActivationEnabled = true`.** Without an `AVPlayerViewController` nobody activates the session at `play()`, and your app has no good moment of its own. Before `load()` is too early, the TV has not switched modes yet. With the flag on, the engine activates after that switch and right before `play()`, the same point the software path uses. Details in [the API reference](api.md#native-activation-for-hosts-on-the-bare-player-layer-ae1110).
 
 On a route that passes E-AC-3 / Atmos through to a receiver, the receiver can then keep looping the last MAT frame (the packet format Atmos travels in over HDMI) after the player is gone.
 

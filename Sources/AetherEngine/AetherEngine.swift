@@ -1070,7 +1070,8 @@ public final class AetherEngine: ObservableObject {
     /// to activate on its own, and it has no moment after the display mode switch but before `play()`. The
     /// engine then activates at the same point the software path does (AE#1099), so the HDMI audio link is
     /// negotiated with the panel already in its new mode. Only `setActive(true)`: the channel count stays
-    /// AVPlayer's to negotiate. The remote HLS bypass has no play gate and leaves activation to AVPlayer.
+    /// AVPlayer's to negotiate. The remote HLS bypass has no play gate and activates right before `play()`;
+    /// the end of an audio interruption and a remote Play reactivate too.
     public var nativeAudioSessionActivationEnabled = false
 
     /// Keep a paused video session through background suspension instead of releasing its pipeline.
@@ -6662,9 +6663,8 @@ public final class AetherEngine: ObservableObject {
                 }
                 try checkLoadCurrent(gen)
                 // AE#1110: a host on the bare player layer has no AVKit view to activate at play().
-                await activateNativeAudioSessionAfterPlayGate(
-                    gateHeldMs: Int((DispatchTime.now().uptimeNanoseconds
-                                     - playGateEntry.uptimeNanoseconds) / 1_000_000))
+                await activateNativeAudioSession(
+                    "after the play gate, held \(Int((DispatchTime.now().uptimeNanoseconds - playGateEntry.uptimeNanoseconds) / 1_000_000))ms")
                 try checkLoadCurrent(gen)
                 // automaticallyWaitsToMinimizeStalling=true (default) handles play-before-ready.
                 // #35: on a real SDR->HDR switch while serving a VOD master, drive the bounded

@@ -44,6 +44,10 @@ extension AetherEngine {
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.activateRendererAudioSession()
+            // AE#1110: covers an opted-in native host that turned the renderer activation off.
+            if self.nativeHost != nil, !self.rendererAudioSessionActivationEnabled {
+                await self.activateNativeAudioSession("play pressed again during an interruption")
+            }
             guard self.userPauseCount == pausesBefore, self.loadGeneration == loadBefore else { return }
             self.play()
         }

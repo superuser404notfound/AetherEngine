@@ -23,7 +23,11 @@ struct MinimalPlayerApp: App {
     /// the audio session + display-criteria controller per playback.
     let engine: AetherEngine = {
         do {
-            return try AetherEngine()
+            let engine = try AetherEngine()
+            // No AVPlayerViewController here, so the engine activates the audio session itself,
+            // after the TV's mode switch and right before play() (AE#1110).
+            engine.nativeAudioSessionActivationEnabled = true
+            return engine
         } catch {
             fatalError("AetherEngine init failed: \(error)")
         }
