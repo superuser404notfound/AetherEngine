@@ -1090,10 +1090,12 @@ final class SegmentCache: @unchecked Sendable {
             _totalBytes -= entryBytes[k] ?? byteSize(of: url)
             entryBytes.removeValue(forKey: k)
             entries.removeValue(forKey: k)
+            videoReaches.removeValue(forKey: k)
             lineages.removeValue(forKey: k)
             doomed.append(url)
         }
         _evictionCount += doomed.count
+        if !doomed.isEmpty { condition.broadcast() }
         condition.unlock()
         for url in doomed {
             try? FileManager.default.removeItem(at: url)
@@ -1409,6 +1411,7 @@ final class SegmentCache: @unchecked Sendable {
         _totalBytes -= entryBytes.removeValue(forKey: index) ?? 0
         videoReaches.removeValue(forKey: index)
         lineages.removeValue(forKey: index)
+        _evictionCount += 1
         condition.broadcast()
         condition.unlock()
         try? FileManager.default.removeItem(at: url)

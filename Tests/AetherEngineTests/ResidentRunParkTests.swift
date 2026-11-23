@@ -144,13 +144,16 @@ struct ResidentRunParkTests {
         #expect(!HLSSegmentProducer.residentRunHoldsPump(head: 34, frontier: 33, lastIndex: 497))
     }
 
-    @Test("AE#1109: a parked pump goes back to cutting only for a consumer that has not reached the head",
+    @Test("AE#1109: a parked pump goes back to cutting only for a gap the consumer has not reached",
           .timeLimit(.minutes(3)))
-    func releaseOnlyAheadOfTheConsumer() {
+    func releaseOnlyForAGapAheadOfTheConsumer() {
         // The run thinned before the consumer got there: cutting from the head is what it will need.
-        #expect(HLSSegmentProducer.residentRunParkReleases(head: 34, consumerTarget: 20, runStillHolds: false))
+        #expect(HLSSegmentProducer.residentRunParkReleases(consumerTarget: 20, firstGap: 34))
         // The head was evicted behind a consumer at seg 200: resuming would fetch played segments.
-        #expect(!HLSSegmentProducer.residentRunParkReleases(head: 34, consumerTarget: 200, runStillHolds: false))
-        #expect(!HLSSegmentProducer.residentRunParkReleases(head: 34, consumerTarget: 20, runStillHolds: true))
+        #expect(!HLSSegmentProducer.residentRunParkReleases(consumerTarget: 200, firstGap: 34))
+        // A hole right ahead of a consumer past the head: the provider waits on this producer there,
+        // because the index is that close to its base, so nobody else would fill it.
+        #expect(HLSSegmentProducer.residentRunParkReleases(consumerTarget: 36, firstGap: 37))
+        #expect(!HLSSegmentProducer.residentRunParkReleases(consumerTarget: 20, firstGap: nil))
     }
 }

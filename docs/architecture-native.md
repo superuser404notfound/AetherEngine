@@ -260,7 +260,7 @@ The run ends at the first hole or at the first segment that does not count. That
 
 The pump parks only when the run reaches at least 8 segments past its head, or the last plan index. That is the depth the provider uses to keep a producer for a resident backward target. When the consumer plays past the run's end, the provider restarts a producer there.
 
-The park lets go only while the consumer has not reached the head yet and the run stopped holding (evicted or thinned). Once the consumer is past the head, resuming would fetch segments it already played, and eviction behind the playhead would pull the band through a second time.
+The park lets go only for a gap in those 8 segments that the consumer has not reached yet. The provider waits on the active producer for an index that close to its restart point instead of restarting, so nobody else would fill it. A gap behind the consumer is an eviction behind the playhead, and cutting there would pull the band through a second time.
 
 The reader's open window still drains after the pump parks, a few MB in the measurements. On a 597 MB file resumed at 300 s and rewound to 0, the source traffic after the seek fell from 569 MB to 301 MB, and the 0 to 300 s stretch that had never been fetched is about 298 MB of that.
 

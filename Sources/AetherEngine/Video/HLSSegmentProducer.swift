@@ -2759,13 +2759,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return frontier >= lastIndex || frontier - head >= minimumDepth
     }
 
-    /// AE#1109: whether a parked pump goes back to cutting. Only while the consumer has not asked for
-    /// the head yet and the run in front of it stopped holding. Once the consumer is past the head,
-    /// resuming would cut segments it has already been served, and an eviction behind the playhead
-    /// would then pull the band through the pump a second time, one segment per eviction. A segment
-    /// it misses further on is the provider's restart.
-    static func residentRunParkReleases(head: Int, consumerTarget: Int, runStillHolds: Bool) -> Bool {
-        consumerTarget < head && !runStillHolds
+    /// AE#1109: whether a parked pump goes back to cutting, given the first gap in the minimum depth
+    /// behind its head (nil while that stretch still holds). Only for a gap the consumer has not
+    /// reached: the provider waits on the active producer for an index that close to its base instead
+    /// of restarting, so nobody else would fill it. A gap behind the consumer is an eviction behind
+    /// the playhead, and cutting there would pull the band through the pump a second time, one
+    /// segment per eviction. A gap further on is the provider's restart.
+    static func residentRunParkReleases(consumerTarget: Int, firstGap: Int?) -> Bool {
+        guard let firstGap else { return false }
+        return firstGap > consumerTarget
     }
 
     /// AE#1109: parks the pump while the segments from `head` on are already resident, written on
@@ -2783,6 +2785,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let lastIndex = baseIndex + max(0, segmentBoundaries.count - 2)
         guard Self.residentRunHoldsPump(head: head, frontier: run.frontier, lastIndex: lastIndex)
         else { return true }
+        // Refused when the consumer already asked for the breaker (it has those bytes either way) or
+        // when it is gone already.
         let dropped = run.breaker.map { cache.dropForRecut(index: $0) } ?? false
         let parkedSince = DispatchTime.now().uptimeNanoseconds
         // #240: a parked pump is not using the link.
@@ -2793,24 +2797,26 @@ final class HLSSegmentProducer: @unchecked Sendable {
             "[HLSSegmentProducer] AE#1109 seg-\(head)...seg-\(run.frontier) are resident, written on "
             + "this producer's axis by an earlier one; parking instead of cutting them again "
             + "(last plan index \(lastIndex), cacheTarget=\(cache.targetIndex)"
-            + (run.breaker.map { ", seg-\($0) after it \(dropped ? "evicted" : "kept, already asked for") "
-                + "because it was written another way" } ?? "")
+            + (run.breaker.map { ", seg-\($0) after it was written another way and "
+                + (dropped ? "is evicted" : "was not evicted (already asked for, or gone)") } ?? "")
             + ")",
             category: .session
         )
         let recheckLimit = head + Self.residentRunMinimumDepth
         while !checkShouldStop() {
             cache.awaitChange(timeout: 1.0)
-            let holds = cache.keepableResidentRun(from: head, axis: axis, through: recheckLimit)
-                .map { Self.residentRunHoldsPump(head: head, frontier: $0.frontier, lastIndex: lastIndex) }
-                ?? false
-            if Self.residentRunParkReleases(head: head, consumerTarget: cache.targetIndex,
-                                            runStillHolds: holds) {
+            let window = cache.keepableResidentRun(from: head, axis: axis, through: recheckLimit)
+            let holds = window.map {
+                Self.residentRunHoldsPump(head: head, frontier: $0.frontier, lastIndex: lastIndex)
+            } ?? false
+            let firstGap = holds ? nil : (window.map { $0.frontier + 1 } ?? head)
+            let consumerTarget = cache.targetIndex
+            if Self.residentRunParkReleases(consumerTarget: consumerTarget, firstGap: firstGap) {
                 let seconds = Double(DispatchTime.now().uptimeNanoseconds - parkedSince) / 1e9
                 EngineLog.emit(
-                    "[HLSSegmentProducer] AE#1109 resident run at seg-\(head) no longer holds after "
-                    + "\(String(format: "%.1f", seconds))s and the consumer has not reached it; "
-                    + "cutting from there",
+                    "[HLSSegmentProducer] AE#1109 resident run at seg-\(head) has a gap at "
+                    + "seg-\(firstGap ?? head) after \(String(format: "%.1f", seconds))s, ahead of the "
+                    + "consumer (cacheTarget=\(consumerTarget)); cutting from the head",
                     category: .session
                 )
                 return true
