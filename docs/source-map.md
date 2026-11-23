@@ -196,6 +196,7 @@ Notes:
 | `CCDataParser.swift` | Parses the bare cc_data triplet stream from a demuxable CEA-608 caption track (#77). |
 | `CEA608Decoder.swift` | In-house CEA-608 line-21 decoder (field 1 / CC1), checked against FFmpeg `ccaption_dec.c` (#77). |
 | `DeinterlaceFilter.swift` | Software path: persistent bwdif / yadif libavfilter graph; engages on the first interlaced frame. Under inverse telecine `fieldmatch` and `decimate` run around it (#853), on the GPU engine as their Metal ports after the upload, with the CPU filters before it as the fallback (AE#1108). |
+| `DeinterlaceTiming.swift` | Software path: `DeinterlaceTimingWindow`, the per-frame costs of the deinterlace graph on the decoder's thread (build, push, pull, copy out, decode), logged as `[Deinterlace] timing` every 240 input frames (AE#1112). |
 | `FFmpegDecoderContext.swift` | The one libavcodec decoder-context open (allocate, copy codecpar, configure, `max_pixels`, open, free on failure) behind the video, probe and subtitle decoders (audit DEC-R202). |
 | `EmbeddedSubtitleDecoder.swift` | Inline subtitle decode from demuxed packets. Opens DVB teletext with libzvbi_teletextdec text-format options (#107). |
 | `InterlaceProbe.swift` | Decodes a sample and applies the deinterlacer's own engagement test, so a declared field order that no frame backs up (PsF) stops costing a software decode (#232). |
