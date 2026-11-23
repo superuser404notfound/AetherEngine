@@ -6377,7 +6377,7 @@ public final class AetherEngine: ObservableObject {
             routedSoftware: useSoftwarePath, preferred: options.preferredDecodePath)
         // #846: after every other routing decision, because this one only ever adds the software path and
         // the interlace refute probe above can take that path away again.
-        let upscaleDecision = !options.upscalesLowResolutionVideo
+        let upscaleDecision = !options.upscalesLowResolutionVideo && !options.upscalesFullHDVideo
             ? UpscaleRouteDecision.notTaken(.preferenceOff)
             : upscaleRouteDecision(
                 options: options,

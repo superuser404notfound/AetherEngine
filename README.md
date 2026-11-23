@@ -39,7 +39,7 @@ AetherEngine is a video and audio player engine for iOS, tvOS, macOS and visionO
 - **Dolby Atmos:** E-AC-3 Atmos is passed through untouched, to HDMI receivers and to AirPods with spatial audio.
 - **Lossless height channels from TrueHD and DTS:X** (the overhead speakers of a Blu-ray Atmos or DTS:X mix), as an optional component.
 - **Audio shaping:** dialogue lift, night mode and a loudness target for quiet films, all opt-in.
-- **Upscaling:** low-resolution SDR video scaled up to the display, with a line-art scaler for animation, opt-in.
+- **Upscaling:** low-resolution SDR video scaled up to the display, with a line-art scaler for animation, and Lanczos-3 for 1080p, opt-in.
 - **Tone mapping:** HDR10 titles brighter than the display mapped down to its peak by the engine instead of the TV, opt-in.
 - **Subtitles of every kind:** text, ASS, PGS, DVB, DVD, teletext, closed captions, external files, and subtitles that survive Picture in Picture and AirPlay.
 - **Live TV:** the engine reads live HLS itself, with DVR timeshift (pause and rewind live TV), recording over the same connection, and recovery when a channel breaks.

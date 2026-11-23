@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Added
 
+- **1080p can be upscaled too, with Lanczos-3.** `LoadOptions.upscalesFullHDVideo` scales SDR 1080p to the
+  display. An Apple TV does that bilinearly on its own (measured on an A15), and Lanczos-3 keeps clearly more
+  detail: 94.0 against 85.5 VMAF NEG over 13 test scenes, MetalFX spatial at 92.1. It runs on the Y'CbCr planes
+  without an RGB round trip, 8 and 10-bit, about 3 ms per frame on an M1. Like the low-resolution option it
+  moves the title onto the software path, so it is a switch of its own. `UpscaleScaler.lanczos` is new, and a
+  line-art stage that overruns at 1080p or on 10-bit now falls back to it instead of switching off.
+  `aetherctl play --upscale-fullhd`, and a Lanczos case in `aetherctl bench`.
+
 - **A host can keep the outgoing episode's picture across its next `load()` (AE#1113).**
   `holdOutgoingPicture(on:)` pauses, reads the frame on screen by the audio switch's routes (native, software,
   Dolby Vision compositor or reshaped still, HDR kept), and shows it on an `AetherStillView` the host places.

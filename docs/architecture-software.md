@@ -282,22 +282,23 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 - the display is larger than the source,
 - not a wireless AirPlay route, and not a live session with demuxed audio.
 
-`upscaleScaler = .lineArt` also takes 10-bit and 1080p. A plan whose stage gave up earlier in this process (`UpscaleFailureMemory`) is not taken again at that rate or a faster one.
+`upscaleScaler = .lineArt` also takes 10-bit and 1080p. `upscalesFullHDVideo` takes 1080p sources (8 or 10-bit) for `.lanczos`; with both options on, the source's size picks the scaler (`UpscaleRouteDecision.scaler(for:)`). A plan whose stage gave up earlier in this process (`UpscaleFailureMemory`) is not taken again at that rate or a faster one.
 
 **Where it runs.** A taken route moves the session to the software host, also when it would otherwise have played natively (`sourceSoftwareOnlyForUpscale`). The host wraps its decoder's frame handler (`UpscalingFrameHandler`), and `FrameUpscaler` runs on every decoded frame:
 
 - `.automatic`: VideoToolbox low-latency super resolution on the Neural Engine where the device offers a scale factor, then MetalFX Spatial to the target size.
 - `.lineArt`: Anime4K's 2x upscale and restore networks as Metal compute kernels (`LineArtShaderSource`), then a bilinear resample.
+- `.lanczos`: Lanczos-3 on the Y'CbCr planes, rows then columns, straight to the target (`LanczosPlaneScaler`, taps from `LanczosTaps`). No RGB texture and no colour arithmetic.
 - The stage returns nil whenever the original frame should go out instead. Its VideoToolbox session is built off the decode thread (about 4 s cold on Apple TV), and frames pass through unchanged until it is ready.
 
 **Budget.** Over a 48-frame window the stage's mean time must stay under 90% of the frame interval. The time counted is how long each frame holds the decoder's thread ([two frames in flight](#two-frames-in-flight-on-the-gpu)).
 
-- An overrun first drops one rung: MetalFX after an ML pass, or the line-art restore pass and then line art itself for the automatic scaler.
+- An overrun first drops one rung: MetalFX after an ML pass, or the line-art restore pass and then line art itself, for the automatic scaler (8-bit below 1080p with a VT pass) or Lanczos (everything else, `lineArtFallback`).
 - Three ML failures in a row drop the VideoToolbox pass: MetalFX alone to the same target (AE#957). If the pass never delivered a frame, `MLRefusalMemory` stops offering ML factors for the process. An A12 Apple TV on tvOS 27.2 reports VT super resolution and fails every pass ([measurements](measurements.md#upscale-stage-on-the-a12-ae957)).
 - A further overrun, or three failures in a row of anything else, disables the stage for the session.
 - If only the stage had put a URL VOD session on the software path, the session is then rebuilt on the native path (`upscaleDisableReturnsToNative`).
 
-`$activeUpscale` publishes what runs. See [api.md, `upscalesLowResolutionVideo`](api.md#upscaleslowresolutionvideo). To time each plan on a device, [`aetherctl bench`](cli.md#bench) runs the real stage (`UpscaleBenchmarkStage`) for 480p and 720p automatic, 720p MetalFX only, and both line-art rungs at 1080p.
+`$activeUpscale` publishes what runs. See [api.md, `upscalesLowResolutionVideo`](api.md#upscaleslowresolutionvideo). To time each plan on a device, [`aetherctl bench`](cli.md#bench) runs the real stage (`UpscaleBenchmarkStage`) for 480p and 720p automatic, 720p MetalFX only, both line-art rungs at 1080p, and Lanczos at 1080p.
 
 **The frame chain** (`FrameChain`, AE#957) is what the line-art scaler runs on. It turns the 4:2:0 frame into a half-float RGB texture, runs its stages, and turns the result back into the input's format at the target size, all in one command buffer.
 

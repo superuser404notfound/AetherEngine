@@ -130,7 +130,7 @@ final class FrameUpscaler: @unchecked Sendable {
     private let gpu: GPU
     private let initialPlan: UpscalePlan
     private let buildQueue: DispatchQueue?
-    /// The scaler the stage runs now: the plan's, until a line-art overrun falls back to `.automatic`.
+    /// The scaler the stage runs now: the plan's, until a line-art overrun falls back to another.
     private var scaler: UpscaleScaler
     /// The last frame's sample depth; the automatic route takes 8-bit only.
     private var lastInputEightBit = true
@@ -317,7 +317,7 @@ final class FrameUpscaler: @unchecked Sendable {
         let format = CVPixelBufferGetPixelFormatType(input)
         lastInputEightBit = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        if built.plan.scaler == .lineArt {
+        if built.plan.scaler != .automatic {
             guard FrameChain.supportedFormats.contains(format) else {
                 notePassThrough("pixel format \(fourCC(format)) is not 8 or 10-bit 4:2:0")
                 return .passThrough
@@ -488,7 +488,7 @@ final class FrameUpscaler: @unchecked Sendable {
 
     private func rebuild(for input: CVPixelBuffer, width: Int, height: Int) -> Bool {
         guard UpscaleRouteDecision.sizeAllowed(width: width, height: height, scaler: scaler) else {
-            notePassThrough("\(width)x\(height) is " + (scaler == .lineArt ? "larger than 1920x1080" : "not below 1080p"))
+            notePassThrough("\(width)x\(height) is " + (scaler == .automatic ? "not below 1080p" : "larger than 1920x1080"))
             return false
         }
         let sar = Self.pixelAspectRatio(of: input)
@@ -635,25 +635,31 @@ final class FrameUpscaler: @unchecked Sendable {
     }
 
     /// The line-art rung overran: remember it for the process, then hand a source below 1080p to the
-    /// automatic route (VT super resolution, with MetalFX where it is there), built off this thread while
-    /// frames pass through. A 1080p source has nothing below line art and switches off.
+    /// automatic route (VT super resolution, with MetalFX where it is there), and anything else to Lanczos
+    /// (`UpscaleRouteDecision.lineArtFallback`), built off this thread while frames pass through.
     private func fallBackFromLineArt(over: String, window: StageTimes, plan: UpscalePlan) {
         LineArtCostMemory.record(LineArtCostMemory.Overrun(
             width: plan.sourceWidth, height: plan.sourceHeight, frameInterval: frameInterval, meanMs: window.total),
             rung: .upscale)
-        // The automatic route takes 8-bit only, and not a plan that already switched itself off here.
-        guard lastInputEightBit,
-              let fallback = UpscaleRouteDecision.lineArtFallback(for: plan, mlScaleFactors: Self.mlScaleFactors),
+        // Not a plan that already switched itself off here.
+        guard let fallback = UpscaleRouteDecision.lineArtFallback(for: plan, eightBit: lastInputEightBit,
+                                                                  mlScaleFactors: Self.mlScaleFactors),
               !UpscaleFailureMemory.contains(fallback, frameRate: 1 / frameInterval) else {
             disable(reason: "over budget, " + over)
             return
         }
-        let mlOnly = Self.startsMLOnly(fallback, metalFXAvailable: gpu.metalFXAvailable)
-            || MetalFXCostMemory.overrun(covering: fallback, frameInterval: frameInterval) != nil
-        EngineLog.emit("[Upscale] degraded: line art over budget (\(over)), falling back to the automatic scaler"
-                       + (fallback.mlScale.map { ", ML \(String(format: "%g", $0))x" } ?? "")
-                       + (mlOnly ? " only" : " + MetalFX"), category: .swPlayback)
-        scaler = .automatic
+        let mlOnly = fallback.scaler == .automatic
+            && (Self.startsMLOnly(fallback, metalFXAvailable: gpu.metalFXAvailable)
+                || MetalFXCostMemory.overrun(covering: fallback, frameInterval: frameInterval) != nil)
+        if fallback.scaler == .lanczos {
+            EngineLog.emit("[Upscale] degraded: line art over budget (\(over)), falling back to Lanczos",
+                           category: .swPlayback)
+        } else {
+            EngineLog.emit("[Upscale] degraded: line art over budget (\(over)), falling back to the automatic scaler"
+                           + (fallback.mlScale.map { ", ML \(String(format: "%g", $0))x" } ?? "")
+                           + (mlOnly ? " only" : " + MetalFX"), category: .swPlayback)
+        }
+        scaler = fallback.scaler
         stage?.release()
         stage = nil
         buildGeneration += 1
@@ -977,8 +983,10 @@ private final class Stage {
     private(set) var plan: UpscalePlan
     private let gpu: GPU
     private let ml: MLScaler?
-    /// The `.lineArt` plan's whole processing; nil for `.automatic`.
+    /// The `.lineArt` plan's whole processing; nil otherwise.
     private let chain: FrameChain?
+    /// The `.lanczos` plan's whole processing; nil otherwise.
+    private let lanczos: LanczosPlaneScaler?
     /// The MetalFX spatial scaler, held untyped because the tvOS SDK has it only from 27.1.
     private var scaler: AnyObject?
     private var rgba: MTLTexture?
@@ -993,6 +1001,16 @@ private final class Stage {
     init(plan: UpscalePlan, gpu: GPU, mlOnly: Bool = false, restores: Bool = true) throws {
         self.plan = plan
         self.gpu = gpu
+        if plan.scaler == .lanczos {
+            ml = nil
+            chain = nil
+            lanczos = try LanczosPlaneScaler(device: gpu.device, queue: gpu.queue,
+                                             sourceWidth: plan.sourceWidth, sourceHeight: plan.sourceHeight,
+                                             targetWidth: plan.targetWidth, targetHeight: plan.targetHeight)
+            scaler = nil; rgba = nil; scaled = nil
+            return
+        }
+        lanczos = nil
         if plan.scaler == .lineArt {
             ml = nil
             chain = try FrameChain(device: gpu.device, queue: gpu.queue,
@@ -1110,6 +1128,12 @@ private final class Stage {
             times.metal = elapsedMs(since: t0)
             return (attach(to: output, from: original, times: &times), work)
         }
+        if let lanczos {
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            let (output, work) = try lanczos.encode(original, picture: picture)
+            times.metal = elapsedMs(since: t0)
+            return (attach(to: output, from: original, times: &times), work)
+        }
         let input = try cropInput(original, picture: picture, times: &times)
         let mlOut = try ml?.process(input, frameIndex: frameIndex, timeout: mlTimeout, submit: submit, times: &times)
         return try encodeAfterML(original, input: input, mlOut: mlOut, times: &times)
@@ -1117,7 +1141,7 @@ private final class Stage {
 
     /// AE#957: an automatic plan with an ML pass runs it off the decoder's thread (`startML`, then
     /// `encodeAfterML` from its callback).
-    var runsMLOffThread: Bool { chain == nil && ml != nil }
+    var runsMLOffThread: Bool { ml != nil }
 
     /// The picture of `original` (its clean aperture), as a buffer of its own when it is smaller.
     func cropInput(_ original: CVPixelBuffer, picture: FrameUpscaler.PictureRegion,

@@ -220,16 +220,23 @@ struct PerFrameBenchmark {
         case metalFX720 = "upscale: 720p to 2160p, MetalFX only, wall time"
         case lineArt1080 = "upscale: 1080p to 2160p, line art, wall time"
         case lineArtRestore1080 = "upscale: 1080p to 2160p, line art with restore, wall time"
+        case lanczos1080 = "upscale: 1080p to 2160p, Lanczos, wall time"
 
         /// The coded source: 16:9 DVD (720x480, 32:27 pixels), 720p, 1080p.
         var source: SourceGeometry {
             switch self {
             case .automatic480: return SourceGeometry(width: 720, height: 480, sarNum: 32, sarDen: 27)
             case .automatic720, .metalFX720: return SourceGeometry(width: 1280, height: 720, sarNum: 1, sarDen: 1)
-            case .lineArt1080, .lineArtRestore1080: return SourceGeometry(width: 1920, height: 1080, sarNum: 1, sarDen: 1)
+            case .lineArt1080, .lineArtRestore1080, .lanczos1080: return SourceGeometry(width: 1920, height: 1080, sarNum: 1, sarDen: 1)
             }
         }
-        var scaler: UpscaleScaler { self == .lineArt1080 || self == .lineArtRestore1080 ? .lineArt : .automatic }
+        var scaler: UpscaleScaler {
+            switch self {
+            case .lineArt1080, .lineArtRestore1080: return .lineArt
+            case .lanczos1080: return .lanczos
+            case .automatic480, .automatic720, .metalFX720: return .automatic
+            }
+        }
     }
 
     /// The display every upscale case fills.
@@ -291,6 +298,8 @@ struct PerFrameBenchmark {
             if plan.mlOutputWidth != plan.targetWidth || plan.mlOutputHeight != plan.targetHeight {
                 steps.append("bilinear \(plan.targetWidth)x\(plan.targetHeight)")
             }
+        case .lanczos:
+            steps.append("Lanczos \(plan.targetWidth)x\(plan.targetHeight)")
         case .automatic:
             if let scale = plan.mlScale {
                 steps.append("ML " + String(format: "%g", scale) + "x \(plan.mlOutputWidth)x\(plan.mlOutputHeight)")

@@ -2181,7 +2181,12 @@ extension AetherEngine {
         // and only a second write mid-session took effect.
         let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
         let upscaleRebuild = UpscaleRouteDecision.forRebuild(
-            sessionPlan: sourceUpscalePlan, optionOn: loadedOptions.upscalesLowResolutionVideo,
+            sessionPlan: sourceUpscalePlan,
+            optionOn: sourceUpscalePlan.map {
+                UpscaleRouteDecision.optionsCover($0, lowResolution: loadedOptions.upscalesLowResolutionVideo,
+                                                  requested: loadedOptions.upscaleScaler,
+                                                  fullHD: loadedOptions.upscalesFullHDVideo)
+            } ?? false,
             disabled: sourceUpscaleDisabled)
         host.configuredDVProfile = sourceDVProfile
         host.dolbyVisionHandling = loadedOptions.dolbyVisionHandling

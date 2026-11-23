@@ -864,6 +864,7 @@ Everything here is off (or keeps its old behaviour) until you set it. The option
 ```swift
 LoadOptions(upscalesLowResolutionVideo: true)                        // SDR below 1080p, to the display's size
 LoadOptions(upscalesLowResolutionVideo: true, upscaleScaler: .lineArt) // animation only, also takes 1080p and 10-bit SDR
+LoadOptions(upscalesFullHDVideo: true)                               // SDR 1080p, Lanczos-3 to the display's size
 player.$activeUpscale   // UpscaleStatus?: what the stage is doing, nil while none runs
 ```
 
@@ -871,12 +872,14 @@ SDR video below 1080p is scaled up to the display's native size, with VideoToolb
 
 `.lineArt` runs a network made for drawn content instead (AE#1039). Set it per title, from the genre or a per-show switch: on live action it looks wrong.
 
+`upscalesFullHDVideo` covers 1080p, which an Apple TV otherwise scales to a 4K display bilinearly. It runs Lanczos-3, which is cheap and keeps visibly more detail. It is a separate switch because it puts most of a library on the software path.
+
 - **It moves the title onto the software path,** so that path's rules apply: PiP through `softwarePiPSource`, no native subtitle renditions.
 - **Some titles keep their usual route:** HDR, Dolby Vision, a display no larger than the source, and any AirPlay route. The load logs one `[Upscale]` line saying why.
 - **It never stops playback.** A stage that falls behind degrades, then switches itself off. `$activeUpscale` then carries `degraded` or `disabledReason`.
 - **A failing VideoToolbox pass is dropped, not the stage.** Some devices (an A12 Apple TV on tvOS 27.2) report VideoToolbox super resolution and then refuse every frame. MetalFX alone then scales to the same size, and `$activeUpscale` shows `degraded` with `mlScale` nil.
 
-Details in [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo) and [upscaleScaler](api.md#upscalescaler).
+Details in [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo), [upscalesFullHDVideo](api.md#upscalesfullhdvideo) and [upscaleScaler](api.md#upscalescaler).
 
 ### Tone mapping HDR10 to the display's peak
 

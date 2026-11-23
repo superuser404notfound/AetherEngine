@@ -141,7 +141,7 @@ extension AetherEngine {
             isCustomSource: isCustomSource, current: loadedOptions, proposed: proposed
         ) {
             EngineLog.emit(
-                "[AetherEngine] upscalesLowResolutionVideo / upscaleScaler correction refused, \(refusal.rawValue): a custom "
+                "[AetherEngine] upscalesLowResolutionVideo / upscaleScaler / upscalesFullHDVideo correction refused, \(refusal.rawValue): a custom "
                 + "source keeps the route it was loaded with; load() it again with the new option",
                 category: .engine
             )
@@ -323,8 +323,8 @@ public enum SessionReloadRefusal: String, Sendable, Equatable, CustomStringConve
     /// rebuild does not re-run, so the change could not take effect. Call `load()` again with the
     /// new option. URL sources are not affected: their correction re-runs `load()`.
     case dualLayerRouteNeedsFreshLoad
-    /// #846: a correction that turns `upscalesLowResolutionVideo` on, or changes `upscaleScaler` while it
-    /// is on (AE#1039), for a session that plays from a custom `IOReader` source. The route is decided by
+    /// #846: a correction that turns `upscalesLowResolutionVideo` or `upscalesFullHDVideo` on, or changes
+    /// `upscaleScaler` while the former is on (AE#1039), for a session that plays from a custom `IOReader` source. The route is decided by
     /// `load()`, which a custom source's in-place rebuild does not re-run, so the change could not take
     /// effect. Call `load()` again with the new option. Turning it off is honoured in place, and URL
     /// sources are not affected: their correction re-runs `load()`.
@@ -514,16 +514,18 @@ enum SessionOptionCorrection {
         return .dualLayerRouteNeedsFreshLoad
     }
 
-    /// Why a correction of `upscalesLowResolutionVideo` or `upscaleScaler` cannot be honoured, or nil when
-    /// it can (#846, AE#1039). A custom source's rebuild keeps the session's route and plan, so turning the
-    /// option ON, or switching the scaler while it stays on, is refused there; turning it off is honoured,
-    /// because the next host simply gets no plan.
+    /// Why a correction of `upscalesLowResolutionVideo`, `upscaleScaler` or `upscalesFullHDVideo` cannot be
+    /// honoured, or nil when it can (#846, AE#1039). A custom source's rebuild keeps the session's route and
+    /// plan, so turning either option ON, or switching the scaler while the low-resolution one stays on, is
+    /// refused there; turning one off is honoured, because the next host simply gets no plan.
     static func upscaleRouteRefusal(
         isCustomSource: Bool, current: LoadOptions, proposed: LoadOptions
     ) -> SessionReloadRefusal? {
-        guard isCustomSource, proposed.upscalesLowResolutionVideo else { return nil }
-        let turnsOn = !current.upscalesLowResolutionVideo
-        let switchesScaler = current.upscalesLowResolutionVideo && current.upscaleScaler != proposed.upscaleScaler
+        guard isCustomSource else { return nil }
+        let turnsOn = (proposed.upscalesLowResolutionVideo && !current.upscalesLowResolutionVideo)
+            || (proposed.upscalesFullHDVideo && !current.upscalesFullHDVideo)
+        let switchesScaler = current.upscalesLowResolutionVideo && proposed.upscalesLowResolutionVideo
+            && current.upscaleScaler != proposed.upscaleScaler
         guard turnsOn || switchesScaler else { return nil }
         return .upscaleRouteNeedsFreshLoad
     }
@@ -579,7 +581,7 @@ enum SessionOptionCorrection {
     static let knownFields: [String] = [
         "sourceDiagnosticsContext",
         "omitCriteriaColorExtensions", "suppressDisplayCriteria", "displayCriteriaOwner", "httpHeaders", "nativeVideoFrameDiagnostics", "nativeVideoFrameRecovery", "hostRetriesExhaustedLiveReplay",
-        "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "preferHDR10PlusOverForcedDolbyVision", "dolbyVisionHandling", "untaggedVideoColor", "preferDualLayerDolbyVision", "dualLayerRoute", "foldsDolbyVisionFEL", "upscalesLowResolutionVideo", "upscaleScaler", "videoProcessing", "matchContentEnabled",
+        "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "preferHDR10PlusOverForcedDolbyVision", "dolbyVisionHandling", "untaggedVideoColor", "preferDualLayerDolbyVision", "dualLayerRoute", "foldsDolbyVisionFEL", "upscalesLowResolutionVideo", "upscaleScaler", "upscalesFullHDVideo", "videoProcessing", "matchContentEnabled",
         "panelIsInHDRMode", "attemptsHDRMasterOnUnprovenPanel", "panelPresentsDolbyVision",
         "audioBridgeMode", "objectAudioRendering", "rendersDTSXObjectAudio", "stereoPresentation", "isLive", "audioOnly",
         "dvrWindowSeconds",

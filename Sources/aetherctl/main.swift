@@ -929,6 +929,8 @@ if first == "play" {
     // AE#1039: `LoadOptions.upscaleScaler = .lineArt`; implies --upscale.
     let playLineArt = takeFlag("--line-art", from: &rest)
     let playUpscale = takeFlag("--upscale", from: &rest) || playLineArt
+    // `LoadOptions.upscalesFullHDVideo`: Lanczos for 1080p sources, off by default as in the engine.
+    let playUpscaleFullHD = takeFlag("--upscale-fullhd", from: &rest)
     // #957: `LoadOptions.videoProcessing` with this target peak; off by default as in the engine.
     var playVideoProcessing: VideoProcessingOptions?
     if let spec = takeStringFlag("--tone-map", from: &rest) {
@@ -1321,6 +1323,7 @@ if first == "play" {
                  dualLayerRoute: playFelOutput ? .avPlayerOutput : .softwareHost,
                  upscalesLowResolutionVideo: playUpscale,
                  upscaleScaler: playLineArt ? .lineArt : .automatic,
+                 upscalesFullHDVideo: playUpscaleFullHD,
                  videoProcessing: playVideoProcessing,
                  attachSurface: playAttachSurface,
                  record: playRecord))
