@@ -1028,7 +1028,7 @@ Current rule: [api.md › Cue retention](api.md#cue-retention).
 
 Measured with `aetherctl play --native-hls --sidecar en=<url> --subs en` on macOS against a local VOD origin: fMP4 HLS, 6 s segments, 300 s, the first segment 3 s late (a transcode spinning up), and the sidecar held by the origin.
 
-| Case | Before (7.73.0 `main`) | After |
+| Case | Before (`main` at dcbaa3b2) | After |
 | --- | --- | --- |
 | Picked at load, sidecar 40 s | Nine 404 retries, then the item fails at ~30 s (`-1100` / `-12938`) | Ready at ~3 s, the same as with an instant sidecar; rendition selected at 40.3 s, first cue presented at 41 s |
 | Picked at load, sidecar at once | Ready at ~3 s | Ready at ~3 s; selected 0.3 s after the pick |
