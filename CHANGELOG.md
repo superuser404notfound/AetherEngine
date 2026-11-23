@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **The native path can activate the audio session after its play gate (AE#1110).** A host that shows the
+  native path through the bare `AVPlayerLayer` sets `nativeAudioSessionActivationEnabled = true`. The engine
+  then calls `setActive(true)` after the wait for the display mode switch and before `play()`, on fresh
+  loads and in-place reloads, the same point the software path uses since AE#1099. Off by default, so
+  hosts with `AVPlayerViewController` see no change. Requested by secunit404.
+
 ### Fixed
 
 - **A rewind before the resume point no longer fetches the title again (AE#1109).** With the opt-in

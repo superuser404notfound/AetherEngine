@@ -2093,6 +2093,30 @@ extension AetherEngine {
         await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
     }
 
+    /// AE#1110: the native path's counterpart, for a host on the bare player layer that opted in with
+    /// `nativeAudioSessionActivationEnabled`. Runs after the play gate of a fresh load and of an in-place
+    /// reload, before `play()` or the paused mount, through the same queue as every other session
+    /// transition, so a deactivation from a stop in between stays ordered behind it.
+    func activateNativeAudioSessionAfterPlayGate(gateHeldMs: Int) async {
+        guard nativeAudioSessionActivationEnabled else { return }
+        #if DEBUG
+        nativeAudioActivationForTesting?()
+        #endif
+        EngineLog.emit(
+            "[AetherEngine] AE#1110: native load activates the audio session after the play gate "
+            + "(gate held \(gateHeldMs)ms)",
+            category: .engine)
+        #if os(iOS) || os(tvOS)
+        await enqueueAudioSessionTransition {
+            do { try AVAudioSession.sharedInstance().setActive(true) }
+            catch {
+                EngineLog.emit("[AetherEngine] AE#1110: native audio session activation error: \(error)",
+                               category: .engine)
+            }
+        }.value
+        #endif
+    }
+
     func loadSoftware(
         url: URL,
         sourceHTTPHeaders: [String: String] = [:],
@@ -3036,6 +3060,7 @@ extension AetherEngine {
                 // #274: this reload preserved the criteria (resetDisplayCriteria: false) and re-applies none,
                 // so only a sole-writer host's re-write on the swapped item can still switch anything; the
                 // published (panel-clamped) format decides whether that can be a dynamic-range switch.
+                let playGateEntry = DispatchTime.now()
                 await awaitingDisplaySwitch(generation: gen) {
                     await displayCriteria.waitForSwitch(
                         startGrace: Self.playGateGrace(
@@ -3048,6 +3073,10 @@ extension AetherEngine {
                         settleCap: loadedOptions.isLive ? .standard : .awaitObservedEnd,
                         isCurrent: { self.loadGeneration == gen })
                 }
+                try checkLoadCurrent(gen)
+                await activateNativeAudioSessionAfterPlayGate(   // AE#1110
+                    gateHeldMs: Int((DispatchTime.now().uptimeNanoseconds
+                                     - playGateEntry.uptimeNanoseconds) / 1_000_000))
                 try checkLoadCurrent(gen)
                 if transportIntentUnderReconstruction ?? resumesPlaying { nativeHost?.play() }
                 else { nativeHost?.pause() }

@@ -1058,8 +1058,20 @@ public final class AetherEngine: ObservableObject {
     /// Whether renderer paths activate the shared audio session during load and interruption recovery.
     /// Disable before loading when the host owns activation across several inline players.
     /// The category is still declared once per process; pair with `deactivatesAudioSessionOnStop = false`
-    /// when the host also owns final deactivation. Native AVKit activation is unaffected.
+    /// when the host also owns final deactivation. The native path has its own switch,
+    /// `nativeAudioSessionActivationEnabled`.
     public var rendererAudioSessionActivationEnabled = true
+
+    /// AE#1110: activate the shared audio session on the native path too, after the play gate and right
+    /// before the first `play()` or the paused mount. Default `false`.
+    ///
+    /// Turn it on when the host mounts the bare `AVPlayerLayer` (`AetherPlayerSurface`, `nativePlayerLayer`)
+    /// instead of an `AVPlayerViewController`. AVKit's view activates per playback; without it the host had
+    /// to activate on its own, and it has no moment after the display mode switch but before `play()`. The
+    /// engine then activates at the same point the software path does (AE#1099), so the HDMI audio link is
+    /// negotiated with the panel already in its new mode. Only `setActive(true)`: the channel count stays
+    /// AVPlayer's to negotiate. The remote HLS bypass has no play gate and leaves activation to AVPlayer.
+    public var nativeAudioSessionActivationEnabled = false
 
     /// Keep a paused video session through background suspension instead of releasing its pipeline.
     /// Off by default: the system may invalidate decoders while suspended, requiring a reload.
@@ -1691,6 +1703,8 @@ public final class AetherEngine: ObservableObject {
     /// AE#1099: runs where a renderer path asks for its audio session, on every platform, so the order
     /// against the software host build and the play gate is observable without a session.
     var rendererAudioActivationForTesting: (@MainActor () -> Void)?
+    /// AE#1110: the same for the native path's activation after its play gate.
+    var nativeAudioActivationForTesting: (@MainActor () -> Void)?
     /// AE#628: lets a test drive the drain tick with a real decoder but no playback session.
     var subtitleDrainDecoderFactoryForTesting: ((Int32) -> EmbeddedSubtitleDecoder?)?
     #endif
@@ -6630,6 +6644,7 @@ public final class AetherEngine: ObservableObject {
                 // #274: the 1000ms Stage 1 budget is the DV-cold-start bet on a sole-writer host's inbound
                 // write. Sessions no dynamic-range switch can reach (engine-writer, or SDR content) take the
                 // 200ms budget instead of paying it on every load.
+                let playGateEntry = DispatchTime.now()
                 await awaitingDisplaySwitch(generation: gen) {
                     await displayCriteria.waitForSwitch(
                         startGrace: Self.playGateGrace(
@@ -6645,6 +6660,11 @@ public final class AetherEngine: ObservableObject {
                         settleCap: options.isLive ? .standard : .awaitObservedEnd,
                         isCurrent: { self.loadGeneration == gen })
                 }
+                try checkLoadCurrent(gen)
+                // AE#1110: a host on the bare player layer has no AVKit view to activate at play().
+                await activateNativeAudioSessionAfterPlayGate(
+                    gateHeldMs: Int((DispatchTime.now().uptimeNanoseconds
+                                     - playGateEntry.uptimeNanoseconds) / 1_000_000))
                 try checkLoadCurrent(gen)
                 // automaticallyWaitsToMinimizeStalling=true (default) handles play-before-ready.
                 // #35: on a real SDR->HDR switch while serving a VOD master, drive the bounded
