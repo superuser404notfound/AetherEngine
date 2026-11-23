@@ -77,7 +77,7 @@ The audio columns describe the native path. The software host decodes every trac
 | --- | --- | --- | --- |
 | AAC-LC, HE-AAC / HE-AACv2 | Yes | Stream copy | LATM / LOAS, HE-AAC without an AudioSpecificConfig (live ADTS), and a layout in a PCE bridge |
 | AC-3, E-AC-3, E-AC-3 JOC (Atmos) | Yes | Stream copy | JOC reaches HDMI as Dolby MAT 2.0 ([Dolby Atmos](#dolby-atmos)) |
-| FLAC, ALAC | Yes | Stream copy | FLAC with `min_blocksize` below 192 bridges |
+| FLAC, ALAC | Yes | Stream copy | FLAC with `min_blocksize` below 192 bridges; FLAC in a layout FLAC cannot label in fMP4 (7.1(wide) and others) goes out as PCM |
 | TrueHD, MLP, DTS, DTS-HD MA | Yes | Bridge | Atmos objects and DTS:X heights only with `objectAudioRendering` and its trait ([TrueHD Atmos](#truehd-atmos-with-heights), [DTS:X](#dtsx-with-heights)) |
 | MP3, MP2, MPEG-1 Layer I, Opus, Vorbis | Yes | Bridge | |
 | PCM: signed 8, 16, 24 and 32-bit integer and 32 / 64-bit float (either byte order), unsigned 8-bit, G.711, Blu-ray and DVD LPCM | Yes | Bridge | |
@@ -714,6 +714,7 @@ Stream-copy exceptions:
 - **LATM/LOAS-framed AAC** (DVB broadcast framing) always bridges.
 - **AAC whose AudioSpecificConfig says `channelConfiguration` 0** bridges (AE#1047). That value means the channel layout sits in a Program Config Element (PCE), which FFmpeg's AAC encoder writes for any layout without a standard number, such as 6.0. CoreMedia refuses the record and the item fails with `-11829` / `-12848`. Relabelling it with a standard number opens the item but plays silence, because the PCE's element order no longer matches. libavcodec reads the PCE, so the bridge plays it.
 - **FLAC whose `STREAMINFO` `min_blocksize` is below 192** bridges too (AE#764). CoreMedia drops a track that declares less, and hangs on frames smaller than the field claims, so such a stream cannot be copied. The bridge is bit-perfect for FLAC.
+- **FLAC in a layout CoreMedia would misplace** goes out as 24-bit PCM in its own layout, in either bridge mode (AE#1120). See [Layouts FLAC cannot label](#layouts-flac-cannot-label).
 - **Audio-only FLAC.** The same `min_blocksize` field sends an audio-only FLAC to the FFmpeg host instead of AVPlayer. So does any audio-only FLAC in the raw `flac` container, whose seeks CoreMedia misplaces (AE#946).
 - **Audio-only AAC with a PCE.** The same `channelConfiguration` 0 sends an audio-only AAC to the FFmpeg host. On AVPlayer it opens and ends at 0 s (AE#1047).
 
@@ -734,13 +735,33 @@ Non-streamable codecs route through `AudioBridge` in one of two modes (`LoadOpti
 | Mode | Encoder | Needs | Notes |
 | --- | --- | --- | --- |
 | `.surroundCompat` (default) | Chosen per source: EAC3 above two channels, FLAC for two or fewer | Any AVR or soundbar, including legacy ARC | Caps 7.1 to 5.1 |
-| `.lossless` (opt-in) | FLAC up to 7.1 | A sink that takes multichannel LPCM | Bit-perfect, also at 96 and 192 kHz |
+| `.lossless` (opt-in) | FLAC up to 7.1, or 24-bit PCM for a layout FLAC cannot label | A sink that takes multichannel LPCM | Bit-perfect, also at 96 and 192 kHz |
 
 - **`.surroundCompat`** (default): the encoder is chosen per source, not per mode.
   - A source with more than two channels is re-encoded to lossy EAC3 at 128 kbps per channel (768 kbps 5.1). AVPlayer hands the encoded bitstream to HDMI and the sink decodes its own 5.1 mix, so surround works on essentially every AVR and soundbar, including one behind legacy ARC.
   - Two channels or fewer have no surround to carry and take the FLAC encoder instead. That is lossless where EAC3 would have been 256 kbps lossy, and the route decodes it to LPCM on routes that can only pass a Dolby bitstream through.
   - Why stereo avoids EAC3 (AE#395): an AirPlay 2 optical adapter played one MPEG-TS program's stream-copied AC3 5.1 but was silent on the bridged EAC3 stereo of the same program. So whichever track `av_find_best_stream` happened to pick decided whether the viewer heard anything.
 - **`.lossless`** (opt-in): FLAC up to 7.1 lossless, which AVPlayer decodes to LPCM. It needs a sink that takes multichannel LPCM: an AVR over HDMI, or an AVR or soundbar on eARC. A Sonos Arc on eARC takes 6-channel LPCM, so a 7.1 source arrives there as lossless 5.1, folded by tvOS. Behind legacy ARC, which carries stereo LPCM or a Dolby bitstream only, the LPCM is downmixed to stereo, and `.surroundCompat` is the right mode.
+
+#### Layouts FLAC cannot label
+
+A FLAC track in fMP4 cannot tell CoreMedia its channel layout (AE#1120). CoreMedia ignores a `chnl` box, a QuickTime `chan` box and a `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` comment next to or inside `dfLa` (measured on macOS 27), and Apple's own `afconvert` loses the layout the same way. It assumes the FLAC default for the channel count instead:
+
+| Channels | Layout CoreMedia assumes |
+| --- | --- |
+| 1 to 3 | C · L R · L R C |
+| 4 | L R Rls Rrs |
+| 5, 6 | L R C Ls Rs, plus LFE at 6 |
+| 7 | L R C LFE Cs Ls Rs |
+| 8 | L R C LFE Rls Rrs Ls Rs |
+
+Any other layout plays some channels on the wrong speakers. 7.1(wide) put its front-of-centre pair on the side surrounds, 2.1 plays its LFE as a centre. `FLACChannelLabels` holds the rule.
+
+Such a track leaves the engine as 24-bit PCM in its own layout instead (`ipcm`, `CODECS="…,ipcm"`). movenc writes the layout as a `chnl` box, and CoreMedia reads that one. It costs 1.15 Mbit/s per channel at 48 kHz (9.2 Mbit/s for 7.1) on the loopback.
+
+- **A FLAC source** in such a layout leaves stream copy and goes out as PCM in either mode. Its stream copy already needed a sink that takes multichannel PCM, so nothing changes for the sink.
+- **A bridged source** (DTS-HD MA, PCM and the rest) goes out as PCM under `.lossless`. The FLAC encoder would have folded it into the default layout first, which mixed the front-of-centre pair of a 7.1(wide) into the fronts and left the sides silent. `.surroundCompat` keeps E-AC-3 above two channels, folded to 5.1 with every channel on a speaker that exists.
+- **One exception.** A layout whose only surround pair is the back pair counts as the side pair, so FFmpeg's 5.1 (what an AAC 5.1 decodes to) keeps stream copy. With one surround pair there is nothing for the two labels to tell apart.
 
 **The host picks the mode (AE#794).** The engine does not pick between the two from the route, because it cannot tell them apart. With tvOS's Continuous Audio Connection on, every HDMI route reports 32 unlabelled channels, whatever the sink takes. An eARC soundbar and a legacy-ARC one look the same, and a wrong FLAC pick on the second plays stereo.
 

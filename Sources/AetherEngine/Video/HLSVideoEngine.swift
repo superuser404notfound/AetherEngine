@@ -2456,6 +2456,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     + "\(FLACStreamInfo.coreMediaMinimumBlockSize), bridging instead of stream-copy",
                     category: .session
                 )
+            } else if Self.flacNeedsRelabel(audioStream.pointee.codecpar) {
+                // AE#1120: CoreMedia reads no layout from a FLAC sample entry and assumes the default.
+                bridgePreferred = true
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: FLAC layout "
+                    + "\(Demuxer.channelLayoutDescription(&audioStream.pointee.codecpar.pointee.ch_layout) ?? "?") "
+                    + "is not the default for \(acpForHE.ch_layout.nb_channels) channels and an fMP4 FLAC track "
+                    + "cannot label it; serving it as PCM instead of stream-copy",
+                    category: .session
+                )
             } else if AACAudioSpecificConfig.coreMediaRejects(UnsafePointer(audioStream.pointee.codecpar)) {
                 // AE#1047: CoreMedia refuses an esds whose layout lives in a PCE.
                 bridgePreferred = true
@@ -2480,7 +2490,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                              }
                              ?? Self.encoderLabel(AudioBridge.bridgeEncoder(
                                 for: audioBridgeMode,
-                                sourceChannels: acpForHE.ch_layout.nb_channels)).uppercased())
+                                sourceChannels: acpForHE.ch_layout.nb_channels,
+                                flacCarriesLayout: FLACChannelLabels.carries(
+                                    &audioStream.pointee.codecpar.pointee.ch_layout))).uppercased())
                           + " re-encode",
                     category: .session
                 )

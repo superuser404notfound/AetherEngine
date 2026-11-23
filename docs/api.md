@@ -2618,7 +2618,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | Option | Default | What it does |
 | --- | --- | --- |
 | `audioOnly` | false | Lean audio pipeline, no video machinery. Also set automatically when the probe finds no video stream. |
-| `audioBridgeMode` | `.surroundCompat` | Bridge encoder for codecs that cannot be stream-copied into fMP4. `.surroundCompat` uses EAC3 for a source with more than two channels, and FLAC for two or fewer (no surround to carry). `.lossless` uses FLAC up to 7.1 throughout and needs a sink that accepts multichannel LPCM. |
+| `audioBridgeMode` | `.surroundCompat` | Bridge encoder for codecs that cannot be stream-copied into fMP4. `.surroundCompat` uses EAC3 for a source with more than two channels, and FLAC for two or fewer (no surround to carry). `.lossless` uses FLAC up to 7.1 throughout and needs a sink that accepts multichannel LPCM. A layout FLAC cannot label in fMP4 (7.1(wide) and others) goes out as 24-bit PCM instead ([formats › Layouts FLAC cannot label](formats.md#layouts-flac-cannot-label)). |
 | `objectAudioRendering` | `.off` | TrueHD Atmos and DTS:X with heights (#731), in a build with the object-audio traits. See [`objectAudioRendering`](#objectaudiorendering). |
 | `rendersDTSXObjectAudio` | true | `false` keeps DTS:X on the channel bridge while `objectAudioRendering` still renders TrueHD Atmos (#1060). See [`objectAudioRendering`](#objectaudiorendering). |
 | `confirmAtmos` | false | Confirms JOC per track in the background, and republishes `audioTracks` as tracks are confirmed. Never on the start path; skipped for live and forward-only readers. |

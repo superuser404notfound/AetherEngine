@@ -45,6 +45,14 @@ the public-API contract.
 
 ### Fixed
 
+- **FLAC in 7.1(wide) and other non-default layouts no longer plays on the wrong speakers (AE#1120).**
+  CoreMedia reads no channel layout from a FLAC track in fMP4 and assumes the FLAC default for the
+  count, so a 7.1(wide) track played its front-of-centre pair on the side surrounds. Such a track now
+  goes out as 24-bit PCM in its own layout, which CoreMedia reads from the `chnl` box: a FLAC source in
+  either bridge mode, a bridged one (DTS-HD MA, PCM) under `.lossless`. The FLAC bridge used to fold
+  those sources into the default layout first, which also left the sides silent. 5.1 with back surrounds
+  keeps stream copy. Reported by yazcaleb.
+
 - **Software live without a DVR window rebuffers when the source falls behind (AE#1121).** Its clock used
   to run past every sample the source had delivered. The sound stopped, every late frame was dropped, and
   `playbackPhase` stayed `.playing` until the host reloaded. The loop now pauses the clock once the source

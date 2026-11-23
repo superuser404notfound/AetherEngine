@@ -75,7 +75,7 @@ Stream-copied audio is passed on untouched. Bridged audio is decoded and re-enco
 | Handling | Codecs |
 | --- | --- |
 | Stream-copied, lossless | AAC, AC3, EAC3, FLAC, ALAC |
-| Bridged (decoded, then re-encoded: by default surround to EAC3 5.1 and stereo to lossless FLAC; with `audioBridgeMode = .lossless`, FLAC up to 7.1) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, LPCM (including Blu-ray and G.711), WMA (Standard, Pro, Lossless, Voice), Nellymoser, ADPCM-SWF, Speex, RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8), AMR-NB, AMR-WB, DVD LPCM |
+| Bridged (decoded, then re-encoded: by default surround to EAC3 5.1 and stereo to lossless FLAC; with `audioBridgeMode = .lossless`, FLAC up to 7.1, or 24-bit PCM for a layout FLAC cannot label) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, LPCM (including Blu-ray and G.711), WMA (Standard, Pro, Lossless, Voice), Nellymoser, ADPCM-SWF, Speex, RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8), AMR-NB, AMR-WB, DVD LPCM |
 
 - **Surround:** 5.1 and 7.1 with the correct `AudioChannelLayout`.
 - **Audio-only:** `LoadOptions.audioOnly` runs a lean pipeline with no video machinery.

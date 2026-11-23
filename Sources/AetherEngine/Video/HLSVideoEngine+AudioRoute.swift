@@ -115,6 +115,12 @@ extension HLSVideoEngine {
         }
     }
 
+    /// AE#1120: a FLAC track whose layout CoreMedia would misread from the fMP4 (see `FLACChannelLabels`),
+    /// so it cannot be stream-copied and goes out as PCM instead.
+    static func flacNeedsRelabel(_ codecpar: UnsafeMutablePointer<AVCodecParameters>) -> Bool {
+        codecpar.pointee.codec_id == AV_CODEC_ID_FLAC && !FLACChannelLabels.carries(&codecpar.pointee.ch_layout)
+    }
+
     /// #165: ordered bridge-encoder cascade. The configured mode's encoder for this source is attempted
     /// first; if it is absent from the FFmpeg build (`AudioBridgeError.encoderNotFound`, which names the
     /// missing one), fall through to the other encoder rather than dropping to silent video-only. Both
@@ -335,9 +341,14 @@ extension HLSVideoEngine {
             // a different encoder can help); every other init failure is source-specific and re-attempting
             // is pointless, so it stops immediately.
             let sourceChannels = audioStream.pointee.codecpar.pointee.ch_layout.nb_channels
-            let firstAttempt = AudioBridge.bridgeEncoder(
+            // AE#1120: a FLAC source here for its layout alone keeps that layout as PCM in either mode.
+            // Its stream copy already needed a sink that takes multichannel PCM, so E-AC-3 would trade
+            // lossless for a sink this track never asked for.
+            let relabelsFLAC = !shapes && Self.flacNeedsRelabel(audioStream.pointee.codecpar)
+            let firstAttempt = relabelsFLAC ? AudioBridge.pcmOutputCodecID : AudioBridge.bridgeEncoder(
                 for: audioBridgeMode,
-                sourceChannels: shapes ? audioShaping.outputChannels(forSource: sourceChannels) : sourceChannels)
+                sourceChannels: shapes ? audioShaping.outputChannels(forSource: sourceChannels) : sourceChannels,
+                flacCarriesLayout: shapes || FLACChannelLabels.carries(&audioStream.pointee.codecpar.pointee.ch_layout))
             let cascade = Self.bridgeEncoderCascade(firstAttempt: firstAttempt)
             attempts: for (attemptIndex, encoderAttempt) in cascade.enumerated() {
                 let isLastAttempt = attemptIndex == cascade.count - 1
@@ -349,7 +360,7 @@ extension HLSVideoEngine {
                         mode: audioBridgeMode,
                         // The first attempt lets the bridge resolve, so a container that under-reports its
                         // channel count still gets the decoder-resolved answer; only the retry is forced.
-                        forcedEncoder: attemptIndex == 0 ? nil : encoderAttempt,
+                        forcedEncoder: attemptIndex == 0 && !relabelsFLAC ? nil : encoderAttempt,
                         shaping: audioShaping
                     )
                 } catch AudioBridge.AudioBridgeError.encoderNotFound(let missing) where !isLastAttempt {
@@ -396,8 +407,9 @@ extension HLSVideoEngine {
                     // not from the mode: `.surroundCompat` on a stereo source produces fLaC, and a master
                     // playlist that advertises ec-3 for a FLAC track is a load failure, not a cosmetic slip.
                     let isEAC3Out = bridge.outputCodecID == AV_CODEC_ID_EAC3
-                    let hlsCodec = isEAC3Out ? "ec-3" : "fLaC"
-                    let pipelineLabel = "\(sourceCodecLabel) → \(isEAC3Out ? "EAC3" : "FLAC") bridge"
+                    let isPCMOut = bridge.outputCodecID == AudioBridge.pcmOutputCodecID
+                    let hlsCodec = isEAC3Out ? "ec-3" : isPCMOut ? AudioBridge.pcmHLSCodecs : "fLaC"
+                    let pipelineLabel = "\(sourceCodecLabel) → \(isEAC3Out ? "EAC3" : isPCMOut ? "PCM" : "FLAC") bridge"
                     audioHLSCodecs = hlsCodec
                     self.audioPipelineDescription = shapes ? pipelineLabel + " (shaped)" : pipelineLabel
                     self.audioDelivery = .bridged

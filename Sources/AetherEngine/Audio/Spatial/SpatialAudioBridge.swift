@@ -181,7 +181,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     }
 
     /// HLS `CODECS` value for the PCM bed, the `ipcm` sample entry's four-character code.
-    static let pcmHLSCodecs = "ipcm"
+    static let pcmHLSCodecs = AudioBridge.pcmHLSCodecs
 
     deinit { cleanup() }
 

@@ -102,7 +102,7 @@ Notes:
 | `AtmosConfirmationWorker.swift` | `LoadOptions.confirmAtmos`: after the session is up, runs the bounded JOC pass on a side demuxer, one E-AC-3 track at a time, and republishes `audioTracks` through a source-keyed ledger (#214). Declined on an origin limited to one request, `sequentialOrigin` and `heldSourceConnection`, rechecked per track. |
 | `AtmosDetectionProbe.swift` | Opt-in bounded E-AC-3 JOC decode pass behind `probeDetectingAtmos`: `AtmosDetectionOptions` caps, one decoder, no playback session (#214). |
 | `AudioAVPlayerHost.swift` | Audio-only path: bare AVPlayer host for whitelisted codecs. Owns the persistent per-player `MPNowPlayingSession` (tvOS / iOS). Publishes the rebuffer axis (`waitingToPlayAtSpecifiedRate` / `AVPlayerItemPlaybackStalled` after first play) that the engine folds into `isBuffering`. |
-| `AudioBridge.swift` | Native path: decode and re-encode per `AudioBridgeMode` (EAC3 5.1 default, or lossless FLAC opt-in) for source codecs that cannot stream-copy into fMP4. |
+| `AudioBridge.swift` | Native path: decode and re-encode per `AudioBridgeMode` (EAC3 5.1 default, or lossless FLAC opt-in) for source codecs that cannot stream-copy into fMP4. Packs 24-bit PCM itself for a layout FLAC cannot label (AE#1120). |
 | `AudioClockAnchor.swift` | Software path: sample-count PTS anchor so consecutive buffers line up exactly; re-anchors on >100 ms drift (AVSampleBufferAudioRenderer crackle, #89). |
 | `AudioDecoder.swift` | Software path: libavcodec → PCM → `CMSampleBuffer`, with channel-layout tagging that names the resampler's own order (#401). |
 | `AudioDecoderOptions.swift` | How every audible FFmpeg audio decoder opens: AC-3 and E-AC-3 without the stream's dynamic range compression (`drc_scale` 0), as Apple's decoder plays them. |
@@ -121,6 +121,7 @@ Notes:
 | `AudioRouteDescription.swift` | The audio route as one log fragment, shared by every host so native and software logs describe it in the same words. |
 | `AudioTranscodingBridge.swift` | Native path: the protocol the segment producer drives a bridge through. `AudioBridge` and `SpatialAudioBridge` implement it. |
 | `DTSXConfirmation.swift` | #744 follow-up: sets `TrackInfo.isDTSX` from the DTS:X decoder's verdict, kept beyond the session that produced it. |
+| `FLACChannelLabels.swift` | The channel layouts CoreMedia assumes for a FLAC track in fMP4, which reads no layout of its own, and whether a source's layout is one of them (AE#1120). |
 | `FLACStreamInfo.swift` | Reads the `STREAMINFO` blocksize fields CoreMedia keys FLAC on, and decides when CoreMedia would refuse or mistime the track (AE#764). |
 | `RendererClockResume.swift` | AE#549: what a renderer path's `play()` does with a clock the system stopped rather than the host. |
 | `RendererTimeline.swift` | AE#395: the renderer axis (source time minus `origin`) the renderers and their synchronizer run on. |
