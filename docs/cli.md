@@ -652,6 +652,8 @@ Other lines `play` prints:
 | `--declared-duration S` | `LoadOptions.declaredDurationSeconds`. Needed with `--sequential-origin` on VOD. | none |
 | `--held-connection` | `LoadOptions.heldSourceConnection` (#377). | off |
 | `--progressive-segments` | `LoadOptions.progressiveSegmentDelivery`. | off |
+| `--forward-buffer-segments N` | `LoadOptions.forwardBufferSegments`. `2700` is the opt-in whole-source prefetch. | engine default |
+| `--session-cache-mb N` | `LoadOptions.sessionCacheByteBudget`, in MiB. | engine default |
 | `--max-concurrent-requests N` | `LoadOptions.maxConcurrentSourceRequests` (#377). See [Shared flags](#shared-flags). | engine default |
 
 **Corrections and reloads**
@@ -1080,6 +1082,15 @@ With `--frame-times` the output reads `ft=24` a second and the `[SWDiag]` lines 
 - Slow-origin case: serve 11 MB HEVC-in-TS segments from a keep-alive origin at 200 KB/s shared across its connections. Each segment then takes about 58 s, longer than the 45 s cap a whole exchange had before #732.
 
 **`--progressive-segments`** sets `LoadOptions.progressiveSegmentDelivery`: each VOD segment is served while it is written. Run it against a throttled origin and compare the `FIRSTFRAME` and first `PHASE playing` times with and without the flag. The session log shows `serving while it is written` for every segment that went out that way. On a local or fast source the segments are cut before AVPlayer asks, and the two runs look the same.
+
+**`--forward-buffer-segments 2700 --session-cache-mb N`** turns on the whole-source prefetch, which is what leaves a resident band behind a resume. Rewinding before the resume point is the AE#1109 repro: serve the file over HTTP, then
+
+```bash
+aetherctl play --seconds 60 --start-position 200 --forward-buffer-segments 2700 --session-cache-mb 8192 \
+  --seek-every 20 --seek-count 1 --seek-pattern 0 http://127.0.0.1:8899/film.mkv
+```
+
+Read `origin=` on the tick lines after the seek. It has to stop climbing once the stretch below the resume point is in, and the log has to show `AE#1109 seg-N...seg-M are resident`. Add `--picture-probe` on the timecode fixtures to check the seam where the new run meets the kept one.
 
 **`--max-concurrent-requests N`** sets `LoadOptions.maxConcurrentSourceRequests` (#377): the most requests the reader may have open against the origin at once, across every path it fetches on. `1` also switches off the speculative parallel paths, which is the shape of a connection-metered CDN. Count the requests in the origin's own log, or read the `[AVIOReader]` connection lines, with and without the flag.
 

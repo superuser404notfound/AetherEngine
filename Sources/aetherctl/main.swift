@@ -1045,6 +1045,10 @@ if first == "play" {
     // LoadOptions.progressiveSegmentDelivery: serve each VOD segment while it is written. Pair it
     // with a throttled origin to see the startup difference; on a fast source nothing changes.
     let progressiveSegments = takeFlag("--progressive-segments", from: &rest)
+    // AE#1109: the opt-in whole-source prefetch, which is what leaves a resident band behind a
+    // resume for a backward seek to restart under.
+    PlayCacheOverrides.forwardBufferSegments = takeIntFlag("--forward-buffer-segments", from: &rest)
+    PlayCacheOverrides.sessionCacheByteBudget = takeIntFlag("--session-cache-mb", from: &rest).map { $0 << 20 }
     // #731: TrueHD Atmos or DTS:X rendered into a bed as APAC; the 1 Hz line then reports its objects.
     let playObjectAudio = objectAudioRendering(
         takeStringFlag("--atmos-bed", from: &rest), format: takeStringFlag("--bed-format", from: &rest))

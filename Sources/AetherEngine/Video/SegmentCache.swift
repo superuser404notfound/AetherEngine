@@ -146,6 +146,9 @@ final class SegmentCache: @unchecked Sendable {
     /// Plan index -> how many pumps passed it without opening a segment (#358). Survives producer
     /// restarts on purpose: the repeat across a restart is the signal.
     private var foldCounts: [Int: Int] = [:]
+    /// AE#1109: how each stored segment was written. Read only together with `entries`, so a value
+    /// left behind by an eviction is never consulted, and every path that stores an index sets it.
+    private var lineages: [Int: SegmentLineage] = [:]
     /// AE#412: what a stored segment's video is worth to a COLD arrival, per index. Absent = the
     /// producer did not record it (live, or an unresolved time base), and callers must treat that
     /// as "no claim" rather than as bad news.
@@ -410,6 +413,7 @@ final class SegmentCache: @unchecked Sendable {
             _totalBytes += data.count
             if index > _highestStoredIndex { _highestStoredIndex = index }
             _totalStoredCount &+= 1
+            lineages[index] = nil
         }
         let doomed = pruneOutsideWindow()
         if !doomed.isEmpty { residentSetChanged = true }
@@ -430,7 +434,8 @@ final class SegmentCache: @unchecked Sendable {
     /// `videoReach` (AE#412) is what this segment's video offers a cold arrival; nil leaves the
     /// previous claim in place only if the index is re-adopted without one, which no caller does.
     @discardableResult
-    func adopt(index: Int, stagingPath: URL, byteCount: Int, videoReach: VideoReach? = nil) -> Bool {
+    func adopt(index: Int, stagingPath: URL, byteCount: Int, videoReach: VideoReach? = nil,
+               lineage: SegmentLineage? = nil) -> Bool {
         let fileURL = nextSegmentFileURL(index: index)
         var renameOK: Bool
         do {
@@ -489,6 +494,7 @@ final class SegmentCache: @unchecked Sendable {
             // AE#412: the claim describes THESE bytes, so a re-adoption replaces it, and an
             // adoption that cannot state one must not leave the old epoch's claim standing.
             videoReaches[index] = videoReach
+            lineages[index] = lineage
         }
         let doomed = pruneOutsideWindow()
         if !doomed.isEmpty { residentSetChanged = true }
@@ -577,6 +583,7 @@ final class SegmentCache: @unchecked Sendable {
             entries[entry.index] = entry.url
             entryBytes[entry.index] = entry.bytes
             videoReaches[entry.index] = parked.reaches[entry.index]
+            lineages[entry.index] = nil
             _totalBytes += entry.bytes
             adoptedBytes += entry.bytes
             if entry.index > _highestStoredIndex { _highestStoredIndex = entry.index }
@@ -1347,6 +1354,35 @@ final class SegmentCache: @unchecked Sendable {
         return _parkedSinceStore
     }
 
+    /// AE#1109: the last index of the resident run starting at `index` that a producer writing on
+    /// `axis` may keep instead of cutting it again, or nil when there is no such run.
+    ///
+    /// Every segment of the run has to qualify, not just the first. The consumer is served whatever
+    /// sits at an index, so one segment written on another axis, or one that opened its epoch (a
+    /// gate that opened below its boundary and dropped the leading pictures before its keyframe),
+    /// would be played as the continuation of the producer's own run. A segment whose lineage is
+    /// unknown does not qualify either.
+    func keepableResidentRun(from index: Int, axis: SegmentLineage.Axis) -> Int? {
+        condition.lock()
+        defer { condition.unlock() }
+        guard entries[index] != nil else { return nil }
+        var k = index
+        while entries[k] != nil {
+            guard let lineage = lineages[k], !lineage.opensEpoch, lineage.axis == axis else { return nil }
+            k += 1
+        }
+        return k - 1
+    }
+
+    /// AE#1109: sleeps until anything changes in the cache (a store, an eviction, a new consumer
+    /// target) or `timeout` passes. For a producer parked in front of a resident run.
+    func awaitChange(timeout: TimeInterval) {
+        condition.lock()
+        defer { condition.unlock() }
+        guard !closed else { return }
+        _ = condition.wait(until: Date().addingTimeInterval(timeout))
+    }
+
     /// Reset before triggering a restart; previous producer's highWater would keep producerPassedAndPruned
     /// hot on every fetch, cascading a single restart into a per-segment storm.
     func resetHighWaterForRestart() {
@@ -1666,4 +1702,23 @@ final class ProgressiveSegmentReader: @unchecked Sendable {
             }
         }
     }
+}
+
+/// AE#1109: how a producer wrote one stored segment.
+///
+/// Two producers of one session cut the same plan index into interchangeable bytes when they rebased
+/// it by the same shifts with the same audio delay, and the segment is not the one their epoch opened
+/// with. That is what lets a producer restarted below a resident band stop at the band instead of
+/// fetching the source again for segments the cache already holds.
+struct SegmentLineage: Equatable, Sendable {
+    struct Axis: Equatable, Sendable {
+        let videoShiftPts: Int64
+        let audioShiftPts: Int64
+        let audioDelaySeconds: Double
+    }
+
+    let axis: Axis
+    /// The producer's first segment. Its gate may have opened below the boundary, and its leading
+    /// pictures before the keyframe were dropped, so it is not what continuous production writes.
+    let opensEpoch: Bool
 }

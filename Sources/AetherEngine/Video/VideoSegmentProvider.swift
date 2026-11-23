@@ -930,7 +930,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// 8 absorbs AVPlayer's 5-7 segment speculative prefetch at 4 s segments (~32 s headroom)
     /// while keeping user-initiated 30+ s scrubs below the threshold. Tightened to 3 once;
     /// every AVPlayer prefetch above cache.max+3 cascaded into restarts and produced cache holes.
-    private static let forwardWaitWindow = 8
+    static let forwardWaitWindow = 8
 
     /// #50: re-asserting reposition wait. Sliced waits re-fire restart only when lastRestartIndex
     /// changed (orphan signature: #35 coalescer's single slot was overwritten by a newer scrub).

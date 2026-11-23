@@ -929,6 +929,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Dynamic PTS shift = firstActualDts - desiredFirstTfdt; Int64.min = not yet computed.
     private var videoShiftPts: Int64 = Int64.min
     private var audioShiftPts: Int64 = Int64.min
+    /// AE#1109: set once this producer adopted a segment; the first one opened its epoch.
+    private var adoptedFirstSegment = false
 
     /// Max segments ahead of AVPlayer's highest fetched segment. Historically a constant (cut from 20 to
     /// 10; 4K HEVC ~10 MB/seg = 200 MB old buffer); now per session from `LoadOptions.forwardBufferSegments`
@@ -2594,7 +2596,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             cache.adopt(index: currentMuxerSegmentIndex,
                         stagingPath: path,
                         byteCount: bytesWritten,
-                        videoReach: takeVideoReach(forSegmentIndex: currentMuxerSegmentIndex))
+                        videoReach: takeVideoReach(forSegmentIndex: currentMuxerSegmentIndex),
+                        lineage: takeLineage())
             // AE#286: per-epoch head. cache.highestStoredIndex is monotonic across restarts and would
             // credit this pump with the previous epoch's production.
             pumpEpochHighestStored = max(pumpEpochHighestStored, currentMuxerSegmentIndex)
@@ -2689,6 +2692,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
             // backlog exceeded bufferAheadSegments.
             if !awaitLiveWindowHeadroom(head: newIdx) { return nil }
         } else {
+            // AE#1109: a restart below a band the cache already holds stops at the band. Without
+            // this the forward park never holds a whole-source prefetch (its target sits thousands
+            // of segments below the head), so the pump cut the rest of the title again.
+            if onSequentialSegmentFinalized == nil, !awaitResidentRunHandover(head: newIdx) { return nil }
             let backpressureTarget = newIdx - bufferAheadSegments
             let parkSkipped = onSequentialSegmentFinalized != nil
                 && Self.sequentialParkWouldSelfDeadlock(target: backpressureTarget,
@@ -2720,6 +2727,80 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if checkShouldStop() { return nil }
 
         return muxer
+    }
+
+    /// AE#1109: the axis this producer writes on, once its gate has opened.
+    private var writtenAxis: SegmentLineage.Axis? {
+        guard videoShiftPts != Int64.min else { return nil }
+        return SegmentLineage.Axis(videoShiftPts: videoShiftPts, audioShiftPts: audioShiftPts,
+                                   audioDelaySeconds: audioDelaySeconds)
+    }
+
+    /// AE#1109: the lineage of the segment being adopted. The first one this producer adopts opened
+    /// its epoch.
+    private func takeLineage() -> SegmentLineage? {
+        let opensEpoch = !adoptedFirstSegment
+        adoptedFirstSegment = true
+        return writtenAxis.map { SegmentLineage(axis: $0, opensEpoch: opensEpoch) }
+    }
+
+    /// AE#1109: how deep a kept run has to be before the pump stops in front of it. The consumer
+    /// reaching its end then asks for an index the provider restarts at, and AVPlayer asks a few
+    /// segments ahead of what it plays, so a run this deep hands that restart a full cushion. The
+    /// provider keeps a producer for a resident backward target on the same depth.
+    static let residentRunMinimumDepth = VideoSegmentProvider.forwardWaitWindow
+
+    /// AE#1109: whether a run of kept segments from `head` through `frontier` lets the pump stop in
+    /// front of it. A run that reaches the last plan index leaves nothing to produce at any depth.
+    static func residentRunHoldsPump(head: Int, frontier: Int, lastIndex: Int,
+                                     minimumDepth: Int = residentRunMinimumDepth) -> Bool {
+        guard frontier >= head else { return false }
+        return frontier >= lastIndex || frontier - head + 1 >= minimumDepth
+    }
+
+    /// AE#1109: parks the pump while the segments from `head` on are already resident, written on
+    /// this producer's axis by an earlier producer. Returns true to go on cutting (the run stopped
+    /// qualifying: evicted, thinned, or there was none), false when the pump was asked to stop.
+    ///
+    /// Nothing but the run itself releases it. If the consumer plays past the run's end, the provider
+    /// restarts a producer there, which replaces this one; resuming here instead would cut segments
+    /// the consumer has already been served.
+    private func awaitResidentRunHandover(head: Int) -> Bool {
+        let lastIndex = baseIndex + max(0, segmentBoundaries.count - 2)
+        var parkedSince: UInt64?
+        defer {
+            if parkedSince != nil { sideReaderLinkGate?.videoFetchBegan() }
+        }
+        while !checkShouldStop() {
+            guard let axis = writtenAxis,
+                  let frontier = cache.keepableResidentRun(from: head, axis: axis),
+                  Self.residentRunHoldsPump(head: head, frontier: frontier, lastIndex: lastIndex)
+            else {
+                if let since = parkedSince {
+                    let seconds = Double(DispatchTime.now().uptimeNanoseconds - since) / 1e9
+                    EngineLog.emit(
+                        "[HLSSegmentProducer] AE#1109 resident run at seg-\(head) no longer holds "
+                        + "after \(String(format: "%.1f", seconds))s; cutting from there",
+                        category: .session
+                    )
+                }
+                return true
+            }
+            if parkedSince == nil {
+                parkedSince = DispatchTime.now().uptimeNanoseconds
+                // #240: a parked pump is not using the link.
+                sideReaderLinkGate?.videoFetchEnded()
+                if pumpQoSCurrent == QOS_CLASS_UTILITY { pumpRelaxationRate.reset() }
+                EngineLog.emit(
+                    "[HLSSegmentProducer] AE#1109 seg-\(head)...seg-\(frontier) are resident, written "
+                    + "on this producer's axis by an earlier one; parking instead of cutting them again "
+                    + "(last plan index \(lastIndex), cacheTarget=\(cache.targetIndex))",
+                    category: .session
+                )
+            }
+            cache.awaitChange(timeout: 1.0)
+        }
+        return false
     }
 
     /// Sequential-VOD duration became known (next segment's start recorded at the ledger).
@@ -2847,7 +2928,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
             cache.adopt(index: idx, stagingPath: result.path,
                         byteCount: result.bytesWritten,
-                        videoReach: takeVideoReach(forSegmentIndex: idx))
+                        videoReach: takeVideoReach(forSegmentIndex: idx),
+                        lineage: takeLineage())
             if isLive {
                 reportLiveSegmentFinalized(index: idx, nextIndex: nil)
             } else if onSequentialSegmentFinalized != nil {
