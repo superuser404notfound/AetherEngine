@@ -1307,14 +1307,14 @@ extension AetherEngine {
 
     /// #271: the channel's retained array, bound once per drain tick. Reading it here and writing it
     /// back once at the end of the batch is what keeps `$subtitleCues` to one publication per tick.
-    private func retainedSubtitleCues(for channel: SubtitleChannel) -> [SubtitleCue] {
+    func retainedSubtitleCues(for channel: SubtitleChannel) -> [SubtitleCue] {
         switch channel {
         case .primary:   return subtitleCues
         case .secondary: return secondarySubtitleCues
         }
     }
 
-    private func publishRetainedSubtitleCues(_ cues: [SubtitleCue], for channel: SubtitleChannel) {
+    func publishRetainedSubtitleCues(_ cues: [SubtitleCue], for channel: SubtitleChannel) {
         switch channel {
         case .primary:   subtitleCues = cues
         case .secondary: secondarySubtitleCues = cues
@@ -1537,7 +1537,13 @@ extension AetherEngine {
                 if otherImage.position == stampedImage.position
                     && otherImage.cgImage.width == stampedImage.cgImage.width
                     && otherImage.cgImage.height == stampedImage.cgImage.height {
-                    cues[i] = stamped
+                    // AE#1114: the same picture decoded again, so what was read in it still holds.
+                    // Dropping it here would make the host fall back to the image and pay Vision again.
+                    if stampedImage.recognizedText == nil, let read = otherImage.recognizedText {
+                        cues[i] = stamped.with(body: .image(stampedImage.with(recognizedText: read)))
+                    } else {
+                        cues[i] = stamped
+                    }
                     return true
                 }
             }

@@ -127,6 +127,7 @@ More:
 - **Native WebVTT renditions** (opt-in, `LoadOptions.prepareNativeSubtitles`): the engine hands AVPlayer one language-tagged rendition per text track, including external files declared at load. Subtitles then survive PiP, AirPlay and an external display.
 - **Two tracks at once:** `selectSecondarySubtitleTrack(index:)` adds an independent second track (embedded or external) for bilingual viewing. Its cues arrive in `secondarySubtitleCues`. See [guide.md › A second subtitle track](guide.md#a-second-subtitle-track-at-the-same-time).
 - **Subtitle offset reach:** `maximumSubtitleDelaySeconds` / `maximumSubtitleAdvanceSeconds` (or `maximumSubtitleOffsetSeconds` for both) keep enough bitmap history and lead for the offset range a host offers.
+- **Bitmap cues as text** (opt-in, `LoadOptions.recognizesBitmapSubtitleText`): each PGS / DVB / DVD cue comes back with the text Vision read in it, line by line with confidence and position, so a host can draw picture subtitles in its own caption style.
 - **Bitmap tracks in PiP / AirPlay.** Bitmap tracks (PGS, DVB, DVD, embedded and external .sup) join as OCR-fed renditions. OCR here is on-device Vision text recognition: it runs while the track is selected and fills a language-tagged text rendition. This is lossy by design; fullscreen keeps the pixel-accurate overlay.
 
 The host draws the overlay itself. See [formats.md › Subtitles](formats.md#subtitles).

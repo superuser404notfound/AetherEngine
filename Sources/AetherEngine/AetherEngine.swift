@@ -1670,7 +1670,9 @@ public final class AetherEngine: ObservableObject {
 
     /// Decoded cues for the active subtitle source (sidecar or embedded side-demuxer). When
     /// `LoadOptions.prepareNativeSubtitles` is set, cues also flow into NativeSubtitleCueStore for mov_text injection (#55).
-    @Published public internal(set) var subtitleCues: [SubtitleCue] = []
+    @Published public internal(set) var subtitleCues: [SubtitleCue] = [] {
+        didSet { scheduleBitmapTextRecognition() }   // AE#1114
+    }
     /// #100: per-channel holdback for PGS cues arriving behind the playhead (catch-up bursts after
     /// side-reader starvation). Reset wherever the cue arrays reset (track switch, seek re-anchor,
     /// clear, load/stop) so a hold can never leak across subtitle sessions.
@@ -1771,6 +1773,15 @@ public final class AetherEngine: ObservableObject {
     /// monotonic for the engine's lifetime is collision-proof and needs no coordination with the many
     /// array-clear sites.
     var nextRetainedSubtitleCueID: Int = 0
+    /// AE#1114: the loop reading bitmap cue text for the overlay, nil while idle. The generation
+    /// moves on load and stop, so a loop or a reading from the previous session writes nothing.
+    var bitmapTextRecognitionTask: Task<Void, Never>?
+    var bitmapTextRecognitionGeneration: UInt64 = 0
+    var bitmapTextFirstReadLogged = false
+    #if DEBUG
+    /// Stands in for Vision in tests, so they drive the plumbing and not the OS's model cache.
+    var bitmapTextRecognizerForTesting: (@Sendable (CGImage, String?) -> SubtitleRecognizedText)?
+    #endif
     nonisolated static let subtitleDrainLeadSeconds: Double = 60
     /// #362: how far the forward prefetch (#151) parks BEYOND the drain window's forward edge.
     ///
@@ -1850,7 +1861,9 @@ public final class AetherEngine: ObservableObject {
     @Published public internal(set) var secondarySidecarASSHeader: String? = nil
 
     /// Cues for the secondary subtitle track (#47). Text and supported bitmap codecs; independent of primary.
-    @Published public internal(set) var secondarySubtitleCues: [SubtitleCue] = []
+    @Published public internal(set) var secondarySubtitleCues: [SubtitleCue] = [] {
+        didSet { scheduleBitmapTextRecognition() }   // AE#1114
+    }
     @Published public internal(set) var isLoadingSecondarySubtitles: Bool = false
     @Published public internal(set) var isSecondarySubtitleActive: Bool = false
 
@@ -7829,6 +7842,7 @@ public final class AetherEngine: ObservableObject {
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
         resetSubtitleOCRState()   // Phase D: new session, new axis
+        resetBitmapTextRecognition()   // AE#1114
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
         audibleReadbackTask?.cancel()
@@ -9381,6 +9395,7 @@ public final class AetherEngine: ObservableObject {
         cancelSidecarTask()
         stopSubtitleDrainer(reason: .sessionStopped)   // #112 rework: both channels
         resetSubtitleOCRState()                // Phase D
+        resetBitmapTextRecognition()           // AE#1114
         subtitleDrainTargets.removeAll()
         softwareSubtitlePacketStore = nil
         activeEmbeddedSubtitleStreamIndex = -1

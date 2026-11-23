@@ -1226,6 +1226,28 @@ PGS / HDMV PGS / DVB / DVD produce `.image(SubtitleImage)`. The indexed pixel pl
 - **Several objects (#146).** A display set carrying multiple composition objects (a forced sign plus dialogue is a common real-disc shape) fans into one cue per object, all sharing the set's start PTS, and every object is kept and rendered.
 - **Forced flag.** Each object's `AV_SUBTITLE_FLAG_FORCED` rides along as `SubtitleImage.isForced`, surfaced per cue via `SubtitleCue.isForced`. Track-level forcedness stays on `TrackInfo.isForced`.
 - **Size cap.** A bitmap canvas or object larger than 4096x4096 pixels is refused and produces no cue. A UHD Blu-ray canvas is 3840x2160. A hostile display set of about 100 KB could otherwise make the decoder allocate around 1 GB.
+- **Text of the picture (AE#1114).** Opt-in with `LoadOptions.recognizesBitmapSubtitleText`: each cue is republished with what Vision read in it, as `SubtitleImage.recognizedText`. See [Bitmap cues as text](#bitmap-cues-as-text-ae1114).
+
+#### Bitmap cues as text (AE#1114)
+
+A host that draws every cue in the viewer's caption style (font, size, colour, edge, background) can get bitmap cues as text too. Set `LoadOptions.recognizesBitmapSubtitleText = true`, and the engine reads each picture on the overlay path with on-device Vision text recognition.
+
+**How the text arrives.** The cue is published as before, with no text. Once read, the same cue (same id, same times) is republished with `SubtitleImage.recognizedText` set, so draw the picture until then. `SubtitleCue` equality includes the text, so a SwiftUI view sees the change.
+
+**What it holds.**
+
+- `lines`: top line first, blank lines dropped. Each line has its `text`, Vision's `confidence` (0 to 1) and a `boundingBox` normalized to the cue's picture with a top-left origin, the same convention as `SubtitleImage.position`.
+- `language`: the recognition language the engine pinned, from the track's language tag (`ger` goes to Vision as `de`). nil when it ran unpinned.
+- `level`: `.accurate`, or `.fast` once the accurate model failed in this process (#552).
+- `lines` is empty when the picture held nothing readable. Keep the picture then.
+
+**Confidence is coarse.** Vision's text recognizer tends to answer a few fixed values (0.3, 0.5, 1.0 are common) rather than a smooth scale. Pick a threshold below which you keep the picture, and treat the value as a grade, not a probability.
+
+**What gets read.** Every bitmap cue on the primary and the secondary channel, embedded and `.sup` sidecar, forced cues included (`isForced` stays on the picture, the choice is yours). Cues are read earliest first, from the one on screen forward. Nothing behind the playhead is read; after a backward seek those cues are due again and get read then.
+
+**What it costs.** No extra reads: the engine only reads cues the overlay has already decoded, which is its 60 s lead. Vision runs one picture at a time on the engine's recognition thread, the same slot the native OCR worker uses, so the two never run at once. A picture decoded again after a seek keeps its text instead of being read again. On a Mac with a warm Vision cache one picture takes about 20 ms, so the whole 60 s window is read within half a second of selecting the track. The first reading after Vision lost its cached model can take about a minute; the log line `[SubtitleOCR] overlay text: first cue read in ...` shows what it took. Apple TV timing is not measured yet.
+
+**Not shared with the native rendition yet.** When PiP, AirPlay or an external display arms the native OCR worker, it reads the same compositions again for its own text. The two do not run in parallel, but the work is done twice.
 
 #### External files
 
