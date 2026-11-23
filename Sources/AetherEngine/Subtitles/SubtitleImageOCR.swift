@@ -9,16 +9,48 @@ import Vision
 enum SubtitleImageOCR {
     private static let executor = Executor()
 
-    /// Vision bounding boxes are normalized with a bottom-left origin; reading order is
-    /// descending midY. Blank fragments are dropped; nil when nothing readable remains.
-    nonisolated static func assembleLines(_ observations: [(text: String, midY: CGFloat)]) -> String? {
-        let lines = observations
-            .map { (text: $0.text.trimmingCharacters(in: .whitespacesAndNewlines), midY: $0.midY) }
+    /// One Vision observation as the engine keeps it: the top candidate, its confidence, and its box
+    /// in Vision's own space (normalized, bottom-left origin).
+    struct Observation: Sendable {
+        let text: String
+        let confidence: Float
+        let visionBox: CGRect
+    }
+
+    /// Vision's boxes have a bottom-left origin. Blank fragments drop. Fragments whose vertical
+    /// extents overlap by at least half the smaller one sit on one baseline and form one line, read
+    /// left to right: Vision splits a two-speaker line ("- Yes.   - No.") at the gap, and sorting
+    /// the pieces by midY alone stacked them, in an order set by a pixel of tilt. Lines then go top
+    /// first. AE#1114: each line keeps the lowest confidence of its pieces and their joint box, moved
+    /// to a top-left origin, the convention `SubtitleImage.position` uses.
+    nonisolated static func recognizedLines(_ observations: [Observation]) -> [SubtitleRecognizedText.Line] {
+        let pieces = observations
+            .map { Observation(text: $0.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                               confidence: $0.confidence, visionBox: $0.visionBox) }
             .filter { !$0.text.isEmpty }
-            .sorted { $0.midY > $1.midY }
-            .map(\.text)
-        guard !lines.isEmpty else { return nil }
-        return lines.joined(separator: "\n")
+            .sorted { $0.visionBox.midY > $1.visionBox.midY }
+        var groups: [[Observation]] = []
+        for piece in pieces {
+            if let last = groups.indices.last,
+               groups[last].contains(where: { sharesBaseline($0.visionBox, piece.visionBox) }) {
+                groups[last].append(piece)
+            } else {
+                groups.append([piece])
+            }
+        }
+        return groups.map { group in
+            let ordered = group.sorted { $0.visionBox.minX < $1.visionBox.minX }
+            let box = ordered.dropFirst().reduce(ordered[0].visionBox) { $0.union($1.visionBox) }
+            return SubtitleRecognizedText.Line(
+                text: ordered.map(\.text).joined(separator: " "),
+                confidence: ordered.map(\.confidence).min() ?? 0,
+                boundingBox: CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height))
+        }
+    }
+
+    private nonisolated static func sharesBaseline(_ a: CGRect, _ b: CGRect) -> Bool {
+        let overlap = min(a.maxY, b.maxY) - max(a.minY, b.minY)
+        return overlap >= 0.5 * min(a.height, b.height)
     }
 
     /// Track tags are ISO 639-1/2 ("ger"), Vision wants BCP-47 primary codes ("de"). The engine's
@@ -59,6 +91,18 @@ enum SubtitleImageOCR {
         }
     }
 
+    /// AE#1114: the overlay's reading, with lines, confidences and boxes. Shares the native worker's
+    /// thread and admission, so the two never run Vision at the same time. nil only when cancelled
+    /// before it ran; a picture with nothing readable comes back with no lines.
+    nonisolated static func recognizeDetailed(
+        in image: CGImage, language: String?,
+        recognition: @escaping @Sendable (CGImage, String?) -> SubtitleRecognizedText = recognizeDetailedSynchronously
+    ) async -> SubtitleRecognizedText? {
+        await executor.run {
+            recognition(image, language)
+        }
+    }
+
     /// One synchronous Vision pass, called only by the recognition thread.
     ///
     /// `.accurate` is the better reader and it is also an OPTIONAL system model: it runs on the
@@ -76,13 +120,25 @@ enum SubtitleImageOCR {
     /// evidence, it is the state the process stays in, and the alternative is paying a minute of
     /// stall per cue to learn it again.
     private nonisolated static func recognizeSynchronously(_ image: CGImage, language: String?) -> String? {
-        guard let flat = flattenedOntoBlack(image) else { return nil }
-        if !accurateIsUnavailable, let observations = recognize(flat, at: .accurate, language: language) {
-            return assembleLines(observations)
+        recognizeDetailedSynchronously(image, language: language).text
+    }
+
+    /// Both readers go through here, so the fallback and the language pin behave the same for the
+    /// native rendition and the overlay.
+    nonisolated static func recognizeDetailedSynchronously(_ image: CGImage, language: String?) -> SubtitleRecognizedText {
+        guard let flat = flattenedOntoBlack(image) else {
+            return SubtitleRecognizedText(lines: [], language: nil, level: accurateIsUnavailable ? .fast : .accurate)
+        }
+        if !accurateIsUnavailable, let read = recognize(flat, at: .accurate, language: language) {
+            return SubtitleRecognizedText(lines: recognizedLines(read.observations),
+                                          language: read.pinned, level: .accurate)
         }
         markAccurateUnavailable()
-        guard let observations = recognize(flat, at: .fast, language: language) else { return nil }
-        return assembleLines(observations)
+        guard let read = recognize(flat, at: .fast, language: language) else {
+            return SubtitleRecognizedText(lines: [], language: nil, level: .fast)
+        }
+        return SubtitleRecognizedText(lines: recognizedLines(read.observations),
+                                      language: read.pinned, level: .fast)
     }
 
     /// nil when the REQUEST failed, which is what the fallback turns on. An empty array is a
@@ -94,10 +150,11 @@ enum SubtitleImageOCR {
     /// recognition of a line beats no line.
     private nonisolated static func recognize(_ image: CGImage,
                                               at level: VNRequestTextRecognitionLevel,
-                                              language: String?) -> [(text: String, midY: CGFloat)]? {
+                                              language: String?) -> (observations: [Observation], pinned: String?)? {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = level
         request.usesLanguageCorrection = true
+        var pinned: String?
         if let language,
            let supported = try? request.supportedRecognitionLanguages(),
            let match = supported.first(where: {
@@ -105,6 +162,7 @@ enum SubtitleImageOCR {
                return s == language || s.hasPrefix(language + "-")
            }) {
             request.recognitionLanguages = [match]
+            pinned = language
         }
         do {
             try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
@@ -112,10 +170,11 @@ enum SubtitleImageOCR {
             logFailureOnce("Vision \(level == .accurate ? "accurate" : "fast") perform failed: \(error)")
             return nil
         }
-        return (request.results ?? []).compactMap { obs -> (String, CGFloat)? in
+        let observations = (request.results ?? []).compactMap { obs -> Observation? in
             guard let top = obs.topCandidates(1).first else { return nil }
-            return (top.string, obs.boundingBox.midY)
+            return Observation(text: top.string, confidence: top.confidence, visionBox: obs.boundingBox)
         }
+        return (observations, pinned)
     }
 
     /// Recognize a batch of CLOSED cues and append the text results to a native store. Image
@@ -154,7 +213,7 @@ enum SubtitleImageOCR {
         private var waiting: [Waiter] = []
         var pendingCount: Int { waiting.count }
 
-        func run(_ recognition: @escaping @Sendable () -> String?) async -> String? {
+        func run<Result: Sendable>(_ recognition: @escaping @Sendable () -> Result?) async -> Result? {
             guard await acquire() else { return nil }
             guard !Task.isCancelled else {
                 release()

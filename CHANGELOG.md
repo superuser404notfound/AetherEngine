@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Added
 
+- **Bitmap subtitle cues can carry their text (AE#1114).** With `LoadOptions.recognizesBitmapSubtitleText`
+  on, the engine reads each PGS / DVB / DVD cue on the overlay path with on-device Vision and republishes it
+  with `SubtitleImage.recognizedText`: the lines top first, each with Vision's confidence and a box in the
+  picture, plus the language and model used. A host can then draw picture subtitles in the viewer's caption
+  style and keep the picture when the text is missing or unsure. No extra reads, since only cues the overlay
+  already decoded are read. Off by default. Requested by secunit404. Pieces Vision reads separately on one
+  baseline now join into one line, left to right, also in the native OCR rendition for PiP and AirPlay.
+
 - **The native path can activate the audio session after its play gate (AE#1110).** A host that shows the
   native path through the bare `AVPlayerLayer` sets `nativeAudioSessionActivationEnabled = true`. The engine
   then calls `setActive(true)` after the wait for the display mode switch and before `play()`, on fresh

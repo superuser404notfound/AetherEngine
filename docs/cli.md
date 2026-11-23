@@ -606,6 +606,7 @@ Other lines `play` prints:
 | `--subtitle-offset-reach SECONDS` | Sets `maximumSubtitleOffsetSeconds` before the load (0 to 600). | engine default |
 | `--subtitle-delay-reach SECONDS`, `--subtitle-advance-reach SECONDS` | Set `maximumSubtitleDelaySeconds` / `maximumSubtitleAdvanceSeconds` before the load (0 to 600), after `--subtitle-offset-reach` (AE#1031). | engine default |
 | `--preserve-ass-markup` | `LoadOptions.preserveASSMarkup`. | off |
+| `--bitmap-text` | `LoadOptions.recognizesBitmapSubtitleText` (AE#1114). The cue log prints a `TEXT` line per bitmap cue read. | off |
 | `--skip-attachments` | `LoadOptions.skipsContainerAttachments` (AE#956). | off |
 | `--iframes` | `LoadOptions.serveIFramePlaylist` (AE#682) on a full session, where the still ladder prefetches into the rendition. | off |
 
@@ -885,6 +886,22 @@ aetherctl play --sw --subs pgssub --subtitle-offset-reach 0 --seconds 40 \
 ```
 
 Healthy reading: `ONSCREEN` names the landing set within 0.0 to 0.4 s of each landing, the same as the default reach. The defect reading (before AE#1022): no landing line, and the set from before the seek drawn over two landings.
+
+### Bitmap cues as text (`--bitmap-text`)
+
+`--bitmap-text` sets `LoadOptions.recognizesBitmapSubtitleText` (AE#1114). A bitmap cue first logs as `CUE #N ... [bitmap]`; once Vision has read it, the republish adds a line with the text, each line's confidence, the model and the language pin:
+
+```
+  TEXT #22 'Subtitle line 25' 1.00 level=accurate language=en at=12.40
+```
+
+Fixture: `gen_fullframe_pgs.py out.sup --text` writes readable PGS sets (the default stripes read as nothing), muxed with `-c copy` and tagged `language=eng`.
+
+```bash
+aetherctl play --subs pgssub --bitmap-text --seconds 40 file://$PWD/pgs-text.mkv
+```
+
+Healthy reading, measured with a warm Vision cache: `[SubtitleOCR] overlay text: first cue read in 0.12s`, the other 20 cues of the 60 s window read within 0.4 s, and each later cue read about 0.1 s after its `CUE` line. The first run after a fresh build waits for Vision's model (54 s here). The loop then reads the cues still due first and the ones it missed after them, as far back as `maximumSubtitleDelaySeconds` (60 s by default).
 
 ### ASS markup (`--preserve-ass-markup`)
 

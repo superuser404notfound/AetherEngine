@@ -261,6 +261,26 @@ Styled subtitles arrive as `.richText`. Each run carries colour, bold, italic, u
 
 Cues are stamped in raw source PTS. Draw your overlay against `player.sourceTime` ([formats.md › Subtitles](formats.md#subtitles)).
 
+### Picture subtitles in your caption style
+
+PGS, DVB and DVD subtitles are pictures, so they keep the disc's look. To draw them in the viewer's caption style instead, load with `recognizesBitmapSubtitleText`:
+
+```swift
+var options = LoadOptions()
+options.recognizesBitmapSubtitleText = true
+
+if case .image(let image) = cue.body {
+    if let read = image.recognizedText, let text = read.text,
+       read.lines.allSatisfy({ $0.confidence >= 0.5 }) {
+        drawStyled(text)
+    } else {
+        draw(image)   // not read yet, nothing readable, or not sure enough
+    }
+}
+```
+
+The engine reads each picture on-device and republishes the cue with the text, usually well before it is due. Details: [formats.md › Bitmap cues as text](formats.md#bitmap-cues-as-text-ae1114).
+
 ### External subtitle files
 
 ```swift

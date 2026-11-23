@@ -1164,6 +1164,8 @@ if first == "play" {
     // AE#682: LoadOptions.serveIFramePlaylist on a full session, where the still ladder runs and
     // fills the rendition ahead of AVKit (`[StillLadder] reading through the I-frame rendition`).
     let playServesIFrames = takeFlag("--iframes", from: &rest)
+    // AE#1114: LoadOptions.recognizesBitmapSubtitleText; the cue log prints a TEXT line per read.
+    let playBitmapText = takeFlag("--bitmap-text", from: &rest)
     // #460: `--reload-applying <key>=<value>`, repeatable, with one shared delay. The delay is a
     // separate flag rather than teletext's `@ms` suffix because a header value can carry an `@`.
     // Default +20 s for the same reason the teletext switch uses it: the correction has to land on
@@ -1311,6 +1313,7 @@ if first == "play" {
                  preserveASSMarkup: preserveASSMarkup,
                  skipAttachments: skipAttachments,
                  serveIFrames: playServesIFrames,
+                 bitmapText: playBitmapText,
                  dolbyVisionHandling: playDVHandling,
                  preferDualLayerDolbyVision: playPreferDualLayerDV,
                  dualLayerRoute: playFelOutput ? .avPlayerOutput : .softwareHost,

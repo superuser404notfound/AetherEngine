@@ -7,18 +7,6 @@ import CoreText
 // The fallback tests temporarily change the process-wide accurate-model availability flag.
 @Suite("Subtitle image OCR", .serialized, .timeLimit(.minutes(3)))
 struct SubtitleOCRTests {
-    @Test("line assembly sorts top line first (Vision origin is bottom-left) and drops blanks")
-    func lineAssembly() {
-        let joined = SubtitleImageOCR.assembleLines([
-            (text: "bottom line", midY: 0.2),
-            (text: "   ", midY: 0.9),
-            (text: "top line", midY: 0.8),
-        ])
-        #expect(joined == "top line\nbottom line")
-        #expect(SubtitleImageOCR.assembleLines([]) == nil)
-        #expect(SubtitleImageOCR.assembleLines([(text: " ", midY: 0.5)]) == nil)
-    }
-
     @Test("track languages normalize to alpha-2 for Vision, unknown tags pass through")
     func languageMapping() {
         #expect(SubtitleImageOCR.recognitionLanguage(forTrackLanguage: "ger") == "de")
@@ -65,6 +53,29 @@ struct SubtitleOCRTests {
         let text = try #require(recognized)
         #expect(text.contains("HELLO"))
         #expect(text.contains("123"))
+    }
+
+    /// AE#1114: the box a host places the line with has to come out top-left, like the picture's.
+    /// Text drawn in the upper half of a tall picture must read as the upper half.
+    @Test("a real reading reports lines, the pinned language, and a top-left box")
+    func detailedReadingGeometry() async throws {
+        let ctx = CGContext(data: nil, width: 480, height: 240, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let font = CTFontCreateWithName("HelveticaNeue-Bold" as CFString, 48, nil)
+        let attrs: [CFString: Any] = [kCTFontAttributeName: font,
+                                      kCTForegroundColorAttributeName: CGColor(red: 1, green: 1, blue: 1, alpha: 1)]
+        let line = CTLineCreateWithAttributedString(
+            CFAttributedStringCreate(kCFAllocatorDefault, "HELLO 123" as CFString, attrs as CFDictionary)!)
+        ctx.textPosition = CGPoint(x: 24, y: 170)   // CoreGraphics: y up, so this is near the top
+        CTLineDraw(line, ctx)
+
+        let read = try #require(await SubtitleImageOCR.recognizeDetailed(in: ctx.makeImage()!, language: "en"))
+        let first = try #require(read.lines.first, "nothing read")
+        #expect(first.text.contains("HELLO"))
+        #expect(first.boundingBox.midY < 0.5, "box \(first.boundingBox) is not in the upper half")
+        #expect((0...1).contains(first.confidence))
+        #expect(read.language == "en")
     }
 
     /// #552: the accurate model is an OPTIONAL system model. On macOS 27 it spends about a minute
