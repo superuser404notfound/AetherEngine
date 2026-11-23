@@ -901,7 +901,7 @@ Fixture: `gen_fullframe_pgs.py out.sup --text` writes readable PGS sets (the def
 aetherctl play --subs pgssub --bitmap-text --seconds 40 file://$PWD/pgs-text.mkv
 ```
 
-Healthy reading, measured with a warm Vision cache: `[SubtitleOCR] overlay text: first cue read in 0.61s`, the other 20 cues of the 60 s window read within 0.4 s, and each later cue read about 0.1 s after its `CUE` line. The first run after a fresh build waits for Vision's model (54.6 s here); the loop then skips the cues it missed and goes on with the next one that is still due.
+Healthy reading, measured with a warm Vision cache: `[SubtitleOCR] overlay text: first cue read in 0.12s`, the other 20 cues of the 60 s window read within 0.4 s, and each later cue read about 0.1 s after its `CUE` line. The first run after a fresh build waits for Vision's model (54 s here). The loop then reads the cues still due first and the ones it missed after them, as far back as `maximumSubtitleDelaySeconds` (60 s by default).
 
 ### ASS markup (`--preserve-ass-markup`)
 

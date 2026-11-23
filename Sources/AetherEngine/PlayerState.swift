@@ -2082,6 +2082,15 @@ public struct SubtitleImage: @unchecked Sendable {
         self.recognizedText = recognizedText
     }
 
+    /// #146: within one start, the object a re-decode produces again has the same position and pixel
+    /// size (the alpha-bounding-box crop is deterministic), and sibling objects of one display set
+    /// differ in both. The store's replace and AE#1114's write-back must agree on this, so it is here.
+    func isSameComposition(as other: SubtitleImage) -> Bool {
+        position == other.position
+            && cgImage.width == other.cgImage.width
+            && cgImage.height == other.cgImage.height
+    }
+
     func with(recognizedText: SubtitleRecognizedText?) -> SubtitleImage {
         SubtitleImage(cgImage: cgImage, position: position, canvasSize: canvasSize,
                       isForced: isForced, recognizedText: recognizedText)

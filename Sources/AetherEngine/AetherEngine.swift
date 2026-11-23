@@ -1778,6 +1778,8 @@ public final class AetherEngine: ObservableObject {
     var bitmapTextRecognitionTask: Task<Void, Never>?
     var bitmapTextRecognitionGeneration: UInt64 = 0
     var bitmapTextFirstReadLogged = false
+    /// Counts sidecar installs per channel, so a pending reading can tell its sidecar from a later one.
+    var sidecarBitmapSourceEpochs: [SubtitleChannel: UInt64] = [:]
     #if DEBUG
     /// Stands in for Vision in tests, so they drive the plumbing and not the OS's model cache.
     var bitmapTextRecognizerForTesting: (@Sendable (CGImage, String?) -> SubtitleRecognizedText)?

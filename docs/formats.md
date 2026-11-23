@@ -1236,14 +1236,14 @@ A host that draws every cue in the viewer's caption style (font, size, colour, e
 
 **What it holds.**
 
-- `lines`: top line first, blank lines dropped. Each line has its `text`, Vision's `confidence` (0 to 1) and a `boundingBox` normalized to the cue's picture with a top-left origin, the same convention as `SubtitleImage.position`.
+- `lines`: top line first, blank lines dropped. Pieces Vision reads separately on one baseline (a two-speaker line like "- Yes.   - No.") are joined into one line, left to right. Each line has its `text`, Vision's `confidence` (0 to 1) and a `boundingBox` normalized to the cue's picture with a top-left origin, the same convention as `SubtitleImage.position`.
 - `language`: the recognition language the engine pinned, from the track's language tag (`ger` goes to Vision as `de`). nil when it ran unpinned.
 - `level`: `.accurate`, or `.fast` once the accurate model failed in this process (#552).
 - `lines` is empty when the picture held nothing readable. Keep the picture then.
 
 **Confidence is coarse.** Vision's text recognizer tends to answer a few fixed values (0.3, 0.5, 1.0 are common) rather than a smooth scale. Pick a threshold below which you keep the picture, and treat the value as a grade, not a probability.
 
-**What gets read.** Every bitmap cue on the primary and the secondary channel, embedded and `.sup` sidecar, forced cues included (`isForced` stays on the picture, the choice is yours). Cues are read earliest first, from the one on screen forward. Nothing behind the playhead is read; after a backward seek those cues are due again and get read then.
+**What gets read.** Every bitmap cue on the primary and the secondary channel, embedded and `.sup` sidecar, forced cues included (`isForced` stays on the picture, the choice is yours). Cues are read earliest first, from the one on screen forward. Behind the playhead, cues are read only inside `maximumSubtitleDelaySeconds`, since a host that delays its subtitles still draws them; further back nothing is read, and after a backward seek those cues are due again. Readings are written back in batches of up to 0.25 s, so the burst at selection costs a few publications of `subtitleCues`, not one per cue; a cue due within a second goes out at once.
 
 **What it costs.** No extra reads: the engine only reads cues the overlay has already decoded, which is its 60 s lead. Vision runs one picture at a time on the engine's recognition thread, the same slot the native OCR worker uses, so the two never run at once. A picture decoded again after a seek keeps its text instead of being read again. On a Mac with a warm Vision cache one picture takes about 20 ms, so the whole 60 s window is read within half a second of selecting the track. The first reading after Vision lost its cached model can take about a minute; the log line `[SubtitleOCR] overlay text: first cue read in ...` shows what it took. Apple TV timing is not measured yet.
 

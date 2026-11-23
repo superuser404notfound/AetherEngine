@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import CoreGraphics
+import Combine
 @testable import AetherEngine
 
 // AE#1114: with `recognizesBitmapSubtitleText` on, the overlay's bitmap cues come back republished
@@ -102,7 +103,7 @@ struct Issue1114OverlayBitmapTextTests {
         let engine = try engine(recognizing: true, probe: probe)
         engine.subtitleCues = [bitmapCue(1, 20, 22)]
         engine.secondarySubtitleCues = [bitmapCue(2, 5, 7)]
-        let first = try #require(engine.nextBitmapTextJob())
+        let first = try #require(engine.nextBitmapTextJob(pending: []))
         #expect(first.channel == .secondary)
         try await waitFor {
             engine.subtitleCues[0].recognizedText != nil && engine.secondarySubtitleCues[0].recognizedText != nil
@@ -179,6 +180,83 @@ struct Issue1114OverlayBitmapTextTests {
         probe.release()
         let landed = try await waitFor(upTo: .milliseconds(500)) { engine.subtitleCues[0].recognizedText != nil }
         #expect(!landed)
+    }
+
+    /// A host that shows cues later than their time still draws a cue that ended before the
+    /// playhead, so the reading has to reach back as far as the host says it delays.
+    @MainActor
+    @Test("cues behind the playhead are read inside the delay reach, the on-screen one first")
+    func readsBehindWithinDelayReach() throws {
+        let probe = RecognizerProbe()
+        let engine = try engine(recognizing: false, probe: probe)
+        engine.maximumSubtitleDelaySeconds = 10
+        engine.subtitleCues = [bitmapCue(1, 20, 22), bitmapCue(2, 41, 43), bitmapCue(3, 44, 46)]
+        let behind = try #require(engine.nextBitmapTextJob(pending: [], playhead: 50))
+        #expect(behind.cueID == 3, "the latest cue inside the reach goes first among the ones behind")
+        let second = try #require(engine.nextBitmapTextJob(pending: [behind], playhead: 50))
+        #expect(second.cueID == 2)
+        #expect(engine.nextBitmapTextJob(pending: [behind, second], playhead: 50) == nil,
+                "20-22 is beyond a 10 s reach")
+        engine.subtitleCues.append(bitmapCue(4, 49, 51))
+        #expect(engine.nextBitmapTextJob(pending: [], playhead: 50)?.cueID == 4)
+    }
+
+    /// #271: each publication makes every consumer walk the whole array. A burst of readings (the
+    /// lead window at selection) must not cost one each.
+    @MainActor
+    @Test("a burst of readings is written back in batches, not one publication per cue")
+    func batchesWriteBack() async throws {
+        let probe = RecognizerProbe()
+        let engine = try engine(recognizing: true, probe: probe)
+        var publications = 0
+        let watch = engine.$subtitleCues.sink { cues in
+            if cues.contains(where: { $0.recognizedText != nil }) { publications += 1 }
+        }
+        defer { watch.cancel() }
+        engine.subtitleCues = (0..<20).map { bitmapCue($0, 10 + Double($0) * 3, 12 + Double($0) * 3) }
+        try await waitFor { engine.subtitleCues.allSatisfy { $0.recognizedText != nil } }
+        #expect(probe.callCount == 20)
+        #expect(publications < 20, "\(publications) publications for 20 readings")
+    }
+
+    @MainActor
+    @Test("a publication with nothing to read starts no task")
+    func noTaskWithoutBitmaps() throws {
+        let probe = RecognizerProbe()
+        let engine = try engine(recognizing: true, probe: probe)
+        engine.subtitleCues = [SubtitleCue(id: 1, startTime: 10, endTime: 12, body: .text("caption"))]
+        #expect(engine.bitmapTextRecognitionTask == nil)
+    }
+
+    /// Two URL-only sidecars in a row have no track id, and a freed source's address can come back
+    /// for its successor. The install count tells them apart.
+    @MainActor
+    @Test("a reading from a replaced sidecar writes nothing")
+    func replacedSidecarDropsReading() async throws {
+        let probe = RecognizerProbe(blocking: true)
+        let engine = try engine(recognizing: true, probe: probe)
+        engine.subtitleCues = [bitmapCue(1, 10, 12)]
+        try await waitFor { probe.entered == 1 }
+        engine.sidecarBitmapSourceEpochs[.primary, default: 0] &+= 1
+        engine.subtitleCues = [bitmapCue(7, 10, 12)]
+        probe.release()
+        try await waitFor { probe.entered == 2 }
+        probe.release()
+        try await waitFor { engine.subtitleCues[0].recognizedText != nil }
+        #expect(probe.callCount == 2)
+    }
+
+    @Test("pieces on one baseline are one line, read left to right")
+    func baselineGrouping() {
+        let lines = SubtitleImageOCR.recognizedLines([
+            .init(text: "- No.", confidence: 0.5, visionBox: CGRect(x: 0.6, y: 0.11, width: 0.3, height: 0.3)),
+            .init(text: "- Yes.", confidence: 1, visionBox: CGRect(x: 0.1, y: 0.10, width: 0.3, height: 0.3)),
+            .init(text: "Above", confidence: 1, visionBox: CGRect(x: 0.2, y: 0.6, width: 0.6, height: 0.3)),
+        ])
+        #expect(lines.map(\.text) == ["Above", "- Yes. - No."])
+        #expect(lines[1].confidence == 0.5)
+        #expect(lines[1].boundingBox.minX.isApproximately(0.1))
+        #expect(lines[1].boundingBox.maxX.isApproximately(0.9))
     }
 
     @Test("a re-decoded picture keeps the text its predecessor already had")

@@ -17,20 +17,40 @@ enum SubtitleImageOCR {
         let visionBox: CGRect
     }
 
-    /// Vision's boxes have a bottom-left origin, so reading order is descending midY. Blank fragments
-    /// drop. AE#1114: each line keeps its confidence, and its box moves to a top-left origin, the
-    /// convention `SubtitleImage.position` uses.
+    /// Vision's boxes have a bottom-left origin. Blank fragments drop. Fragments whose vertical
+    /// extents overlap by at least half the smaller one sit on one baseline and form one line, read
+    /// left to right: Vision splits a two-speaker line ("- Yes.   - No.") at the gap, and sorting
+    /// the pieces by midY alone stacked them, in an order set by a pixel of tilt. Lines then go top
+    /// first. AE#1114: each line keeps the lowest confidence of its pieces and their joint box, moved
+    /// to a top-left origin, the convention `SubtitleImage.position` uses.
     nonisolated static func recognizedLines(_ observations: [Observation]) -> [SubtitleRecognizedText.Line] {
-        observations
-            .map { (obs: $0, text: $0.text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let pieces = observations
+            .map { Observation(text: $0.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                               confidence: $0.confidence, visionBox: $0.visionBox) }
             .filter { !$0.text.isEmpty }
-            .sorted { $0.obs.visionBox.midY > $1.obs.visionBox.midY }
-            .map { item in
-                let box = item.obs.visionBox
-                return SubtitleRecognizedText.Line(
-                    text: item.text, confidence: item.obs.confidence,
-                    boundingBox: CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height))
+            .sorted { $0.visionBox.midY > $1.visionBox.midY }
+        var groups: [[Observation]] = []
+        for piece in pieces {
+            if let last = groups.indices.last,
+               groups[last].contains(where: { sharesBaseline($0.visionBox, piece.visionBox) }) {
+                groups[last].append(piece)
+            } else {
+                groups.append([piece])
             }
+        }
+        return groups.map { group in
+            let ordered = group.sorted { $0.visionBox.minX < $1.visionBox.minX }
+            let box = ordered.dropFirst().reduce(ordered[0].visionBox) { $0.union($1.visionBox) }
+            return SubtitleRecognizedText.Line(
+                text: ordered.map(\.text).joined(separator: " "),
+                confidence: ordered.map(\.confidence).min() ?? 0,
+                boundingBox: CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height))
+        }
+    }
+
+    private nonisolated static func sharesBaseline(_ a: CGRect, _ b: CGRect) -> Bool {
+        let overlap = min(a.maxY, b.maxY) - max(a.minY, b.minY)
+        return overlap >= 0.5 * min(a.height, b.height)
     }
 
     /// Track tags are ISO 639-1/2 ("ger"), Vision wants BCP-47 primary codes ("de"). The engine's
