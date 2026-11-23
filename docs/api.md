@@ -1130,7 +1130,7 @@ Prefer `$playbackPhase` over stitching `state` + `isBuffering` + `isSeeking` tog
 - **It adds** `.rebuffering` and `.stalled(reconnecting:)`.
 - **Precedence**, highest first: `error > ended > idle > loading > stalled > seeking > rebuffering > playing/paused`. A source that stopped delivering stays visible while a seek is in flight, because no seek can land over it; `isSeeking` / `seekEvents` still carry the seek (#410).
 - **`.stalled(reconnecting: true)`** is a reader that is retrying. **`false`** is a reader that has used up its retries and handed recovery to the producer's reopen. Both mean the source is down.
-- **`.rebuffering`** is published on the AVPlayer-backed paths: the native loopback session, direct remote HLS, and the bare-AVPlayer audio host (a starved progressive stream, once the item has played). `.stalled` cannot occur there, because there is no reader. The software video host publishes it too, from the moment one of its pumps pauses the synchronizer to refill (a dry ring at the live edge, or an audio lead used up on demand).
+- **`.rebuffering`** is published on the AVPlayer-backed paths: the native loopback session, direct remote HLS, and the bare-AVPlayer audio host (a starved progressive stream, once the item has played). `.stalled` cannot occur there, because there is no reader. The software video host publishes it too, from the moment one of its pumps pauses the synchronizer to refill (a dry ring at the live edge, a dry source on live without a DVR window, or an audio lead used up on demand).
 - A source whose connection is retrying reads as `.stalled` on the FFmpeg-backed hosts (software video, FFmpeg audio) once the reader's ladder is running.
 
 #### Seek events

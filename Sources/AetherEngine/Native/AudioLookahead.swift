@@ -77,6 +77,45 @@ enum AudioLookaheadPolicy {
         return (atRingEnd && !sourceEnded && lead < underrunPauseLeadSeconds) ? .pauseForRebuffer : .none
     }
 
+    /// AE#1121: the clock rule for software Live without a DVR window, which reads its source through
+    /// `DirectLiveAudioReadAhead` and has no ring. An empty read-ahead is that route's dry ring, so the
+    /// feeder's rule applies unchanged, without the VOD pause arm: a live source that sits under the
+    /// underrun lead with nothing queued is about to chop either way. A session whose audio never
+    /// produced a buffer (the clock armed off video, #337) has no lead to lose and never pauses.
+    static func directLiveClockAction(
+        rebuffering: Bool,
+        lastFedAudioPTS: Double,
+        clockSeconds: Double,
+        sourceDry: Bool
+    ) -> ClockAction {
+        guard lastFedAudioPTS.isFinite, clockSeconds.isFinite else { return .none }
+        return clockAction(rebuffering: rebuffering, lastFedAudioPTS: lastFedAudioPTS,
+                           clockSeconds: clockSeconds, atRingEnd: sourceDry, sourceEnded: false)
+    }
+
+    /// The shortest source wait `directLiveSourceWaitSeconds` hands out, so a clock that is already
+    /// under the underrun lead costs at most this many wakes a second until the pause lands.
+    static let directLiveMinimumWaitSeconds = 0.05
+
+    /// AE#1121: how long the ringless live loop may wait on an empty source before its clock reaches
+    /// the underrun point. The loop is the only thread that can pause the clock, and an unbounded wait
+    /// there let a stalled source run the clock past every sample it had. nil sleeps until data
+    /// arrives: nothing can underrun while the clock stands (paused, rebuffering, unarmed) or while no
+    /// audio has been fed.
+    static func directLiveSourceWaitSeconds(
+        clockArmed: Bool,
+        clockRunning: Bool,
+        rebuffering: Bool,
+        lastFedAudioPTS: Double,
+        clockSeconds: Double,
+        rate: Float
+    ) -> TimeInterval? {
+        guard clockArmed, clockRunning, !rebuffering, rate > 0,
+              lastFedAudioPTS.isFinite, clockSeconds.isFinite else { return nil }
+        let untilUnderrun = (lastFedAudioPTS - clockSeconds - underrunPauseLeadSeconds) / Double(rate)
+        return max(untilUnderrun, directLiveMinimumWaitSeconds)
+    }
+
     static func decide(
         clockArmed: Bool,
         preArmPacketsFed: Int,

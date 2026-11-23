@@ -4211,9 +4211,10 @@ final class SoftwarePlaybackHost {
         // drops). Video packets now PARK in a bounded FIFO while audio keeps decoding up to
         // AudioLookaheadPolicy.targetLeadSeconds ahead of the clock, and a genuine underrun
         // pauses the clock for a rebuffer (AudioLookaheadPolicy.clockAction) instead of
-        // letting it free-run, mirroring the DVR feeder arm. Ordinary Live also parks video,
-        // but never pauses its clock for rebuffering. Its forward-only producer keeps already
-        // parked video runnable while source I/O waits; DVR retains its separate feeder.
+        // letting it free-run, mirroring the DVR feeder arm. Ordinary Live (no DVR window) parks
+        // video the same way and pauses its clock on a dry source too (AE#1121); its forward-only
+        // producer keeps already parked video runnable while source I/O waits. DVR retains its
+        // separate feeder.
         var parkedVideo: [UnsafeMutablePointer<AVPacket>] = []
         let parkedVideoCap = readGateBudget.parkedVideoCap
         let targetAudioLead = readGateBudget.audioLeadSeconds
@@ -4418,25 +4419,37 @@ final class SoftwarePlaybackHost {
         }
 
         // Pause the master clock when the audio lead is genuinely exhausted, resume once the
-        // rebuffer target is met. In this loop there is no ring to distinguish decode lag
+        // rebuffer target is met. For VOD this loop has no ring to distinguish decode lag
         // from a dry source, so a sub-threshold lead IS treated as source-starved - the
         // pauseArmOpen latch keeps that from firing on realtime-paced sources that never had
         // a lead to lose.
         func applyAudioClockAction() {
-            guard !isLive, decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
+            guard decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
             let lead = lastEnqueuedAudioPtsSec.isFinite
                 ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
-            pauseArmOpen = AudioLookaheadPolicy.pauseArmOpens(wasOpen: pauseArmOpen, lead: lead)
-            guard pauseArmOpen, isPlaying() || rebuffering else { return }
-            switch AudioLookaheadPolicy.clockAction(
-                rebuffering: rebuffering,
-                lastFedAudioPTS: lastEnqueuedAudioPtsSec,
-                clockSeconds: aOut.currentTimeSeconds,
-                atRingEnd: true,
-                // End of media releases the hold explicitly in the read path below; there is no
-                // ring here whose end this could be read from.
-                sourceEnded: false
-            ) {
+            let action: AudioLookaheadPolicy.ClockAction
+            if let directLiveSource {
+                // AE#1121: this route has a queue to read dryness off, so it needs no pause arm.
+                guard isPlaying() || rebuffering else { return }
+                action = AudioLookaheadPolicy.directLiveClockAction(
+                    rebuffering: rebuffering,
+                    lastFedAudioPTS: lastEnqueuedAudioPtsSec,
+                    clockSeconds: aOut.currentTimeSeconds,
+                    sourceDry: directLiveSource.packets.snapshot.packetCount == 0)
+            } else {
+                pauseArmOpen = AudioLookaheadPolicy.pauseArmOpens(wasOpen: pauseArmOpen, lead: lead)
+                guard pauseArmOpen, isPlaying() || rebuffering else { return }
+                action = AudioLookaheadPolicy.clockAction(
+                    rebuffering: rebuffering,
+                    lastFedAudioPTS: lastEnqueuedAudioPtsSec,
+                    clockSeconds: aOut.currentTimeSeconds,
+                    atRingEnd: true,
+                    // End of media releases the hold explicitly in the read path below; there is no
+                    // ring here whose end this could be read from.
+                    sourceEnded: false
+                )
+            }
+            switch action {
             case .pauseForRebuffer:
                 rebuffering = true
                 noteRebuffering(true)
@@ -4564,11 +4577,18 @@ final class SoftwarePlaybackHost {
                         // The empty-source wait may last indefinitely; publish the final drain
                         // before sleeping so SWDiag does not retain an already-consumed packet.
                         diag?.update(lastAudioPts: diagAudioPtsSec, parked: parkedVideo.count,
-                                     rebuffering: false, generation: diagAudioPtsGeneration)
+                                     rebuffering: rebuffering, generation: diagAudioPtsGeneration)
                     }
                     let maximumWait: TimeInterval?
                     if parkedVideo.isEmpty {
-                        maximumWait = nil
+                        // AE#1121: Live wakes when its clock would reach the underrun point, so the
+                        // pause at the top of the next iteration catches a stalled source.
+                        maximumWait = directLiveSource == nil ? nil
+                            : AudioLookaheadPolicy.directLiveSourceWaitSeconds(
+                                clockArmed: clockArmed(), clockRunning: isPlaying(),
+                                rebuffering: rebuffering, lastFedAudioPTS: lastEnqueuedAudioPtsSec,
+                                clockSeconds: audioOutput?.currentTimeSeconds ?? .nan,
+                                rate: currentRate())
                     } else if directLiveSource != nil {
                         maximumWait = readyVideo ? 0 : 0.01
                     } else {

@@ -210,6 +210,53 @@ struct LiveAudioProgressTests {
         #expect(engine.state == .idle)
     }
 
+    /// A stalled source pauses the clock for a rebuffer instead of letting it run past the audio (AE#1121).
+    @Test
+    func test_sourceStall_runningClock_pausesForRebufferAndResumes() async throws {
+        // Arrange - hold source I/O once the producer has read a little of the stream.
+        let sourceGate = ProbeTestGate()
+        let producerReads = ProbeTestBox(0)
+        let reader = ProbeRecordingReader(
+            data: try LongGOPTransportStreamFixture.data(),
+            chunkSize: 4096,
+            afterRead: {
+                if Thread.current.name == "AetherEngine.SoftwarePacketReadAhead.producer" {
+                    producerReads.update { $0 += 1 }
+                    if producerReads.value >= 4 { sourceGate.wait() }
+                }
+            },
+            afterCancel: { sourceGate.open() }
+        )
+        let engine = try AetherEngine()
+        defer {
+            sourceGate.open()
+            engine.stop()
+        }
+        try await engine.load(
+            source: .custom(reader, formatHint: "mpegts"),
+            options: LoadOptions(isLive: true, autoplay: false, preferredDecodePath: .software)
+        )
+        let host = try #require(engine.softwareHost)
+        try #require(host.directLiveReadAheadForTesting != nil)
+
+        // Act - play into the held source until the audio lead runs out.
+        engine.play()
+        try await waitFor { host.isRebuffering || engine.errorInfo != nil }
+
+        // Assert - the clock stopped at the underrun instead of running on.
+        #expect(engine.errorInfo == nil)
+        #expect(host.isRebuffering)
+        #expect(host.clockRateForTesting == 0)
+
+        // Act - release the source; the rest of the stream refills or ends the hold.
+        sourceGate.open()
+        try await waitFor { !host.isRebuffering || engine.errorInfo != nil }
+
+        // Assert
+        #expect(engine.errorInfo == nil)
+        #expect(!host.isRebuffering)
+    }
+
     /// Closing is idempotent and the blocked producer retires after its source read returns.
     @Test
     func test_close_sourceStillHeld_retiresWorkerAfterReadReturns() async throws {
