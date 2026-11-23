@@ -405,7 +405,7 @@ Measurements behind [architecture.md](architecture.md), [architecture-native.md]
 
 Measured on 2026-11-23 on a MacBook Air (M1, macOS) with a release `aetherctl play`, FFmpegBuild 3.19.0, the default GPU engine. The figures are the steady `[Deinterlace] timing` windows of two runs per chain (the first window of a run includes the graph's start and reads a higher `max`). Per input frame, in ms.
 
-Current rule: [architecture-software.md › Deinterlace timing log](architecture-software.md#how-a-session-reaches-this-host).
+Current rule: [architecture-software.md › Deinterlace timing log](architecture-software.md#deinterlace-timing-log-ae1112).
 
 | Source | Chain | Out per 240 in | pull | transfer | decode | held | Input / output interval |
 |---|---|---|---|---|---|---|---|

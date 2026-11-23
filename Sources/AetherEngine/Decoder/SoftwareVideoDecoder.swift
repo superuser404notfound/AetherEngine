@@ -482,8 +482,12 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             guard codecContext != nil else { lock.unlock(); break }
             let receiveStart = DispatchTime.now().uptimeNanoseconds
             let ret = avcodec_receive_frame(ctx, f)
-            if deinterlacer.isActive { deinterlaceTiming.addDecode(ms: Self.elapsedMs(since: receiveStart)) }
-            guard ret >= 0 else { lock.unlock(); break }
+            let receiveMs = Self.elapsedMs(since: receiveStart)
+            guard ret >= 0 else {
+                if deinterlacer.isActive { deinterlaceTiming.addDecode(ms: receiveMs) }
+                lock.unlock()
+                break
+            }
 
             // AE#499: fill the fields the VUI left open from the container's declaration BEFORE any
             // consumer reads the frame, for the same reason the timestamp repair below runs here.
@@ -535,6 +539,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             }
 
             let isInterlaced = (f.pointee.flags & (1 << 3)) != 0  // AV_FRAME_FLAG_INTERLACED
+            if isInterlaced || deinterlacer.isActive { deinterlaceTiming.addDecode(ms: receiveMs) }
             // #853: decimate stamps its output from the graph's first frame plus one tick per frame, so a
             // source frame that never arrived would shift every later picture against the audio. Flush
             // what the graph holds and let this frame build a fresh one that anchors on it.
@@ -544,7 +549,16 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 deinterlacer.teardown()
             }
             if isInterlaced || deinterlacer.isActive {
-                if deinterlacer.ensureGraph(frame: f, timeBase: timeBase) {
+                let buildsBefore = deinterlacer.graphBuilds
+                let ensureStart = DispatchTime.now().uptimeNanoseconds
+                let graphReady = deinterlacer.ensureGraph(frame: f, timeBase: timeBase)
+                let ensureMs = Self.elapsedMs(since: ensureStart)
+                if deinterlacer.graphBuilds != buildsBefore {
+                    deinterlaceTiming.addBuild(ms: ensureMs)
+                } else {
+                    deinterlaceTiming.addPush(ms: ensureMs)
+                }
+                if graphReady {
                     let pushStart = DispatchTime.now().uptimeNanoseconds
                     let pushRet = deinterlacer.push(f)
                     deinterlaceTiming.addPush(ms: Self.elapsedMs(since: pushStart))
@@ -569,6 +583,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                     }
                 }
                 // No deinterlacer in linked build or graph failure: fall through and render as-is (combing, but playing).
+                deinterlaceTiming.discardPending()
             }
             // emit() must stay under `lock`: close() frees swsContext/pixelBufferPool under the same lock;
             // emitting unlocked raced a stop() into a use-after-free of the sws context.
@@ -591,6 +606,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 deinterlacer.noteGraphError(afterPull: ret)
                 break
             }
+            deinterlaceTiming.addOutput()
             // Untimestamped output is unschedulable: yadif's SECOND field is
             // cur.pts + next.pts, which is NOPTS whenever either source frame
             // lacked a PTS (live TS delivers those); an invalid-PTS sample
@@ -607,7 +623,6 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 av_frame_unref(out)
                 continue
             }
-            deinterlaceTiming.addOutput()
             // Filtered PTS rides the sink's time_base, NOT the stream's: yadif/bwdif
             // halve the link time_base, and send_field puts the two fields of a frame
             // on odd/even ticks of that halved base (see DeinterlaceFilter class doc).
@@ -659,7 +674,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // same attributes the sw path has always displayed); still no sws, no CPU copy.
             guard let raw = f.pointee.data.3 else { return }
             let src = Unmanaged<CVPixelBuffer>.fromOpaque(UnsafeRawPointer(raw)).takeUnretainedValue()
-            let transferStart = DispatchTime.now().uptimeNanoseconds
+            let transferStart = fromGraph ? DispatchTime.now().uptimeNanoseconds : 0
             let transferred = transferToOwnPool(src)
             if fromGraph { deinterlaceTiming.addTransfer(ms: Self.elapsedMs(since: transferStart)) }
             if let copied = transferred {
@@ -676,7 +691,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             attachColorSpace(from: f, to: pixelBuffer)
             attachPixelAspectRatio(from: f, to: pixelBuffer)
         } else {
-            let convertStart = DispatchTime.now().uptimeNanoseconds
+            let convertStart = fromGraph ? DispatchTime.now().uptimeNanoseconds : 0
             let converted = convertFrameToPixelBuffer(f)
             if fromGraph { deinterlaceTiming.addConvert(ms: Self.elapsedMs(since: convertStart)) }
             guard let converted else { return }
@@ -781,6 +796,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         // An EOF'ed graph takes no more input, whatever the caller's flush asks for.
         deinterlacer.teardown()
+        // The last frames had no input frame of their own; a seek follows.
+        deinterlaceTiming.noteDiscontinuity()
     }
 
     func flush(resetFilterGraph: Bool) {
@@ -794,6 +811,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         deliveryLock.unlock()
         // Deinterlacer temporal references are stale across seeks; drop the graph (lazily rebuilt on next interlaced frame).
         if resetFilterGraph { deinterlacer.teardown() }
+        deinterlaceTiming.noteDiscontinuity()
         rpuTable.removeAll()
         if let ctx = codecContext { avcodec_flush_buffers(ctx) }
         let pipeline = conversionPipeline

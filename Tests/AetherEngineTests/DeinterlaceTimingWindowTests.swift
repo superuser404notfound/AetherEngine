@@ -42,9 +42,9 @@ struct DeinterlaceTimingWindowTests {
         #expect(abs(try #require(r.inputIntervalMs) - 33.367) < 0.01)
         #expect(abs(try #require(r.outputIntervalMs) - 41.708) < 0.01)
         // per input frame: push 1, pulls 0.5 * (outputs + 1), transfers 0.25 * outputs, decode 2
-        #expect(abs(r.pushMs / 240 - 1.0) < 1e-9)
-        #expect(abs(r.pullMs / 240 - 0.9) < 1e-9)
-        #expect(abs(r.transferMs / 240 - 0.2) < 1e-9)
+        #expect(abs(r.costs.pushMs / 240 - 1.0) < 1e-9)
+        #expect(abs(r.costs.pullMs / 240 - 0.9) < 1e-9)
+        #expect(abs(r.costs.transferMs / 240 - 0.2) < 1e-9)
         #expect(abs(r.heldMs / 240 - 4.1) < 1e-9)
         // the worst frame is one that kept its output: 1 + 0.5 * 2 + 0.25, decode left out
         #expect(abs(r.maxMs - 2.25) < 1e-9)
@@ -112,6 +112,64 @@ struct DeinterlaceTimingWindowTests {
         #expect(r.logLine == "[Deinterlace] timing: last 240 frames in, 240 out (bwdif, inverse telecine CPU): "
                 + "push 3.00 ms, pull 1.00 ms, convert 0.50 ms per input frame, max 4.50 ms; decode 0.00 ms; "
                 + "decoder thread held 4.50 ms per input frame")
+    }
+
+    @Test("graph builds count into held and max, and show on the line only when one happened")
+    func buildsShowWhenTheyHappen() throws {
+        var w = DeinterlaceTimingWindow()
+        var report: DeinterlaceTimingWindow.Report?
+        for k in 0..<DeinterlaceTimingWindow.statsInterval {
+            if k == 0 || k == 120 { w.addBuild(ms: 6) }
+            if let r = feed(&w, k: k, outputs: 2, label: "bwdif_videotoolbox, inverse telecine off") { report = r }
+        }
+        let r = try #require(report)
+        #expect(r.costs.builds == 2)
+        // push 1 + three pulls 0.5 + two transfers 0.25 + the build
+        #expect(abs(r.maxMs - 9.0) < 1e-9)
+        #expect(r.logLine.contains("): builds 2 (12.0 ms total), push 1.00 ms, pull"))
+        // decode 2 + graph 3 per frame, plus 12 ms of builds over 240 frames
+        #expect(abs(r.heldMs / 240 - 5.05) < 1e-9)
+    }
+
+    @Test("work of a frame that never reached the graph, or of a drained graph, is not carried over")
+    func discardedWorkIsNotCarried() throws {
+        var w = DeinterlaceTimingWindow()
+        var report: DeinterlaceTimingWindow.Report?
+        for k in 0..<DeinterlaceTimingWindow.statsInterval {
+            if k == 50 {
+                // a failed push: its decode and push time go, the frame renders as-is
+                w.addDecode(ms: 40)
+                w.addPush(ms: 40)
+                w.discardPending()
+            }
+            if k == 100 {
+                // the end-of-stream drain pulls two frames with no input of their own, then a seek
+                w.addPull(ms: 40)
+                w.addOutput()
+                w.addOutput()
+                w.addTransfer(ms: 40)
+                w.noteDiscontinuity()
+            }
+            if let r = feed(&w, k: k, outputs: 1) { report = r }
+        }
+        let r = try #require(report)
+        #expect(r.framesOut == 240)
+        #expect(abs(r.maxMs - 2.25) < 1e-9)
+        #expect(abs(r.heldMs / 240 - 4.25) < 1e-9)
+    }
+
+    @Test("a seek resets the step, so even a short skip is no frame interval")
+    func discontinuityResetsTheStep() throws {
+        var w = DeinterlaceTimingWindow()
+        var report: DeinterlaceTimingWindow.Report?
+        for k in 0..<DeinterlaceTimingWindow.statsInterval {
+            // a 0.5 s skip forward at frame 100, through the flush a seek makes
+            if k == 100 { w.noteDiscontinuity() }
+            let pts = Double(k) * Self.ntsc + (k >= 100 ? 0.5 : 0)
+            if let r = feed(&w, k: k, outputs: 1, pts: pts) { report = r }
+        }
+        let r = try #require(report)
+        #expect(abs(try #require(r.inputIntervalMs) - 33.367) < 0.01)
     }
 
     @Test("label names the filter and where inverse telecine runs")
