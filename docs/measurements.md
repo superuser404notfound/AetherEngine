@@ -309,9 +309,9 @@ Before the fix both read `clock re-anchored to first sample: anchor=9.984s (load
 
 `--paused` alone (no `play`) is not judged, but its ticks are the observable for the second half of the same report. A paused resume read `cur=0.00` until play, because the host published its still unarmed synchronizer over the anchor. It now reads `cur=17.30`.
 
-### `customio --live` spool (AE#445, AE#460, AE#461)
+### `customio --live` spool (AE#445, AE#460, AE#461, AE#1117)
 
-Measured: the custom-source live harness found that host reader callbacks ran on the pump's undrained thread (AE#445), and its reload arms showed two reloads that ignored what they were asked (AE#460, AE#461).
+Measured: the custom-source live harness found that host reader callbacks ran on the pump's undrained thread (AE#445), and its reload arms showed two reloads that ignored what they were asked (AE#460, AE#461). Its VOD arm showed that a closed recording read through a custom reader keeps nothing in the engine (AE#1117).
 
 Current rule: [cli.md › The `--live` spool](cli.md#the---live-spool-ae445).
 
@@ -324,6 +324,16 @@ Current rule: [cli.md › The `--live` spool](cli.md#the---live-spool-ae445).
 **`--reload-decode-path` before the AE#461 follow-up.** Before that follow-up, the `--reload-decode-path` run logged `#460: reload applying preferredDecodePath` and then `backend native -> native, decoder=VideoToolbox H264 (HW)`: accepted, named in the log, ignored.
 
 **`--host-carry` (AE#445 round 3).** Round 3's census on the reporter's device pinned his footprint to ONE `REALLOC`-tagged block, growing on an exact x1.25 ladder and holding every byte the session had consumed. That factor is Foundation's: `Data` grows a large buffer by `newLength >> 2`, while `av_fast_realloc` adds a sixteenth and FFmpeg's AVIO dynamic buffer a half. So the block is a Swift `Data`. The one `Data` shape that grows like that while its `count` stays tiny is a parse carry consumed from the front with `removeFirst`. That only advances the slice's lower bound and leaves the backing store holding everything below it.
+
+**`--vod-sequential` (AE#1117).** Measured on 2026-11-23 on a MacBook Pro (M1 Pro, macOS) with a debug `aetherctl` on 7.73.0+ (`87e30b4d`). The report was a 4 GB Apple TV killed near 2 GB after about 15 minutes of an IPTV catch-up that the host read itself and loaded as `.custom(reader, formatHint: "mpegts")` with `sequentialOrigin`. Its `memprobe` grew `mallocMB` about 2 MB/s, roughly twice the bytes muxed. The fixture had the reported stream's profile: 18 minutes of H.264 Main 1920x1080 at 50 fps plus AAC-LC stereo in MPEG-TS, 7.4 Mbit/s. The run took the reported path line for line (`uniform stride fallback ... sequential origin`, retention budget 2048 MiB, `effective video route = loopback`).
+
+| `memprobe` at t | Report: mallocMB | Report: physFP | Harness: mallocMB | Harness: physFP | Harness: cacheMB |
+|---|---|---|---|---|---|
+| 30 s | 233 | 361 MB | 13 | 66 MB | 51 |
+| about 600 s | 1327 | 1523 MB | 14 | 63 MB | 571 |
+| 931 s | 1917 | 2024 MB | 14 | 64 MB | 826 |
+
+876 MB went through the reader in 963 s and `physFP` stayed flat (ratio -0.01 against the bytes read). The segment cache lives on disk and is read back through `mmap`, so its `cacheMB` never shows up in `mallocMB`. On this path the engine retains nothing that grows with the stream, which puts a climb like the report's in the host's reader.
 
 ### `audiotap --software` (#400)
 

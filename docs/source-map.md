@@ -712,7 +712,7 @@ Every subcommand is listed with its flags in [docs/cli.md](cli.md#subcommands-at
 | `AudioTapCmd.swift` | `audiotap`. |
 | `BackgroundAudioCmd.swift` | `bgaudio`. |
 | `CustomIO.swift` | `customio`. |
-| `LiveSpoolIO.swift` | `customio --live` (AE#445): a host-owned live spool behind `MediaSource.custom`. |
+| `LiveSpoolIO.swift` | `customio --live` (AE#445): a host-owned live spool behind `MediaSource.custom`; `--vod-sequential` loads it as a closed recording (AE#1117). |
 | `SMBTestCommand.swift` | `smbtest`. |
 | `LiveCmd.swift` | `live`, plus its high-bitrate seed generation. |
 | `LiveFixture.swift` | The synthetic, never-ending MPEG-TS source behind `live`. |

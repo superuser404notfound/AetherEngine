@@ -298,7 +298,8 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
                         foundationReader: Bool = false, carryTrim: HostCarryTrim = .none,
                         reloadAt: Double? = nil, cancelLatches: Bool = false,
                         reloadDecodePath: DecodePath? = nil,
-                        axis: ReaderAxis = .absolute, joinOffsetMB: Int = 4) -> Int32 {
+                        axis: ReaderAxis = .absolute, joinOffsetMB: Int = 4,
+                        vodDeclaredSeconds: Double? = nil) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         // Uncapped captures: a steady mux-rate climb spends one capture per threshold climbed, so the
@@ -311,7 +312,8 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
           + "wrap=\(wraps) census=\(mallocCensus) "
           + "reader=\(foundationReader ? "foundation" : "posix") hostCarry=\(carryTrim.rawValue) "
           + "cancel=\(cancelLatches ? "latches" : "unblocks") axis=\(axis.rawValue)"
-          + (axis == .absolute ? "" : " join=\(joinOffsetMB)MB") + ")")
+          + (axis == .absolute ? "" : " join=\(joinOffsetMB)MB")
+          + (vodDeclaredSeconds.map { String(format: " vodSequential=%.0fs", $0) } ?? "") + ")")
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
         box.value = await customLiveSpoolRun(path: path, seconds: seconds, rateKbps: rateKbps,
@@ -320,7 +322,8 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
                                              reloadAt: reloadAt,
                                              reloadDecodePath: reloadDecodePath,
                                              cancelLatches: cancelLatches,
-                                             axis: axis, joinOffsetMB: joinOffsetMB)
+                                             axis: axis, joinOffsetMB: joinOffsetMB,
+                                             vodDeclaredSeconds: vodDeclaredSeconds)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -333,7 +336,8 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
                                 carryTrim: HostCarryTrim, reloadAt: Double? = nil,
                                 reloadDecodePath: DecodePath? = nil,
                                 cancelLatches: Bool = false,
-                                axis: ReaderAxis = .absolute, joinOffsetMB: Int = 4) async -> Int32 {
+                                axis: ReaderAxis = .absolute, joinOffsetMB: Int = 4,
+                                vodDeclaredSeconds: Double? = nil) async -> Int32 {
     let reader: PacedLiveSpoolIOReader
     do {
         reader = try PacedLiveSpoolIOReader(path: path, rateKbps: rateKbps,
@@ -354,8 +358,17 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
 
     var options = LoadOptions()
     options.suppressDisplayCriteria = true
-    options.isLive = true
-    options.dvrWindowSeconds = dvrWindow
+    if let vodDeclaredSeconds {
+        // AE#1117: a closed recording the host reads itself. Paced faster than real time, the
+        // producer runs ahead to its forward window and then parks, the way a host that fetches
+        // a few segments ahead keeps it.
+        options.isLive = false
+        options.sequentialOrigin = true
+        options.declaredDurationSeconds = vodDeclaredSeconds
+    } else {
+        options.isLive = true
+        options.dvrWindowSeconds = dvrWindow
+    }
 
     do {
         try await engine.load(source: .custom(reader, formatHint: "mpegts"), options: options)
@@ -412,8 +425,8 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
     }
 
     let start = Date()
-    var firstSample: (t: Double, footprint: Int)?
-    var lastSample: (t: Double, footprint: Int)?
+    var firstSample: (t: Double, footprint: Int, srcBytes: Int64)?
+    var lastSample: (t: Double, footprint: Int, srcBytes: Int64)?
     var tick = 0
     while Date().timeIntervalSince(start) < seconds {
         try? await Task.sleep(nanoseconds: 10_000_000_000)
@@ -423,8 +436,8 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
         let srcMB = Double(reader.bytesRead) / 1_048_576.0
         // Settle for a minute before anchoring the slope: load, probe and the first segments are
         // a step, not a rate, and an anchor inside them flatters or damns the run by accident.
-        if elapsed >= 60, firstSample == nil { firstSample = (elapsed, fp) }
-        lastSample = (elapsed, fp)
+        if elapsed >= 60, firstSample == nil { firstSample = (elapsed, fp, reader.bytesRead) }
+        lastSample = (elapsed, fp, reader.bytesRead)
         let slope = firstSample.map { f -> String in
             let dt = elapsed - f.t
             guard dt > 1 else { return "n/a" }
@@ -462,9 +475,14 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
     }
     if let f = firstSample, let l = lastSample, l.t - f.t > 30 {
         let growth = Double(l.footprint - f.footprint) / (l.t - f.t)
+        // A VOD spool is paced above real time and parks on backpressure, so the pacer's rate is
+        // not what the engine consumed. The ratio goes against the bytes actually read.
+        let readMBps = Double(l.srcBytes - f.srcBytes) / 1_048_576.0 / (l.t - f.t)
+        let base = vodDeclaredSeconds == nil ? srcMBps : readMBps
         print(String(format: "VERDICT: physFP %d -> %d MB over %.0fs = %.2f MB/s "
-                     + "(source mux rate %.2f MB/s, retention ratio %.2f)",
-                     f.footprint, l.footprint, l.t - f.t, growth, srcMBps, growth / srcMBps))
+                     + "(source mux rate %.2f MB/s, read %.2f MB/s, retention ratio %.2f)",
+                     f.footprint, l.footprint, l.t - f.t, growth, srcMBps, readMBps,
+                     base > 0 ? growth / base : 0))
     } else {
         print("VERDICT: run too short to state a slope (need > 90s)")
     }
