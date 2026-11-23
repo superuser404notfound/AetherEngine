@@ -49,16 +49,37 @@ enum FLACChannelLabels {
         }
     }
 
-    /// True when a FLAC track in this layout plays every channel on its own speaker. A layout of unknown
-    /// order (`AV_CHANNEL_ORDER_UNSPEC`) has nothing better to say than the default, and a count FLAC
-    /// cannot carry is the bridge's to downmix, so both answer true.
+    /// False only when the track would play channels on the wrong speakers AND PCM can name every one of
+    /// them, so the answer decides between FLAC and PCM. True for:
+    /// - a layout CoreMedia assumes anyway;
+    /// - one or two channels, where a label (a mono track tagged front left, a stereo pair tagged Lt/Rt)
+    ///   would move the sound off the centre or the pair rather than fix anything;
+    /// - an order that names no speakers (unknown, ambisonic) and a channel movenc's `chnl` table has no
+    ///   position for, where a PCM header would fail to write and the session would lose its audio;
+    /// - a count FLAC cannot carry, which the bridge downmixes anyway.
     static func carries(_ layout: UnsafePointer<AVChannelLayout>) -> Bool {
         let count = Int(layout.pointee.nb_channels)
-        guard layout.pointee.order != AV_CHANNEL_ORDER_UNSPEC,
+        guard count > 2,
+              layout.pointee.order == AV_CHANNEL_ORDER_NATIVE || layout.pointee.order == AV_CHANNEL_ORDER_CUSTOM,
               let assumed = assumedLayout(channels: count) else { return true }
         let source = (0..<count).map { av_channel_layout_channel_from_index(layout, UInt32($0)) }
+        guard source.allSatisfy(chnlPositions.contains) else { return true }
         return foldingLoneBackPair(source) == foldingLoneBackPair(assumed)
     }
+
+    /// The speakers movenc can write into a `chnl` box (`iso_channel_position` in libavformat's
+    /// mov_chan.c). Any other channel makes the PCM header write fail.
+    static let chnlPositions: Set<AVChannel> = [
+        AV_CHAN_FRONT_LEFT, AV_CHAN_FRONT_RIGHT, AV_CHAN_FRONT_CENTER, AV_CHAN_LOW_FREQUENCY,
+        AV_CHAN_SIDE_LEFT, AV_CHAN_SIDE_RIGHT, AV_CHAN_FRONT_LEFT_OF_CENTER, AV_CHAN_FRONT_RIGHT_OF_CENTER,
+        AV_CHAN_BACK_LEFT, AV_CHAN_BACK_RIGHT, AV_CHAN_BACK_CENTER,
+        AV_CHAN_SURROUND_DIRECT_LEFT, AV_CHAN_SURROUND_DIRECT_RIGHT,
+        AV_CHAN_SIDE_SURROUND_LEFT, AV_CHAN_SIDE_SURROUND_RIGHT, AV_CHAN_WIDE_LEFT, AV_CHAN_WIDE_RIGHT,
+        AV_CHAN_TOP_FRONT_LEFT, AV_CHAN_TOP_FRONT_RIGHT, AV_CHAN_TOP_FRONT_CENTER,
+        AV_CHAN_TOP_BACK_LEFT, AV_CHAN_TOP_BACK_RIGHT, AV_CHAN_TOP_BACK_CENTER,
+        AV_CHAN_TOP_SIDE_LEFT, AV_CHAN_TOP_SIDE_RIGHT, AV_CHAN_TOP_CENTER, AV_CHAN_LOW_FREQUENCY_2,
+        AV_CHAN_BOTTOM_FRONT_LEFT, AV_CHAN_BOTTOM_FRONT_RIGHT, AV_CHAN_BOTTOM_FRONT_CENTER,
+    ]
 
     /// The back pair renamed to the side pair when the layout has no side pair of its own.
     static func foldingLoneBackPair(_ channels: [AVChannel]) -> [AVChannel] {

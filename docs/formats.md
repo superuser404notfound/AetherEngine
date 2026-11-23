@@ -749,19 +749,24 @@ A FLAC track in fMP4 cannot tell CoreMedia its channel layout (AE#1120). CoreMed
 
 | Channels | Layout CoreMedia assumes |
 | --- | --- |
-| 1 to 3 | C · L R · L R C |
+| 1 | C |
+| 2 | L R |
+| 3 | L R C |
 | 4 | L R Rls Rrs |
 | 5, 6 | L R C Ls Rs, plus LFE at 6 |
 | 7 | L R C LFE Cs Ls Rs |
 | 8 | L R C LFE Rls Rrs Ls Rs |
 
-Any other layout plays some channels on the wrong speakers. 7.1(wide) put its front-of-centre pair on the side surrounds, 2.1 plays its LFE as a centre. `FLACChannelLabels` holds the rule.
+Any other layout plays some channels on the wrong speakers. 7.1(wide) plays its front-of-centre pair on the side surrounds, 2.1 plays its LFE as a centre. `FLACChannelLabels` holds the rule.
 
-Such a track leaves the engine as 24-bit PCM in its own layout instead (`ipcm`, `CODECS="…,ipcm"`). movenc writes the layout as a `chnl` box, and CoreMedia reads that one. It costs 1.15 Mbit/s per channel at 48 kHz (9.2 Mbit/s for 7.1) on the loopback.
+Such a track leaves the engine as 24-bit PCM in its own layout instead (`ipcm`, `CODECS="…,ipcm"`). movenc writes the layout as a `chnl` box, and CoreMedia reads that one. It costs 1.15 Mbit/s per channel at 48 kHz on the loopback, 9.2 Mbit/s for 7.1. PCM keeps the source rate, so a 192 kHz 7.1 takes 36.9 Mbit/s.
 
 - **A FLAC source** in such a layout leaves stream copy and goes out as PCM in either mode. Its stream copy already needed a sink that takes multichannel PCM, so nothing changes for the sink.
 - **A bridged source** (DTS-HD MA, PCM and the rest) goes out as PCM under `.lossless`. The FLAC encoder would have folded it into the default layout first, which mixed the front-of-centre pair of a 7.1(wide) into the fronts and left the sides silent. `.surroundCompat` keeps E-AC-3 above two channels, folded to 5.1 with every channel on a speaker that exists.
-- **One exception.** A layout whose only surround pair is the back pair counts as the side pair, so FFmpeg's 5.1 (what an AAC 5.1 decodes to) keeps stream copy. With one surround pair there is nothing for the two labels to tell apart.
+- **A lone back pair counts as the side pair.** FFmpeg's 5.1 (what an AAC 5.1 decodes to) keeps stream copy. With one surround pair there is nothing for the two labels to tell apart.
+- **One or two channels stay FLAC.** A label there (a mono track tagged front left) would move the sound off the centre rather than fix anything.
+- **Channels PCM cannot name stay FLAC.** An ambisonic order, or a channel movenc's `chnl` table has no position for (Lt/Rt), would fail the PCM header write and cost the session its audio.
+- **If the PCM track cannot be built,** the bridge falls back to FLAC in the default layout. swr folds the source into it, so every channel still plays on a speaker that exists.
 
 **The host picks the mode (AE#794).** The engine does not pick between the two from the route, because it cannot tell them apart. With tvOS's Continuous Audio Connection on, every HDMI route reports 32 unlabelled channels, whatever the sink takes. An eARC soundbar and a legacy-ARC one look the same, and a wrong FLAC pick on the second plays stereo.
 

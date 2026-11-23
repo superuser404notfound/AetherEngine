@@ -57,8 +57,13 @@ final class AudioBridge: @unchecked Sendable {
     ///
     /// AE#1120: where FLAC would be picked but cannot label the source's layout (`FLACChannelLabels`),
     /// the output is 24-bit PCM in the source's own layout instead, whose `chnl` box CoreMedia reads.
-    static func bridgeEncoder(for mode: Mode, sourceChannels: Int32, flacCarriesLayout: Bool = true) -> AVCodecID {
+    /// A FLAC source is only here for that layout, so it is PCM in either mode: its stream copy already
+    /// needed a sink that takes multichannel PCM, and E-AC-3 would trade lossless for a sink this track
+    /// never asked for.
+    static func bridgeEncoder(for mode: Mode, sourceChannels: Int32, flacCarriesLayout: Bool = true,
+                              sourceIsFLAC: Bool = false) -> AVCodecID {
         let lossless = flacCarriesLayout ? AV_CODEC_ID_FLAC : pcmOutputCodecID
+        if sourceIsFLAC && !flacCarriesLayout { return pcmOutputCodecID }
         switch mode {
         case .lossless:       return lossless
         case .surroundCompat: return sourceChannels > 2 ? AV_CODEC_ID_EAC3 : lossless
@@ -73,13 +78,12 @@ final class AudioBridge: @unchecked Sendable {
     /// HLS `CODECS` value for that PCM, the `ipcm` sample entry's four-character code.
     static let pcmHLSCodecs = "ipcm"
 
-    /// Frames per PCM packet. PCM has no frame structure; this only sets the packet granularity.
-    static let pcmFramesPerPacket: Int32 = 1024
 
     /// The other encoder a build can carry, for the #165 cascade when the resolved one is absent.
-    /// PCM is never missing (the bridge packs it itself), so it never reaches this.
+    /// PCM is never missing (the bridge packs it itself), but its header can fail to write, and then
+    /// FLAC is the fallback: the default layout, folded by swr, with every channel on a real speaker.
     static func alternateEncoder(to missing: AVCodecID) -> AVCodecID {
-        missing == AV_CODEC_ID_EAC3 ? AV_CODEC_ID_FLAC : AV_CODEC_ID_EAC3
+        missing == AV_CODEC_ID_EAC3 || missing == pcmOutputCodecID ? AV_CODEC_ID_FLAC : AV_CODEC_ID_EAC3
     }
 
     /// Channel ceiling per bridge encoder. EAC3 sits at 6 because FFmpeg's encoder caps there until the
@@ -387,7 +391,8 @@ final class AudioBridge: @unchecked Sendable {
         }
         let flacCarriesLayout = self.shaping.isActive || FLACChannelLabels.carries(&sourceLayout)
         let encoderCodecID = forcedEncoder
-            ?? Self.bridgeEncoder(for: mode, sourceChannels: shapedChannels, flacCarriesLayout: flacCarriesLayout)
+            ?? Self.bridgeEncoder(for: mode, sourceChannels: shapedChannels, flacCarriesLayout: flacCarriesLayout,
+                                  sourceIsFLAC: srcCodecID == AV_CODEC_ID_FLAC)
         outputCodecID = encoderCodecID
         let packsPCM = encoderCodecID == Self.pcmOutputCodecID
         if encoderCodecID == AV_CODEC_ID_EAC3 {
@@ -435,7 +440,7 @@ final class AudioBridge: @unchecked Sendable {
         let encoderName = avcodec_get_name(encoderCodecID).map { String(cString: $0) } ?? "?"
         let logBitRate: String = encoderCodecID == AV_CODEC_ID_EAC3
             ? "\(Int64(nChannels) * 128) kbps"
-            : packsPCM ? "\(Int64(nChannels) * 24 * Int64(sampleRate) / 1000) kbps (PCM, FLAC cannot label this layout)" : "VBR"
+            : packsPCM ? "\(Int64(nChannels) * 24 * Int64(sampleRate) / 1000) kbps (PCM, the layout FLAC cannot label)" : "VBR"
         EngineLog.emit(
             "[AudioBridge] init: mode=\(mode.rawValue) encoder=\(encoderName)"
             + (forcedEncoder != nil ? " (forced)" : "")
@@ -457,8 +462,8 @@ final class AudioBridge: @unchecked Sendable {
         enc.pointee.bit_rate = resolvedBitRate
         enc.pointee.time_base = AVRational(num: 1, den: sampleRate)
         // The encoders take the default layout for their count and swr folds the source into it. PCM
-        // keeps the source's own layout, which is the point of it: 7.1(wide) folded into 7.1 would put its
-        // front-of-centre pair into the fronts and leave the sides silent.
+        // keeps the source's own layout, since that is why it was picked. 7.1(wide) folded into 7.1 would
+        // mix its front-of-centre pair into the fronts.
         var encLayout = AVChannelLayout()
         defer { av_channel_layout_uninit(&encLayout) }
         if packsPCM, sourceLayout.nb_channels == nChannels, sourceLayout.order != AV_CHANNEL_ORDER_UNSPEC {
@@ -474,8 +479,8 @@ final class AudioBridge: @unchecked Sendable {
         if packsPCM {
             enc.pointee.codec_type = AVMEDIA_TYPE_AUDIO
             enc.pointee.codec_id = encoderCodecID
-            enc.pointee.frame_size = Self.pcmFramesPerPacket
-            enc.pointee.bit_rate = Int64(nChannels) * 24 * Int64(sampleRate)
+            enc.pointee.frame_size = Int32(PCMBedPacker.framesPerPacket)
+            enc.pointee.bit_rate = Int64(nChannels) * Int64(PCMBedPacker.bytesPerSample * 8) * Int64(sampleRate)
         } else {
             let encOpenRet = avcodec_open2(enc, encCodec, nil)
             guard encOpenRet >= 0 else {
@@ -497,9 +502,9 @@ final class AudioBridge: @unchecked Sendable {
             throw AudioBridgeError.encoderOpenFailed(code: fillRet)
         }
         if packsPCM {
-            cp.pointee.bits_per_coded_sample = 24
-            cp.pointee.bits_per_raw_sample = 24
-            cp.pointee.block_align = nChannels * 3
+            cp.pointee.bits_per_coded_sample = Int32(PCMBedPacker.bytesPerSample * 8)
+            cp.pointee.bits_per_raw_sample = Int32(PCMBedPacker.bytesPerSample * 8)
+            cp.pointee.block_align = nChannels * Int32(PCMBedPacker.bytesPerSample)
         }
 
         // 5. Resampler input format: seed from the decoder ctx if avformat_find_stream_info already resolved it

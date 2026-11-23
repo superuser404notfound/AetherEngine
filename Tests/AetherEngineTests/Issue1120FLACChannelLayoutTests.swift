@@ -21,6 +21,8 @@ struct Issue1120FLACChannelLayoutTests {
 
     @Test("the FLAC defaults, and a lone back pair, keep stream copy", arguments: [
         "mono", "stereo", "3.0", "quad", "FL+FR+SL+SR", "5.0", "5.0(side)", "5.1", "5.1(side)", "6.1", "7.1",
+        // One or two channels, a channel the chnl box cannot name, an ambisonic order: PCM would not help.
+        "FL", "FC+LFE", "DL+DR", "DL+DR+LFE", "ambisonic 1",
     ])
     func carried(name: String) throws {
         #expect(try Self.carries(name))
@@ -54,6 +56,14 @@ struct Issue1120FLACChannelLayoutTests {
                 == AV_CODEC_ID_EAC3)
         #expect(AudioBridge.bridgeEncoder(for: .surroundCompat, sourceChannels: 2, flacCarriesLayout: false)
                 == AudioBridge.pcmOutputCodecID)
+        // A FLAC source is bridged for its layout alone, so it stays lossless in either mode.
+        #expect(AudioBridge.bridgeEncoder(for: .surroundCompat, sourceChannels: 8, flacCarriesLayout: false,
+                                          sourceIsFLAC: true) == AudioBridge.pcmOutputCodecID)
+        #expect(AudioBridge.bridgeEncoder(for: .surroundCompat, sourceChannels: 8, sourceIsFLAC: true)
+                == AV_CODEC_ID_EAC3)
+        // A PCM track that cannot be built falls back to FLAC, which still plays every channel.
+        #expect(HLSVideoEngine.bridgeEncoderCascade(firstAttempt: AudioBridge.pcmOutputCodecID)
+                == [AudioBridge.pcmOutputCodecID, AV_CODEC_ID_FLAC])
     }
 
     @Test("a FLAC stream in 7.1(wide) is taken off stream copy, a 7.1 one is not")
