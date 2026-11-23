@@ -88,7 +88,13 @@ enum SubtitleRectText {
     }
 
     /// Drop every `{...}` span: from a `{` to the first `}` after it, so `{a{b}c}` leaves `c}`. A `{`
-    /// with no `}` behind it keeps itself and the rest verbatim.
+    /// with no `}` behind it keeps itself and the rest verbatim, except in drawing mode, where the
+    /// rest goes too.
+    ///
+    /// Text drawn in ASS drawing mode goes: it is vector commands (`m 10 20 l 30 40`), not words.
+    /// Anime typesetting uses drawings for boxes and masks, and these came out as rows of numbers.
+    /// Drawing starts at `\p1` or higher and ends at `\p0`, a bare `\p` or a `\r` reset
+    /// (`drawingScale(inBlock:)` reads the tags).
     ///
     /// Audit SUB-101: this was `\\{[^}]*\\}` through `NSRegularExpression`, which rescans to the end
     /// of the text at every unclosed `{` (20k braces took 2.6 s, doubling cost 4x). One forward pass
@@ -100,20 +106,64 @@ enum SubtitleRectText {
         var out: [UInt8] = []
         out.reserveCapacity(bytes.count)
         var index = 0
+        var drawing = false
         while index < bytes.count {
             let byte = bytes[index]
             guard byte == 0x7B else {
-                out.append(byte)
+                if !drawing { out.append(byte) }
                 index += 1
                 continue
             }
             guard let close = bytes[(index + 1)...].firstIndex(of: 0x7D) else {
-                out.append(contentsOf: bytes[index...])
+                if !drawing { out.append(contentsOf: bytes[index...]) }
                 break
             }
+            if let scale = drawingScale(inBlock: bytes[(index + 1)..<close]) { drawing = scale > 0 }
             index = close + 1
         }
         return String(decoding: out, as: UTF8.self)
+    }
+
+    /// The drawing scale an override block leaves in force, or nil when it changes nothing. Read the
+    /// way libass reads it, and the last tag that sets it wins:
+    ///
+    /// - `\p<n>` sets it to `n`: the argument's leading integer after any spaces, so `\p 1` draws, and
+    ///   0 when there is none, so a bare `\p` ends drawing.
+    /// - `\r` and `\r<style>` reset it to 0, as they reset every override (`\rnd` is a different tag).
+    /// - `\pos(...)` and `\pbo<n>` are other tags, and tags inside the parentheses of `\t(...)` are
+    ///   not read (`\p` cannot be animated).
+    static func drawingScale<Bytes: Collection>(inBlock block: Bytes) -> Int? where Bytes.Element == UInt8 {
+        var scale: Int?
+        var tag: [UInt8] = []
+        var inTag = false
+        var depth = 0
+        func finish() {
+            defer { tag.removeAll(keepingCapacity: true) }
+            guard let first = tag.first else { return }
+            if first == 0x72 { // "r"
+                if !tag.starts(with: "rnd".utf8) { scale = 0 }
+                return
+            }
+            guard first == 0x70, !tag.starts(with: "pos".utf8), !tag.starts(with: "pbo".utf8) else { return }
+            var value = 0
+            for byte in tag.dropFirst().drop(while: { $0 == 0x20 || $0 == 0x09 }) {
+                guard (0x30...0x39).contains(byte) else { break }
+                value = min(value * 10 + Int(byte - 0x30), 1_000)
+            }
+            scale = value
+        }
+        for byte in block {
+            if byte == 0x5C, depth == 0 { // a backslash outside parentheses starts a new tag
+                finish()
+                inTag = true
+                continue
+            }
+            if byte == 0x28 { depth += 1 }
+            if byte == 0x29 { depth = max(0, depth - 1) }
+            if inTag { tag.append(byte) }
+        }
+        finish()
+        return scale
     }
 
     /// Default ASS play resolution (`ASS_DEFAULT_PLAYRESX/Y`, libavcodec/ass.h). Every event line
@@ -168,7 +218,8 @@ enum SubtitleRectText {
     /// Inline state comes from `\c`/`\1c` (BGR; a bare tag or unparseable value resets to the page
     /// default), `\b`, `\i`, `\u`, `\s`, `\fn`, `\fs` and `\r`. Cue-level `\an` and `\pos` are
     /// lifted out into the placement, with `\pos` normalized against `playRes`. Applies `\N`/`\n`
-    /// -> newline and `\h` -> space. Tags that merely look like these (`\be`, `\bord`, `\iclip`,
+    /// -> newline and `\h` -> space. Text in drawing mode (`\p1` and up, see `drawingScale`) is
+    /// vector commands and is left out. Tags that merely look like these (`\be`, `\bord`, `\iclip`,
     /// `\shad`, `\fscx`, `\fsp`) are left alone. Adjacent runs of equal styling are collapsed.
     /// nil when nothing displayable remains.
     ///
@@ -189,6 +240,8 @@ enum SubtitleRectText {
         var style = RunStyle()
         var alignment: Int?
         var position: CGPoint?
+        // In ASS drawing mode (`\p1` and up) the text is vector commands, never shown as words.
+        var drawing = false
 
         func flush() {
             guard !current.isEmpty else { return }
@@ -206,8 +259,8 @@ enum SubtitleRectText {
             let c = chars[i]
             if c == "\\", i + 1 < chars.count {
                 let n = chars[i + 1]
-                if n == "N" || n == "n" { current += "\n"; i += 2; continue }
-                if n == "h" { current += " "; i += 2; continue }
+                if n == "N" || n == "n" { if !drawing { current += "\n" }; i += 2; continue }
+                if n == "h" { if !drawing { current += " " }; i += 2; continue }
             }
             if c == "{" {
                 var j = i + 1
@@ -216,12 +269,13 @@ enum SubtitleRectText {
                 var next = style
                 applyOverrides(block, to: &next, alignment: &alignment,
                                position: &position, playRes: playRes)
+                if let scale = drawingScale(inBlock: block.utf8) { drawing = scale > 0 }
                 // The text collected so far belongs to the style in force before this block.
                 if next != style { flush(); style = next }
                 i = (j < chars.count) ? j + 1 : j
                 continue
             }
-            current.append(c)
+            if !drawing { current.append(c) }
             i += 1
         }
         flush()
