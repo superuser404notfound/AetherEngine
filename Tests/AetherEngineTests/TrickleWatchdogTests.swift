@@ -443,6 +443,10 @@ struct TrickleWatchdogTests {
     @Test("an origin that trickles on every connection is replaced like a silent one",
           .timeLimit(.minutes(3)))
     func perpetualTrickleMatchesTheGapPath() async throws {
+        // A 2 s period, as in the tests above: on a loaded runner the origin stamped one request
+        // late, the reader timed its threshold from its own clock, and two replacements read 0.38 s
+        // apart against 0.5 s (CI, 2026-11-23). A real pacing defect shows gaps near zero.
+        let stallTimeout: TimeInterval = 2
         let dripOffset = Self.dripOffset
         let totalSize = Self.totalSize
         let region: (Int64) -> Bool = { $0 >= dripOffset && $0 < dripOffset + 8 * 1024 * 1024 }
@@ -453,14 +457,14 @@ struct TrickleWatchdogTests {
             })
             let origin = try #require(originMaybe)
             defer { origin.stop() }
-            let reader = Self.makeReader(origin)
+            let reader = Self.makeReader(origin, stallTimeout: stallTimeout)
             defer { reader.markClosed(); reader.close() }
             try reader.open()
             try await waitFor { !reader.hasLiveConnectionForTesting }
             let progress = Self.startReading(reader, bytes: Int(Self.firstRange) + 4 * 1024 * 1024)
             try await waitFor { origin.requests.contains { region($0.start) } }
             // Ten thresholds: room for several replacements, and for any backoff or give-up to show.
-            _ = try await waitFor(upTo: .seconds(10 * Self.stallTimeout)) { progress.done }
+            _ = try await waitFor(upTo: .seconds(10 * stallTimeout)) { progress.done }
             return (origin.requests.filter { region($0.start) }.map(\.at),
                     progress.done, reader.trickleEndCountForTesting)
         }
@@ -477,9 +481,9 @@ struct TrickleWatchdogTests {
         // same way, which is the point of the comparison.
         #expect(trickle.starts.count >= 2 && silent.starts.count >= 2)
         // Not faster than the reference: each replacement waits out a full threshold.
-        #expect(minGap(trickle.starts) >= 0.8 * Self.stallTimeout,
+        #expect(minGap(trickle.starts) >= 0.8 * stallTimeout,
                 "trickle replacements \(minGap(trickle.starts))s apart, under the threshold")
-        #expect(minGap(silent.starts) >= 0.8 * Self.stallTimeout)
+        #expect(minGap(silent.starts) >= 0.8 * stallTimeout)
         #expect(trickle.starts.count <= silent.starts.count + 2,
                 "trickle: \(trickle.starts.count) requests, silent: \(silent.starts.count)")
         // Same give-up as the silent origin.
