@@ -4347,6 +4347,7 @@ public final class AetherEngine: ObservableObject {
     /// leaves this one up. See `holdOutgoingPicture(on:)`.
     weak var outgoingPictureView: AetherStillView?
     var outgoingPictureWatches: Set<AnyCancellable> = []
+    var outgoingPictureTimers: [Task<Void, Never>] = []
     var outgoingPictureToken = 0
     var outgoingPictureShownAt: ContinuousClock.Instant?
     var outgoingPictureSawNextFrame = false

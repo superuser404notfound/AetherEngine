@@ -60,9 +60,10 @@ public final class AetherStillView: PlatformBaseView, HeldStillSurface {
     }
 
     func showCompositorStill(file: URL, pastFirstFrameBy offset: Double, gravity: AVLayerVideoGravity,
-                             budgetSeconds: Double) async -> Bool {
+                             budgetSeconds: Double, deletesFileOnClear: Bool) async -> Bool {
         await presenter.show(file: file, pastFirstFrameBy: offset, gravity: videoGravity,
-                             mount: .subview(of: self), budgetSeconds: budgetSeconds)
+                             mount: .subview(of: self), budgetSeconds: budgetSeconds,
+                             deletesFileOnClear: deletesFileOnClear)
     }
 
     func clearStill() { presenter.clear() }

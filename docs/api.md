@@ -1872,13 +1872,14 @@ engine.releaseOutgoingPicture()   // once the fade is done
 ```
 
 - **What is held.** The frame on screen, read by the same routes an audio switch uses: the native output, the software renderer, and for Dolby Vision without a displayable base layer the compositor or the reshaped still. An HDR source is held as HDR. Panel mode across the load is unchanged, since a `load()` keeps the display criteria anyway.
-- **It pauses playback first.** The native output vends a paused frame in about 20 ms and a playing one only after ~300 ms. An item that already played to its end vends nothing to a new output, so the engine steps it 1 ms back first, which makes it render its last frame again (about 17 ms on a Mac). The call returns once the picture is up; call `load()` after it.
-- **Its own surface.** The hold never uses the still view bound with `bindStillView(_:)`, and an audio-switch hold never lands on the host's tile. Pass a view of its own.
+- **It pauses playback first.** The native output vends a paused frame in about 20 ms and a playing one only after ~300 ms. An item that already played to its end vends nothing to a new output, so the engine steps it 1 ms back, which makes it render its last frame again (about 17 ms on a Mac), and puts it back at its end after the read. The call returns once the picture is up; call `load()` after it.
+- **Dolby Vision through the compositor.** That still plays from a file in the session's cache, which the next `load()` deletes. The hold moves the file out first and deletes it when the picture comes down.
+- **Its own surface.** Pass a view of its own, not the one bound with `bindStillView(_:)`. An audio switch never lays its still on a view that holds the host's picture; it holds nothing there instead.
 - **It survives every `load()`,** whichever route the next item takes (native to software and back).
 - **When it comes down.**
   - The host calls `releaseOutgoingPicture()`. This is the normal end.
   - `stop()` runs, or a newer `holdOutgoingPicture(on:)` replaces it.
-  - The next load fails (`state` becomes `.error`).
+  - The next load fails or its caller cancels it (`state` becomes `.error` or `.idle`).
   - Safety nets: 8 s after the next item's first frame, or 60 s with no next first frame at all.
 - **Animating the view.** Each still sits in an autoresizing subview of the still view, so a change of the view's frame inside an animation carries the picture along on the same curve. Before, the still was a bare sublayer and would have run Core Animation's own 0.25 s default. Alpha fades the whole view, and the still keeps the view's `videoGravity`. The resize is pinned by a macOS test; the curve on tvOS is not measured yet.
 - **Returns false** in PiP, on external playback, without video, or when no frame could be read. Nothing is held then. Playback was paused if a read ran, so a host that does not load after all calls `play()`.

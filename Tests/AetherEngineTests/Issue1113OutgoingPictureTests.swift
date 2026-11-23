@@ -185,6 +185,48 @@ struct Issue1113OutgoingPictureTests {
         #expect(!bound.isHoldingStill)
     }
 
+    @Test("a load its caller cancels takes the hold down instead of leaving it for the cap")
+    func cancelledLoadReleases() async throws {
+        let file = try await ItemSwapStillTests.fixtureURL()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        try await loadSoftware(engine, file)
+
+        let tile = AetherStillView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+        #expect(await engine.holdOutgoingPicture(on: tile))
+        // An origin that accepts and never answers, so the load is still opening when it is cancelled.
+        let (fd, port) = try #require(LoopbackPort.listen(backlog: 4))
+        defer { close(fd) }
+        let silent = try #require(URL(string: "http://127.0.0.1:\(port)/next.mkv"))
+        let next = Task { @MainActor in _ = try? await engine.load(url: silent) }
+        try await waitFor { engine.state == .loading }
+        next.cancel()
+        try await waitFor { !tile.isHoldingStill }
+        #expect(engine.outgoingPictureLastRelease == "next load ended without a picture")
+    }
+
+    @Test("handed the bound still view, the hold keeps it, and an audio switch holds nothing there")
+    func boundViewStaysWithTheHost() async throws {
+        let file = try await ItemSwapStillTests.fixtureURL()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let bound = AetherStillView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+        engine.bindStillView(bound)
+        try await loadSoftware(engine, file)
+
+        #expect(await engine.holdOutgoingPicture(on: bound))
+        let audioIndex = try #require(engine.activeAudioTrackIndex)
+        let failure = await engine.reloadWithAudioOverride(
+            url: file, audioStreamIndex: Int32(audioIndex), expectedGeneration: engine.loadGeneration)
+        #expect(failure == nil)
+        #expect(engine.heldPictureLastSkip == "surface holds the host's outgoing picture")
+        try await waitFor { engine.hasFirstFrameReadyForDisplay }
+        #expect(bound.isHoldingStill)
+        #expect(engine.outgoingPictureView === bound)
+    }
+
     @Test("a new hold replaces the old one")
     func secondHoldReplacesTheFirst() async throws {
         let file = try await ItemSwapStillTests.fixtureURL()

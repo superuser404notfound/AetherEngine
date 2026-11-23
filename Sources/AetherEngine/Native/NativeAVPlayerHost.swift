@@ -2081,11 +2081,23 @@ final class NativeAVPlayerHost {
         let deadline = clock.now + timeout
         // AE#1113: an item that played to its end vends nothing to a new output (measured on a Mac:
         // 40 reads over 400 ms, none). A zero-tolerance seek 1 ms back makes it render its last frame
-        // again, in 17 ms; a seek to where it stands is a no-op and renders nothing.
+        // again, in 17 ms; a seek to where it stands is a no-op and renders nothing. Not awaited, so a
+        // seek that has to refetch the tail cannot outrun `timeout`; the loop below reads whatever it
+        // renders in time. The item goes back to its end afterwards, so a later play() does not run
+        // that millisecond and end a second time.
+        var endPosition: CMTime?
         if didReachEnd, avPlayer.rate == 0 {
-            let back = CMTimeSubtract(item.currentTime(), CMTime(value: 1, timescale: 1000))
+            let end = item.currentTime()
+            let back = CMTimeSubtract(end, CMTime(value: 1, timescale: 1000))
             if back.isNumeric, back > .zero {
-                _ = await avPlayer.seek(to: back, toleranceBefore: .zero, toleranceAfter: .zero)
+                endPosition = end
+                avPlayer.seek(to: back, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
+            }
+        }
+        defer {
+            // A new seek replaces one still pending, so this also ends a nudge the deadline cut short.
+            if let endPosition, playerItem === item {
+                avPlayer.seek(to: endPosition, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
             }
         }
         repeat {

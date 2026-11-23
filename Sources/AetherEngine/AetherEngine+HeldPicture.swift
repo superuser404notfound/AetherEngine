@@ -62,6 +62,13 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] held picture: skipped (no surface bound)", category: .engine)
             return
         }
+        // AE#1113: the host's outgoing picture is on it; a swap's still would replace it.
+        guard view !== outgoingPictureView else {
+            heldPictureLastSkip = "surface holds the host's outgoing picture"
+            EngineLog.emit("[AetherEngine] held picture: skipped (surface holds the host's outgoing picture)",
+                           category: .engine)
+            return
+        }
         guard let shown = await showOutgoingPicture(
             on: view, logLabel: "held picture",
             isCurrent: { [weak self] in (self?.boundStillView ?? self?.boundView) === view })
@@ -75,7 +82,7 @@ extension AetherEngine {
     /// was replaced meanwhile is dropped, as is one a load or stop overtook.
     private func showOutgoingPicture(
         on view: any HeldStillSurface, logLabel: String, pausesFirst: Bool = false,
-        isCurrent: @escaping () -> Bool
+        outlivesSession: Bool = false, isCurrent: @escaping () -> Bool
     ) async -> (route: String, nativeSource: NativeAVPlayerHost?)? {
         let nativeSource = nativeHost
         let softwareSource = nativeSource == nil ? softwareHost : nil
@@ -98,7 +105,8 @@ extension AetherEngine {
            Self.heldPictureNeedsReshaping(videoFormat: videoFormat, dolbyVisionProfile: sourceDVProfile),
            !OptionalComponent.dolbyVisionStillReshaping.isBuiltIn {
             let shown = await holdThroughCompositor(host: host, view: view, generation: generation,
-                                                    started: started, logLabel: logLabel, isCurrent: isCurrent)
+                                                    started: started, logLabel: logLabel,
+                                                    outlivesSession: outlivesSession, isCurrent: isCurrent)
             return shown ? ("Dolby Vision compositor", host) : nil
         }
 
@@ -155,22 +163,39 @@ extension AetherEngine {
     /// `heldPictureDolbyVisionBudgetSeconds`, the outgoing picture paused meanwhile.
     private func holdThroughCompositor(host: NativeAVPlayerHost, view: any HeldStillSurface,
                                        generation: UInt64, started: ContinuousClock.Instant,
-                                       logLabel: String, isCurrent: () -> Bool) async -> Bool {
+                                       logLabel: String, outlivesSession: Bool,
+                                       isCurrent: () -> Bool) async -> Bool {
         let itemSeconds = host.avPlayer.currentTime().seconds
         guard let session = nativeVideoSession else { return false }
         let built = await BlockingWork.detached(priority: .userInitiated) { [session] in
             session.compositorHoldFile(atSeconds: itemSeconds)
         }.value
-        guard let hold = built else {
+        guard let built else {
             heldPictureLastSkip = "no frame from the outgoing picture"
             EngineLog.emit("[AetherEngine] \(logLabel): no resident segment for the compositor hold", category: .engine)
             return false
+        }
+        // The file sits in the session's cache, which the next load() deletes. A hold that outlives
+        // the session takes the file out of it and the surface deletes it on clear.
+        var hold = built
+        var ownedFile: URL?
+        if outlivesSession {
+            let moved = FileManager.default.temporaryDirectory
+                .appendingPathComponent("aether-outgoing-hold-\(UUID().uuidString).mp4")
+            guard (try? FileManager.default.moveItem(at: built.url, to: moved)) != nil else {
+                heldPictureLastSkip = "no frame from the outgoing picture"
+                EngineLog.emit("[AetherEngine] \(logLabel): the compositor hold file could not be kept", category: .engine)
+                return false
+            }
+            hold = (moved, built.offsetSeconds)
+            ownedFile = moved
         }
         let spent = Double((ContinuousClock.now - started).components.seconds)
             + Double((ContinuousClock.now - started).components.attoseconds) / 1e18
         let budget = max(0.2, Self.heldPictureDolbyVisionBudgetSeconds - spent)
         let shown = await view.showCompositorStill(file: hold.url, pastFirstFrameBy: hold.offsetSeconds,
-                                                   gravity: videoGravity, budgetSeconds: budget)
+                                                   gravity: videoGravity, budgetSeconds: budget,
+                                                   deletesFileOnClear: ownedFile != nil)
         guard shown else {
             heldPictureLastSkip = "no frame from the outgoing picture"
             EngineLog.emit("[AetherEngine] \(logLabel): the compositor hold did not become displayable", category: .engine)
@@ -206,7 +231,7 @@ extension AetherEngine {
     ///
     /// - the host calls `releaseOutgoingPicture()` (the usual end, once its fade is done);
     /// - `stop()` runs, or a newer `holdOutgoingPicture(on:)` replaces it;
-    /// - the next load fails (`state` turns `.error`);
+    /// - the next load fails or is cancelled (`state` turns `.error` or `.idle`);
     /// - `outgoingPictureGraceSeconds` (8 s) after the next item's first frame, as a safety net;
     /// - 60 s pass without a next first frame.
     ///
@@ -219,12 +244,17 @@ extension AetherEngine {
     /// - Returns: whether a picture went up. False in Picture in Picture, on external playback, with
     ///   no video, or when no frame could be read. Nothing is held then. Playback was paused if the
     ///   read ran at all, so a host that does not load after all calls `play()`.
+    ///
+    /// Pass a view of its own, not the one bound with `bindStillView(_:)`: while the host's picture
+    /// is on it, an audio switch holds nothing there.
     @discardableResult
     public func holdOutgoingPicture(on view: AetherStillView) async -> Bool {
         releaseOutgoingPicture(reason: nil)
+        // An audio switch's still on the same view would be torn off it by the next load's release.
+        if heldPictureView === view { releaseHeldPicture(reason: "the host holds its outgoing picture here") }
         let token = outgoingPictureToken
         guard let shown = await showOutgoingPicture(
-            on: view, logLabel: "outgoing picture", pausesFirst: true,
+            on: view, logLabel: "outgoing picture", pausesFirst: true, outlivesSession: true,
             isCurrent: { [weak self] in self?.outgoingPictureToken == token })
         else { return false }
         armOutgoingPicture(on: view, token: token, route: shown.route)
@@ -242,6 +272,8 @@ extension AetherEngine {
         // Moving the token also drops a read in flight and any release still sleeping.
         outgoingPictureToken &+= 1
         outgoingPictureWatches.removeAll()
+        outgoingPictureTimers.forEach { $0.cancel() }
+        outgoingPictureTimers.removeAll()
         outgoingPictureSawNextFrame = false
         guard let view = outgoingPictureView else { return }
         view.clearStill()
@@ -280,13 +312,20 @@ extension AetherEngine {
                 }
             }
             .store(in: &outgoingPictureWatches)
+        // A failed next load ends in `.error`, a cancelled one in `.idle` (Sodalite#173). Neither
+        // brings a picture, so the still would stand over an empty player until the cap.
         $state
             .sink { [weak self] state in
-                guard case .error = state else { return }
+                let reason: String
+                switch state {
+                case .error: reason = "next load failed"
+                case .idle: reason = "next load ended without a picture"
+                default: return
+                }
                 MainActor.assumeIsolated {
                     guard let self, self.loadGeneration != heldGeneration,
                           self.outgoingPictureToken == token else { return }
-                    self.releaseOutgoingPicture(reason: "next load failed")
+                    self.releaseOutgoingPicture(reason: reason)
                 }
             }
             .store(in: &outgoingPictureWatches)
@@ -296,12 +335,12 @@ extension AetherEngine {
 
     private func scheduleOutgoingPictureRelease(token: Int, after seconds: Double, reason: String,
                                                 onlyBeforeNextFrame: Bool = false) {
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
+        outgoingPictureTimers.append(Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
             guard let self, self.outgoingPictureToken == token, self.outgoingPictureView != nil,
                   !(onlyBeforeNextFrame && self.outgoingPictureSawNextFrame) else { return }
             self.releaseOutgoingPicture(reason: reason)
-        }
+        })
     }
 
     /// Records the hold and arms its release: the next item's first frame (native), the next host's

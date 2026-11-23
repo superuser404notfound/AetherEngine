@@ -298,10 +298,11 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     }
 
     func showCompositorStill(file: URL, pastFirstFrameBy offset: Double, gravity: AVLayerVideoGravity,
-                             budgetSeconds: Double) async -> Bool {
+                             budgetSeconds: Double, deletesFileOnClear: Bool) async -> Bool {
         let host: CALayer? = layer
         return await presenter.show(file: file, pastFirstFrameBy: offset, gravity: gravity,
-                                    mount: .sublayer(of: host, bounds: bounds), budgetSeconds: budgetSeconds)
+                                    mount: .sublayer(of: host, bounds: bounds), budgetSeconds: budgetSeconds,
+                                    deletesFileOnClear: deletesFileOnClear)
     }
 
     /// Engine-internal. Removes the held picture, if any. Idempotent.

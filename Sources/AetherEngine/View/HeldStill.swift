@@ -17,8 +17,9 @@ protocol HeldStillSurface: AnyObject {
     func showStill(_ frame: CVPixelBuffer, gravity: AVLayerVideoGravity, isHDR: Bool) -> Bool
     /// Shows the frame `offset` seconds past the first frame of a video-only file through a player of
     /// its own, so the system compositor colours it (Dolby Vision without a displayable base layer).
+    /// `deletesFileOnClear` hands the file to the surface, which deletes it when the still goes.
     func showCompositorStill(file: URL, pastFirstFrameBy offset: Double, gravity: AVLayerVideoGravity,
-                             budgetSeconds: Double) async -> Bool
+                             budgetSeconds: Double, deletesFileOnClear: Bool) async -> Bool
     func clearStill()
     var isHoldingStill: Bool { get }
 }
@@ -43,6 +44,8 @@ final class HeldStillPresenter {
     private var player: AVPlayer?
     /// The subview a `.subview` mount put the still in, removed with it.
     private var mountedView: PlatformBaseView?
+    /// A compositor file the still owns, deleted with it.
+    private var ownedFile: URL?
 
     var isShowing: Bool { layer != nil || playerLayer != nil }
 
@@ -55,9 +58,9 @@ final class HeldStillPresenter {
     /// frame is displayable. False (and nothing shown)
     /// when the item fails, a `clear()` intervenes, or `budgetSeconds` runs out first.
     func show(file: URL, pastFirstFrameBy offset: Double, gravity: AVLayerVideoGravity,
-              mount: Mount, budgetSeconds: Double) async -> Bool {
+              mount: Mount, budgetSeconds: Double, deletesFileOnClear: Bool = false) async -> Bool {
         clear()
-        guard Self.canMount(mount) else { return false }
+        if deletesFileOnClear { ownedFile = file }
         let player = AVPlayer()
         player.isMuted = true
         player.actionAtItemEnd = .pause
@@ -71,11 +74,12 @@ final class HeldStillPresenter {
         CATransaction.setDisableActions(true)
         guard let still = mountPlayerLayer(mount) else {
             CATransaction.commit()
+            clear()
             return false
         }
         still.player = player
         still.videoGravity = gravity
-        still.opacity = 0
+        setVisible(false, still)
         CATransaction.commit()
         self.player = player
         playerLayer = still
@@ -101,7 +105,7 @@ final class HeldStillPresenter {
               await waitFor({ still.isReadyForDisplay }) else { abandon(still); return false }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        still.opacity = 1
+        setVisible(true, still)
         CATransaction.commit()
         return true
     }
@@ -114,7 +118,7 @@ final class HeldStillPresenter {
     /// False when the frame cannot be wrapped for display; nothing is shown then.
     func show(_ frame: CVPixelBuffer, gravity: AVLayerVideoGravity, isHDR: Bool, mount: Mount) -> Bool {
         clear()
-        guard Self.canMount(mount), let sample = Self.sample(frame) else { return false }
+        guard let sample = Self.sample(frame) else { return false }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         guard let still = mountSampleLayer(mount) else {
@@ -153,6 +157,24 @@ final class HeldStillPresenter {
         }
         layer?.sampleBufferRenderer.flush()
         layer = nil
+        if let file = ownedFile {
+            ownedFile = nil
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    /// Hides the compositor still until it is displayable. On a subview mount through the view:
+    /// AppKit owns a backing layer's opacity and may write it back from the view.
+    private func setVisible(_ visible: Bool, _ still: CALayer) {
+        guard let view = mountedView else {
+            still.opacity = visible ? 1 : 0
+            return
+        }
+        #if canImport(UIKit)
+        view.alpha = visible ? 1 : 0
+        #else
+        view.alphaValue = visible ? 1 : 0
+        #endif
     }
 
     /// Sizes a `.sublayer` mount's still. A `.subview` mount resizes itself with its parent.
@@ -160,11 +182,6 @@ final class HeldStillPresenter {
         guard mountedView == nil else { return }
         layer?.frame = bounds
         playerLayer?.frame = bounds
-    }
-
-    private static func canMount(_ mount: Mount) -> Bool {
-        if case .sublayer(nil, _) = mount { return false }
-        return true
     }
 
     private func mountSampleLayer(_ mount: Mount) -> AVSampleBufferDisplayLayer? {
