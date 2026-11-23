@@ -3639,19 +3639,13 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stateLock.unlock()
         // AE#1052: a menu marker. No wait, no cues; AVKit fetches again when the marker becomes the display.
         if store.servesSilently { return WebVTTBuilder.segment(cues: [], segmentStart: start) }
-        // AE#984: the whole-program rule holds for the windowed shape too. A load-declared sidecar still
-        // decoding is answered 404 at once, which AVPlayer asks again; held for 3 s and served empty, the
-        // window was cached empty for the session. A failed sidecar has nothing coming: empty, no wait.
-        switch store.wholeProgramServe {
-        case .retryLater:
-            EngineLog.emit("[HLSVideoEngine] AE#984: subtitle .vtt ord=\(ordinal) seg=\(segmentIndex) requested "
-                           + "before its sidecar is decoded; answering 404 so AVPlayer asks again",
-                           category: .hlsServer)
-            return nil
-        case .failedFill:
+        // AE#984: a sidecar that failed has nothing coming, so it is served empty at once. One still
+        // decoding keeps the bounded wait below rather than the whole-program 404: a 404 on a selected
+        // rendition before `readyToPlay` fails the item after ~30 s (measured on the bypass), and the
+        // windowed shape is unmeasured. The select waits for the decode, so this is only reached when
+        // something else selected the rendition.
+        if store.wholeProgramServe == .failedFill {
             return WebVTTBuilder.segment(cues: [], segmentStart: start)
-        case .complete, .waitForReader:
-            break
         }
         // Sodalite#32: bounded, distance-aware readiness wait replacing the 25 s wait-for-isFinished. AVKit
         // caches an empty-served window forever, so waiting is worth it; but blocking every fetch on a store

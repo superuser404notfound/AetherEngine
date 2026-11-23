@@ -1032,9 +1032,12 @@ Measured with `aetherctl play --native-hls --sidecar en=<url> --subs en` on macO
 | --- | --- | --- |
 | Picked at load, sidecar 40 s | Nine 404 retries, then the item fails at ~30 s (`-1100` / `-12938`) | Ready at ~3 s, the same as with an instant sidecar; rendition selected at 40.3 s, first cue presented at 41 s |
 | Picked at load, sidecar at once | Ready at ~3 s | Ready at ~3 s; selected 0.3 s after the pick |
-| Picked at 5 s, sidecar 120 s | Media buffer stops at 198 s; no cue is ever presented in the 160 s run | Buffer fills to 300 s; rendition selected at 118 s, first cue at 121 s |
+| Picked at 5 s, sidecar 100 s | Nine 404s; media buffer stops at 198 s; no cue is ever presented in the 150 s run | No 404; buffer fills to 288 s; rendition selected at 99 s, first cue at 101 s |
+| Loopback (`--host-calls nativesubs,nativerender@8` on a 60 s MP4), sidecar 25 s | Pre-fill gives up after 15 s with 0 cues; select refused and never retried | Pre-fill waits 16.8 s for the sidecar (59 cues); rendition selected |
 
 golfista's bare-AVPlayer runs on tvOS 27 and macOS 27 match the first and third rows (item failed at 30.3 s; stall at media 114 s with no resume).
+
+A sidecar that takes exactly 120 s sits on `SidecarTextFetch`'s 120 s idle budget. In one run it was cut off, the rendition stayed unselected, and playback carried on with the buffer filling to 300 s.
 
 ### API history notes
 

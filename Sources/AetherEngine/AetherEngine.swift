@@ -3048,8 +3048,9 @@ public final class AetherEngine: ObservableObject {
     /// AE#1052: bumped by every native selection, so a pre-fill that outlived its request stops.
     var nativeSubtitleSelectGeneration: UInt64 = 0
 
-    /// Whole-file decode tasks filling native stores for load-declared external tracks (#88).
-    var externalNativeStoreFillTask: Task<Void, Never>? = nil
+    /// Whole-file decodes filling native stores for load-declared external tracks (#88), one at a
+    /// time, the picked track first (AE#984).
+    let externalNativeStoreFillQueue = ExternalSubtitleFillQueue()
 
     /// Phase D: OCR worker state. Armed while the active subtitle is a needsOCR table entry;
     /// cursors/pending persist across deselect/reselect (no re-recognition of covered regions)
@@ -7860,8 +7861,7 @@ public final class AetherEngine: ObservableObject {
         // #170: the session a latched rendering request targeted is gone. Requests for a reload in
         // flight land at suspension points after the load's prologue, so they survive.
         pendingNativeRenderingRequest = nil
-        externalNativeStoreFillTask?.cancel()
-        externalNativeStoreFillTask = nil
+        externalNativeStoreFillQueue.cancel()
         resetSubtitleOCRState()   // Phase D: new session, new axis
         resetBitmapTextRecognition()   // AE#1114
         remoteHLSSubtitleDiscoveryTask?.cancel()

@@ -1320,7 +1320,9 @@ External subtitle files register with the engine and appear in `subtitleTracks` 
 - **Selection.** `selectSubtitleTrack(index:)` and `selectSecondarySubtitleTrack(index:)` accept external ids and route onto the whole-file decode internally. `activeSubtitleTrackIndex` publishes the external id like any other selection. `removeExternalSubtitleTrack(id:)` unregisters (an active selection is cleared).
 - **Renditions.** Load-declared external tracks join the native WebVTT renditions ([below](#native-subtitle-renditions-webvtt-for-pip-airplay-and-external-display)).
   - Their store is filled by one whole-file decode at load (one pass per container, covering every track pointing at it) and marked finished.
-  - A select waits for that decode before it hands AVPlayer the rendition (AE#984), however long the server takes. A sidecar that could not be read leaves it unselected. While the decode runs, a segment AVPlayer asks for anyway is answered 404, which it retries, rather than served empty, which it would keep for the session.
+  - The decodes run one at a time, and a pick moves its own to the front (AE#984).
+  - A select waits for that decode before it hands AVPlayer the rendition, however long the server takes. It used to give up after 15 s and never select the track. A sidecar that could not be read leaves it unselected, and picking it again fetches it once more.
+  - A segment of a failed sidecar is served empty at once. A segment of one still decoding keeps the short readiness wait: a 404 on a selected rendition before `readyToPlay` fails the item, as measured on the bypass below.
   - A finished store also backfills the fullscreen overlay instantly on select (no re-download; styled-ASS selections re-decode to keep raw markup).
   - A store that could not be filled stays unfinished rather than serving a complete but blank `.vtt`.
   - Tracks added after load are host-overlay only until the next load, because the rendition set is fixed in the master playlist at item creation.
@@ -1345,9 +1347,9 @@ The media never moves: AVPlayer still fetches A/V straight from the origin, whic
   - picked mid-play with a long wait, AVPlayer stops loading media at the point where it needs the subtitle segment;
   - held instead of answered, it freezes the picture of a healthy stream.
 
-  A sidecar that cannot be read leaves the rendition unselected, and picking the track again fetches it once more.
-- **The picked sidecar is fetched first.** Fills run one at a time, because each one can be an extraction the server runs from the file it is transcoding. Only the picked track's fill starts at load; the others wait until the item is ready to play. A pick takes over from a running fill of another track, which goes back in the queue.
-- **A `.vtt` that is asked for early is answered 404, never held.** That only happens when something else selects the rendition (AVKit's own menu, for one). AVPlayer retries every few seconds, the complete file is served on the first retry after the decode, and a sidecar that could not be read is served empty at once.
+  A sidecar that cannot be read leaves the rendition unselected, and picking the track again fetches it once more. The pick stays published either way, as on the overlay path when a sidecar decode fails.
+- **The picked sidecar is fetched first.** Fills run one at a time, because each one can be an extraction the server runs from the file it is transcoding. Only the picked track's fill starts at load; the others wait until the item is ready to play. A pick takes over from a running fill of another track, which resumes right after it.
+- **A `.vtt` that is asked for early is answered 404, never held.** That only happens when something else selects the rendition (AVKit's own menu, for one), so the request also moves that sidecar to the front. AVPlayer retries every few seconds and gets the complete file on the first retry after the decode. A long wait still costs what is measured above, which is why the engine's own select never takes this route. A sidecar that could not be read is served empty at once.
 
 ### Track selection by language preference
 
@@ -1430,7 +1432,7 @@ How the store ends cues, finds holes and proves a landing: [architecture › Sub
 - Zero side-channel bandwidth. Coverage is by construction the produced region, across seeks and producer restarts.
 - The host overlay is fed separately, by the packet-store drainer (#112 rework, see [Subtitles](#subtitles) above).
 - A lazy per-selection reader still covers AVKit's ~240 s forward `.vtt` prefetch beyond the produced region.
-- Load-declared external tracks (#88) have no demuxable stream to tap. Their store is filled by one whole-file decode at load and marked finished, so their rendition serves complete `.vtt` files from the start.
+- Load-declared external tracks (#88) have no demuxable stream to tap. Their store is filled by one whole-file decode at load and marked finished, so their rendition only ever serves complete `.vtt` files (the order of those decodes and how a select waits for them are under [External subtitle files as first-class tracks](#external-subtitle-files-as-first-class-tracks)).
 - The renditions strip ASS markup at serve time, so PiP shows plain text in the system caption style. The host overlay keeps full styling with `preserveASSMarkup` ([Authored ASS styling](#authored-ass-styling)).
 
 #### Routing scope

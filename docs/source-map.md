@@ -497,6 +497,7 @@ Live recording (AE#560): `AetherEngine+Recording.swift` starts it; these files c
 | File | What it does |
 | --- | --- |
 | `ASSScriptBuilder.swift` | Rebuilds raw ASS event cues + `TrackInfo.assHeader` into a complete script for whole-file renderers. |
+| `ExternalSubtitleFillQueue.swift` | Runs the whole-file decodes of load-declared sidecars into their native stores, one at a time, the picked track first. Shared by the loopback session and the `nativeRemoteHLS` stand-in (AE#984). |
 | `ExternalSubtitleTrack.swift` | Host-facing descriptor for external subtitle files registered as first-class tracks (synthetic `TrackInfo` ids, #88; `sourceStreamIndex` addresses one stream of a container URL, #266). |
 | `Issue100PGSStaleArrival.swift` | Holdback (`PGSStaleArrivalGate`) for PGS cues that arrive behind the playhead (#100). See note. |
 | `MovTextSampleBuilder.swift` | Stateless ASS/SSA → plain-text cleaner for cue bodies, used by `WebVTTBuilder` when serving a native rendition. The name predates the in-band tx3g path, which did not conform to HLS and is gone. |

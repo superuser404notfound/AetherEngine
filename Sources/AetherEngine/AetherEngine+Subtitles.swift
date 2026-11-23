@@ -1803,21 +1803,14 @@ extension AetherEngine {
     /// (plain text, matching the WebVTT rendition), then markFinished so the .vtt handler can serve
     /// complete files and the overlay select can backfill instantly. No side demuxer, no pacing.
     func startExternalNativeStoreFill(session: HLSVideoEngine) {
-        externalNativeStoreFillTask?.cancel()
-        externalNativeStoreFillTask = nil
         let jobs = Self.externalSubtitleFillJobs(
             table: nativeSubtitleTrackTable,
             registry: externalSubtitleRegistry,
             stores: session.nativeSubtitleCueStoresForSession,
             defaultHeaders: loadedOptions.httpHeaders, mediaURL: loadedURL)
-        guard !jobs.isEmpty else { return }
-        jobs.forEach { $0.markPending() }
-        externalNativeStoreFillTask = BlockingWork.detached(priority: .utility) { [jobs] in
-            for job in jobs {
-                if Task.isCancelled { return }
-                await AetherEngine.runExternalSubtitleFill(job: job)
-            }
-        }
+        // Not held: on this path the sidecars are usually plain files, and a filled store also backfills
+        // the overlay instantly on select. A pick still moves its own to the front (AE#984).
+        externalNativeStoreFillQueue.start(jobs, holdingUnpicked: false)
     }
 
     /// #266: fill one container's stores from a single decode pass. A pass covering several streams
@@ -1838,6 +1831,8 @@ extension AetherEngine {
             }
             return
         }
+        // A preempted or torn-down fill: the queue decides what happens to its stores.
+        if Task.isCancelled { return }
         guard job.targets.count > 1 else {
             if !Task.isCancelled { job.targets.forEach { $0.store.markExternalFillFailed() } }
             EngineLog.emit("[AetherEngine] external native store fill failed: \(job.url.lastPathComponent)", category: .engine)
@@ -2814,11 +2809,13 @@ extension AetherEngine {
                                + "cues=\(store.cueCount) exit=\(exit) waited=\(waited)ms", category: .engine)
                 guard exit != "superseded" else { return }
                 prefilledCues = store.cueCount
-            } else if let store = nativeStore(atOrdinal: ordinal), store.wholeProgramServe == .retryLater {
-                // AE#984 R2: a load-declared sidecar still decoding. Its cues land all at once at the
+            } else if let store = nativeStore(atOrdinal: ordinal),
+                      store.wholeProgramServe == .retryLater || store.wholeProgramServe == .failedFill {
+                // AE#984 R2: a load-declared sidecar still decoding, or failed (the pick retries it). Its cues land all at once at the
                 // end, so the reader heuristic below would run into its 15 s deadline with nothing,
                 // refuse the select, and nothing re-selects later: no reader re-anchor fills this store.
                 // Wait for the decode itself instead, however long the server takes.
+                externalNativeStoreFillQueue.prioritize(store)
                 let began = Date()
                 let outcome = await Self.awaitInjectedRenditionSettled(
                     serve: { store.wholeProgramServe },
@@ -3440,14 +3437,20 @@ extension AetherEngine {
                 return
             }
             let option = group.options[index]
+            // The provider too: a background teardown (#597) can release the stand-in under a kept item.
             let isCurrent = { [weak self] () -> Bool in
                 guard let self else { return false }
                 return generation == self.injectedRenditionSelectGeneration
                     && self.activeSubtitleTrackIndex == id
                     && self.currentAVPlayer?.currentItem === item
+                    && self.remoteHLSSubtitleProxy?.provider === provider
             }
             guard isCurrent() else { return }
-            if let provider, let ordinal, provider.renditionServe(ordinal: ordinal) == .retryLater {
+            var waited = false
+            if let provider, let ordinal,
+               let serve = provider.renditionServe(ordinal: ordinal),
+               serve == .retryLater || serve == .failedFill {
+                waited = true
                 // The previous pick stays off screen while this one decodes: showing it would read as
                 // the new choice having been ignored.
                 if let shown = item.currentMediaSelection.selectedMediaOption(in: group), shown != option {
@@ -3465,7 +3468,8 @@ extension AetherEngine {
                 let waited = String(format: "%.1f", Date().timeIntervalSince(began))
                 if outcome == .failed {
                     // Nothing to draw, and selecting it would hand AVPlayer an empty file it keeps for
-                    // the session. A later pick of the same track fetches the sidecar again.
+                    // the session. A later pick of the same track fetches the sidecar again. The pick
+                    // stays published, as on the overlay path when a sidecar decode fails.
                     EngineLog.emit(
                         "[AetherEngine] AE#984: the sidecar for injected rendition \"\(name)\" could not be "
                         + "read after \(waited)s; leaving it unselected", category: .engine)
@@ -3475,9 +3479,10 @@ extension AetherEngine {
                     "[AetherEngine] AE#984: sidecar for injected rendition \"\(name)\" ready after \(waited)s",
                     category: .engine)
             }
-            if item.currentMediaSelection.selectedMediaOption(in: group) == option {
-                // Already selected, so AVPlayer may hold an earlier, empty answer for it. A deselect and
-                // reselect makes it fetch the file again (golfista, AE#984: refetched within a second).
+            if waited, item.currentMediaSelection.selectedMediaOption(in: group) == option {
+                // Something else selected it while it was pending, so AVPlayer may hold a 404 or an empty
+                // answer for it. A deselect and reselect makes it fetch the file again (golfista: refetched
+                // within a second). A plain re-pick of a finished rendition skips this and stays a no-op.
                 item.select(nil, in: group)
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 guard isCurrent() else { return }

@@ -192,7 +192,7 @@ struct Issue984SidecarFetchTests {
 
 /// A loopback origin that serves bodies by path, one request per connection, and records every
 /// request it is asked: its path and its Range header. A path it does not know answers 404.
-/// Shared with `Issue984PickedRenditionTests`.
+/// Shared with `PickedSubtitleRenditionFillTests`.
 final class SidecarOrigin: @unchecked Sendable {
     struct Request: Equatable {
         let path: String

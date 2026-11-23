@@ -28,21 +28,8 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
     private let stores: [NativeSubtitleCueStore]
     private let defaultHeaders: [String: String]
     private let mediaURL: URL?
-    /// Guards the fill queue below. The fill is started from the proxy's build (off the main actor),
-    /// reordered by a pick and cancelled from the engine's teardown (both on it), so it is shared.
-    private let fillLock = NSLock()
-    /// AE#984 R2: fills not started yet, in the order they run. One job runs at a time: each is an
-    /// extraction from the file the server may be transcoding at the same moment.
-    private var queuedJobs: [AetherEngine.ExternalSubtitleFillJob] = []
-    private var running: (job: AetherEngine.ExternalSubtitleFillJob, task: Task<Void, Never>, id: UInt64)?
-    private var nextRunID: UInt64 = 0
-    /// AE#984 R2: the rendition the host picked last. Its job runs before any other and takes over
-    /// from a running job that does not serve it.
-    private var pickedOrdinal: Int?
-    /// AE#984 R2: while set, only the picked rendition's job runs. The engine lifts it once the item
-    /// is ready to play, so the other extractions do not compete with the transcode's spin-up.
-    private var holdsUnpickedFills = false
-    private var fillCancelled = false
+    /// AE#984: the sidecar decodes, one at a time, the picked track first.
+    private let fillQueue = ExternalSubtitleFillQueue()
 
     init(tracks: [Track], masterBody: String, programDuration: Double,
          defaultHeaders: [String: String], mediaURL: URL?) {
@@ -82,79 +69,32 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
     /// the loopback path uses (#266), so a container holding several subtitle streams is read once and
     /// a single bad stream index cannot blank its siblings.
     ///
-    /// AE#984 R2: with `holdingUnpicked` nothing runs until the host picks a rendition
-    /// (`prioritizeFill`) or the engine lifts the hold (`releaseHeldFills`). Every store is marked
-    /// pending at once either way, so a `.vtt` request that comes first is answered "not yet".
+    /// AE#984: with `holdingUnpicked` only a picked rendition fills (`prioritizeFill`) until the engine
+    /// lifts the hold (`releaseHeldFills`) at `readyToPlay`, so the other extractions do not compete
+    /// with the origin's start.
     func startFill(holdingUnpicked: Bool = false) {
-        cancelFill()
-        let jobs = Self.fillJobs(tracks: tracks, stores: stores, defaultHeaders: defaultHeaders, mediaURL: mediaURL)
-        guard !jobs.isEmpty else { return }
-        jobs.forEach { $0.markPending() }
-        fillLock.lock()
-        fillCancelled = false
-        queuedJobs = jobs
-        pickedOrdinal = nil
-        holdsUnpickedFills = holdingUnpicked
-        fillLock.unlock()
-        runNextFill()
+        fillQueue.start(
+            Self.fillJobs(tracks: tracks, stores: stores, defaultHeaders: defaultHeaders, mediaURL: mediaURL),
+            holdingUnpicked: holdingUnpicked)
     }
 
-    func cancelFill() {
-        fillLock.lock()
-        fillCancelled = true
-        queuedJobs = []
-        let task = running?.task
-        running = nil
-        fillLock.unlock()
-        task?.cancel()
-    }
+    func cancelFill() { fillQueue.cancel() }
 
-    /// AE#984 R2: the host picked `ordinal`. Its fill moves to the front, takes over from a running
-    /// fill that serves only other renditions (that one goes back in the queue), and a fill that
-    /// failed earlier (a 120 s idle timeout on a server still extracting) is tried once more.
+    /// AE#984: the host picked `ordinal`; its sidecar fills next (see `ExternalSubtitleFillQueue.prioritize`).
     func prioritizeFill(ordinal: Int) {
         guard ordinal >= 0, ordinal < stores.count else { return }
-        let store = stores[ordinal]
-        var preempted: Task<Void, Never>?
-        fillLock.lock()
-        guard !fillCancelled else { fillLock.unlock(); return }
-        pickedOrdinal = ordinal
-        if let index = queuedJobs.firstIndex(where: { Self.job($0, serves: store) }) {
-            queuedJobs.insert(queuedJobs.remove(at: index), at: 0)
-        } else if store.externalFillState == .failed,
-                  running.map({ !Self.job($0.job, serves: store) }) ?? true,
-                  let retry = retryJob(for: ordinal) {
-            retry.markPending()
-            queuedJobs.insert(retry, at: 0)
-            EngineLog.emit("[AetherEngine] AE#984: subtitle rendition ord=\(ordinal) was picked after its "
-                           + "sidecar failed; fetching it once more", category: .hlsServer)
-        }
-        if let current = running, !Self.job(current.job, serves: store),
-           queuedJobs.first.map({ Self.job($0, serves: store) }) == true {
-            preempted = current.task
-            queuedJobs.append(current.job)
-            running = nil
-        }
-        fillLock.unlock()
-        preempted?.cancel()
-        runNextFill()
+        fillQueue.prioritize(stores[ordinal])
     }
 
-    /// AE#984 R2: the item is ready to play; the renditions nobody picked may fill now.
-    func releaseHeldFills() {
-        fillLock.lock()
-        let wasHeld = holdsUnpickedFills
-        holdsUnpickedFills = false
-        fillLock.unlock()
-        if wasHeld { runNextFill() }
-    }
+    /// AE#984: the item is ready to play; the renditions nobody picked may fill now.
+    func releaseHeldFills() { fillQueue.releaseHeld() }
 
-    /// AE#984 R2: the ordinal of the rendition registered under the host's external track id.
+    /// AE#984: the ordinal of the rendition registered under the host's external track id.
     func ordinal(forExternalID id: Int) -> Int? {
         tracks.firstIndex { $0.externalID == id }
     }
 
-    /// AE#984 R2: what a `.vtt` request for this rendition would get right now.
+    /// AE#984: what a `.vtt` request for this rendition would get right now.
     func renditionServe(ordinal: Int) -> NativeSubtitleCueStore.WholeProgramServe? {
         guard ordinal >= 0, ordinal < stores.count else { return nil }
         return stores[ordinal].wholeProgramServe
@@ -162,58 +102,8 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
 
     /// Wait for every fill that can run to finish. Nothing in the session waits for it, the `.vtt`
     /// handler reads the store's state instead; this exists so a test can assert on a finished store
-    /// without racing the wall clock (a saturated cooperative pool can leave the detached decode without
-    /// a thread for a long time). Fills held for a pick or for readiness are not waited for.
-    func awaitFill() async {
-        while let task = currentFillTask() {
-            await task.value
-        }
-    }
-
-    private static func job(_ job: AetherEngine.ExternalSubtitleFillJob, serves store: NativeSubtitleCueStore) -> Bool {
-        job.targets.contains { $0.store === store }
-    }
-
-    /// The failed renditions that share the picked one's source, as one job, so a container is still
-    /// read once. Called under `fillLock`.
-    private func retryJob(for ordinal: Int) -> AetherEngine.ExternalSubtitleFillJob? {
-        let url = tracks[ordinal].source.url
-        let picked = tracks.indices.filter {
-            tracks[$0].source.url == url && stores[$0].externalFillState == .failed
-        }
-        let jobs = Self.fillJobs(tracks: picked.map { tracks[$0] }, stores: picked.map { stores[$0] },
-                                 defaultHeaders: defaultHeaders, mediaURL: mediaURL)
-        return jobs.first { Self.job($0, serves: stores[ordinal]) }
-    }
-
-    /// Starts the next job the queue allows, unless one is running. A job whose every store finished
-    /// meanwhile (a preempted decode that completed anyway) is dropped instead of fetched again.
-    private func runNextFill() {
-        fillLock.lock()
-        defer { fillLock.unlock() }
-        guard !fillCancelled, running == nil else { return }
-        queuedJobs.removeAll { $0.targets.allSatisfy { $0.store.isFinished } }
-        let pickedStore = pickedOrdinal.map { stores[$0] }
-        let index = pickedStore.flatMap { store in queuedJobs.firstIndex { Self.job($0, serves: store) } }
-            ?? (holdsUnpickedFills || queuedJobs.isEmpty ? nil : 0)
-        guard let index else { return }
-        let job = queuedJobs.remove(at: index)
-        nextRunID &+= 1
-        let id = nextRunID
-        // Assigned under the same lock hold, so `fillEnded` can never see the run before it exists.
-        let task = BlockingWork.detached(priority: .utility) { [weak self] in
-            await AetherEngine.runExternalSubtitleFill(job: job)
-            self?.fillEnded(id: id)
-        }
-        running = (job: job, task: task, id: id)
-    }
-
-    private func fillEnded(id: UInt64) {
-        fillLock.lock()
-        if running?.id == id { running = nil }
-        fillLock.unlock()
-        runNextFill()
-    }
+    /// without racing the wall clock. Fills held for a pick are not waited for.
+    func awaitFill() async { await fillQueue.awaitIdle() }
 
     /// AE#616: every sidecar's decode has finished, so `allCueStarts()` is the whole program.
     var isFillFinished: Bool { stores.allSatisfy(\.isFinished) }
@@ -221,13 +111,6 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#616: cue starts and texts across every injected rendition, on the axis the `.vtt` serves.
     func allCueStarts() -> [(start: Double, text: String)] {
         stores.flatMap { $0.allCues().map { (start: $0.start, text: $0.text) } }
-    }
-
-    /// Reading the handle stays synchronous: `NSLock` is unavailable from an async context.
-    private func currentFillTask() -> Task<Void, Never>? {
-        fillLock.lock()
-        defer { fillLock.unlock() }
-        return running?.task
     }
 
     /// One job per (url, headers) pair, in first-appearance order. Mirrors
@@ -297,9 +180,12 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         let store = stores[ordinal]
         let serve = store.wholeProgramServe
         if serve == .retryLater {
+            // The engine selects a rendition only once its sidecar is in, so a request for a pending one
+            // means something else selected it (AVKit's own menu). Its sidecar goes next.
+            fillQueue.prioritize(store)
             EngineLog.emit(
                 "[AetherEngine] AE#984: subtitle rendition ord=\(ordinal) requested before its sidecar is "
-                + "decoded; answering 404 so AVPlayer asks again", category: .hlsServer)
+                + "decoded; answering 404 so AVPlayer asks again, and fetching it next", category: .hlsServer)
             return nil
         }
         let cues = store.allCues()
