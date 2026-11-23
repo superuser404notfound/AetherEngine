@@ -646,6 +646,36 @@ The band is the outer 8 output samples on every side (4 in chroma), rewritten as
 - The micro benchmark of the loop alone (M1, same sizes) read 18.8 ms unoptimised and 0.18 ms optimised before, 1.9 ms and 0.14 ms after, with identical output. `edgeBandIsABilinearScaleOfTheSource` holds the band to a plain bilinear reference in both planes.
 - Not measured: a 59.94 fps source on the device with the fix. The test server has no such title, and its "720p" NDR channel turned out to be 1080p.
 
+### Lanczos for 1080p
+
+Measured on 2026-11-23. The answer first: **an Apple TV 4K scales 1080p to a 4K display bilinearly, and Lanczos-3 scores 8.5 VMAF NEG above that over 13 test scenes, ahead of MetalFX spatial scaling.** That decided `upscalesFullHDVideo` and its scaler.
+
+Current rule: [api.md › upscalesFullHDVideo](api.md#upscalesfullhdvideo).
+
+**What the box does.** Wohnzimmer (A15, tvOS 27.2.1) showed a gray 1080p frame through `AVSampleBufferDisplayLayer` and the same frame as an x264 file through `AVPlayerLayer`. A 4K screenshot (`devicectl device capture screenshot`) was compared with each scaler's own output, after a lookup table from an unscaled 4K calibration shot (measurement floor about 44 dB). The screenshot matched a bilinear 2x at 43 to 51 dB PSNR and Lanczos at only 38 to 42 dB, on both paths.
+
+**Quality.** 13 clips from xiph.org (8 Netflix Chimera and El Fuente scenes, 5 SVT scenes), one 4K frame each, brought to 1080p and back to 4K. Luma, VMAF 4K NEG model (`vmaf_4k_v0.6.1neg`, which does not reward plain sharpening) and PSNR-Y, means:
+
+| Downscale to 1080p | Bilinear (the box) | Bicubic | MetalFX spatial | Lanczos-3 |
+|---|---|---|---|---|
+| Lanczos, VMAF NEG | 85.5 | 92.7 | 92.1 | 94.0 |
+| Bicubic, VMAF NEG | 83.8 | 90.9 | 92.1 | 92.8 |
+| Lanczos, PSNR-Y | 37.4 dB | 38.4 dB | 36.9 dB | 38.8 dB |
+
+- Lanczos was ahead of bilinear in every scene, by 4.0 (Dancers) to 12.9 VMAF (Aerial).
+- The clips are clean camera originals. Compressed Blu-ray or streaming sources have not been measured.
+
+**Cost on the A15.** A Metal kernel for 2x Lanczos-3 luma plus bilinear chroma, 1080p to 2160p, in a measurement app: 6.9 ms back to back, 5.9 ms paced at 24 fps and at 60 fps. MetalFX spatial took 8.6 ms back to back and 18 ms paced at 24 fps, without the Y'CbCr to RGB conversion it also needs. The engine's stage (two passes per plane, Lanczos chroma too) read 2.9 ms of GPU per frame on an M1 (`LanczosUpscalerTests`).
+
+**The stage on the A15**, Sodalite Release build on Wohnzimmer (tvOS 27.2.1), `[Upscale] timing` lines over 48-frame windows:
+
+| Title | Rate | GPU per frame | Thread held | Lost frames |
+|---|---|---|---|---|
+| 1920x1080 H.264, AC-3 | 25 fps | 7.7 to 8.2 ms | 3.0 to 3.2 ms | 0 |
+| 1920x1080 H.264, TrueHD Atmos rendered to a 5.1.2 PCM bed, Atmos activator on | 23.976 fps | 7.5 to 7.8 ms | 2.8 to 3.1 ms | 0 |
+
+Line art on the same box and source size reads 20 to 22 ms of GPU at 24 fps. The GPU times are paced readings, so the governor's lower clock is in them.
+
 ### Bed regression in a Debug build (AE#1106)
 
 Measured on an M1 on 2026-11-21. **With per-bin Swift loops the bed regression ran at 0.2x real time in an unoptimised build, so a host's Debug build stalled TrueHD Atmos on every segment. Through Accelerate it runs at 11x there, and twice as fast optimised.** An Apple TV has not been measured since the change.

@@ -639,6 +639,7 @@ Other lines `play` prints:
 | `--dv-pin <spec>` | DEBUG: pulses a pinned frame's DV metadata. | off |
 | `--upscale` | `LoadOptions.upscalesLowResolutionVideo` (#846). | off |
 | `--line-art` | `LoadOptions.upscaleScaler = .lineArt` (AE#1039); implies `--upscale`. | off |
+| `--upscale-fullhd` | `LoadOptions.upscalesFullHDVideo`: Lanczos-3 for SDR 1080p sources. | off |
 | `--tone-map <nits>` | `LoadOptions.videoProcessing` with this `targetPeakNits` (#957). | off |
 | `--deinterlace-field-rate field\|frame` | `LoadOptions.deinterlaceFieldRate` (AE#492). | `field` |
 | `--inverse-telecine auto\|off\|force` | `LoadOptions.inverseTelecine` (#853). | `auto` |
@@ -1022,6 +1023,8 @@ See [dolby-vision-fel.md](dolby-vision-fel.md).
 `--upscale` opts in to upscaling sub-1080p SDR video to the display (`LoadOptions.upscalesLowResolutionVideo`, #846). It logs one `[Upscale]` line, and an `UPSCALE` line once the first frame is upscaled.
 
 `--line-art` runs the line-art scaler instead (`LoadOptions.upscaleScaler = .lineArt`, AE#1039) and implies `--upscale`. It also takes 1080p and 10-bit SDR. The `UPSCALE` line then ends in `scaler=lineArt`, and the `[Upscale] timing` lines show the chain's GPU time under `metal`.
+
+`--upscale-fullhd` opts in to Lanczos-3 for SDR 1080p sources (`LoadOptions.upscalesFullHDVideo`). It combines with `--upscale`; the source's size picks the scaler. The `UPSCALE` line then ends in `scaler=lanczos`.
 
 ### Tone map (`--tone-map`)
 
@@ -2284,6 +2287,7 @@ swift run -c release aetherctl bench --baseline /tmp/base.json
 | `upscale: 720p to 2160p, MetalFX only, wall time` | MetalFX alone on the 720p frame, the rung the stage drops to without an ML pass. |
 | `upscale: 1080p to 2160p, line art, wall time` | `upscaleScaler = .lineArt` on a 1920x1080 frame, upscale network only (its lower rung). |
 | `upscale: 1080p to 2160p, line art with restore, wall time` | The same with the restore pass and the highlight clamp, the stage's top rung. |
+| `upscale: 1080p to 2160p, Lanczos, wall time` | `upscalesFullHDVideo` (`.lanczos`) on a 1920x1080 frame. |
 
 The upscale cases build the stage playback builds for that plan, with its VT session and MetalFX scaler, and wait for each frame's ML pass. Their note names the plan's steps (for example `1280x720 -> ML 2x 2560x1440 -> MetalFX 3840x2160`) and the median ML and GPU time. A case is skipped with the reason when the device cannot build it: MetalFX needs tvOS 27.1, and every upscale case needs OS 26 and real hardware. The display size is fixed, so `--iterations` is the only flag that changes them.
 

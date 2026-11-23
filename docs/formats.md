@@ -222,7 +222,7 @@ Native AVPlayer path, VideoToolbox:
 | H.264 High 4:2:2 / 4:4:4 / High 10, HEVC Rext, where VideoToolbox lacks the profile | The native path reaches `readyToPlay` and renders nothing (`VTCapabilityProbe.canHardwareDecode`, VOD) | libavcodec |
 | H.264 with both MVC stereo views in one track | VideoToolbox is handed both views in one sample and renders nothing (#435) | libavcodec (base view) |
 | Dolby Vision Profile 7 FEL, opt-in | `preferDualLayerDolbyVision` with the `DualLayerDolbyVision` trait composes both layers here ([Profile 7](#profile-7)) | VideoToolbox, both layers, plus the Metal composer |
-| Upscaling, opt-in | With `upscalesLowResolutionVideo`, a source the route accepts moves here for the Metal scaler, and returns to native when the stage is dropped (#846, [Upscaling](#upscaling)) | The source's usual decoder |
+| Upscaling, opt-in | With `upscalesLowResolutionVideo` or `upscalesFullHDVideo`, a source the route accepts moves here for the Metal scaler, and returns to native when the stage is dropped (#846, [Upscaling](#upscaling)) | The source's usual decoder |
 | HDR10 tone map, opt-in | With `videoProcessing`, an HDR10 source brighter than the target moves here for the tone map, and returns to native when the processing is dropped (#957, [Tone map to the display's peak](#tone-map-to-the-displays-peak)) | The source's usual decoder |
 | A native session AVPlayer refuses on its media | With `escalatesToSoftwarePath` (default), a CoreMedia refusal or a confirmed H.264 parameter-set change rebuilds the session here at its playhead ([Files with broken timestamps or bitstreams](#files-with-broken-timestamps-or-bitstreams)) | libavcodec, or VideoToolbox for HEVC |
 | Anything, by request | `preferredDecodePath = .software` ([api › Overriding the decode path](api.md#overriding-the-decode-path)) | As above |
@@ -358,6 +358,8 @@ Film put on NTSC video with its 3:2 pulldown baked into the pictures (hard telec
 ### Upscaling
 
 SDR video below 1080p can be upscaled to the display's pixel size on the software host. It is opt-in with `LoadOptions.upscalesLowResolutionVideo` (#846). The default scaler is VideoToolbox super resolution plus MetalFX. `upscaleScaler = .lineArt` runs a network made for drawn content instead (Anime4K mode A, 8 or 10 bit, up to 1080p; AE#1039). HDR, Dolby Vision and AirPlay routes are not upscaled. See [api › `upscalesLowResolutionVideo`](api.md#upscaleslowresolutionvideo).
+
+SDR 1080p has its own opt-in, `LoadOptions.upscalesFullHDVideo`, which scales with Lanczos-3 (8 or 10 bit). See [api › `upscalesFullHDVideo`](api.md#upscalesfullhdvideo).
 
 ### Files with broken timestamps or bitstreams
 

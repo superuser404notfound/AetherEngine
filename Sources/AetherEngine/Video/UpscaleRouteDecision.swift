@@ -17,13 +17,15 @@ struct SourceGeometry: Equatable {
 
 /// What the upscale stage does for one source: a first pass (the ML pass, coded size times `mlScale`, or the
 /// line-art 2x), then the rest of the way to the target, which is the display aspect fitted into the display
-/// box: MetalFX after an ML pass (or alone), a bilinear resample after the line-art pass.
+/// box: MetalFX after an ML pass (or alone), a bilinear resample after the line-art pass. A `.lanczos` plan is
+/// one pass straight to the target.
 struct UpscalePlan: Hashable, Sendable {
     var sourceWidth: Int
     var sourceHeight: Int
     /// nil = MetalFX only.
     var mlScale: Float?
-    /// The first pass's output: the ML output, twice the source for `.lineArt`, else the source size.
+    /// The first pass's output: the ML output, twice the source for `.lineArt`, the target for `.lanczos`,
+    /// else the source size.
     var mlOutputWidth: Int
     var mlOutputHeight: Int
     var targetWidth: Int
@@ -34,6 +36,47 @@ struct UpscalePlan: Hashable, Sendable {
 
     var needsMetalFX: Bool {
         scaler == .automatic && (mlOutputWidth != targetWidth || mlOutputHeight != targetHeight)
+    }
+
+    /// No axis shrinks. Lanczos is built for upscaling only (`LanczosTaps`), and a stage that cannot be
+    /// built would have moved the title off its native route for nothing.
+    var scalesUpOnly: Bool { targetWidth >= sourceWidth && targetHeight >= sourceHeight }
+}
+
+/// Which scaler each source size gets from the two upscale options, for the load and for a mid-stream
+/// size change (an adaptive ladder, a live channel switching between 720p and 1080i).
+struct UpscaleSizePolicy: Equatable, Sendable {
+    var lowResolution: Bool
+    var requested: UpscaleScaler
+    var fullHD: Bool
+
+    init(lowResolution: Bool, requested: UpscaleScaler, fullHD: Bool) {
+        self.lowResolution = lowResolution
+        self.requested = requested
+        self.fullHD = fullHD
+    }
+
+    init(_ options: LoadOptions) {
+        self.init(lowResolution: options.upscalesLowResolutionVideo, requested: options.upscaleScaler,
+                  fullHD: options.upscalesFullHDVideo)
+    }
+
+    /// Line art where it is asked for and the size allows; else Lanczos for a 1080p source under
+    /// `upscalesFullHDVideo` (it beats MetalFX on cropped 1080p the automatic route would also take); else
+    /// the requested scaler where `upscalesLowResolutionVideo` covers the size; else nil. An unknown size
+    /// counts as covered, the geometry check refuses it.
+    func scaler(width: Int, height: Int) -> UpscaleScaler? {
+        let low = lowResolution && UpscaleRouteDecision.sizeAllowed(width: width, height: height, scaler: requested)
+        if low, requested == .lineArt { return .lineArt }
+        if fullHD, UpscaleRouteDecision.isFullHDClass(width: width, height: height) { return .lanczos }
+        return low ? requested : nil
+    }
+
+    /// Whether the options still ask for `plan`'s scaler on its source, for an in-session rebuild. A
+    /// Lanczos plan a line-art stage fell back to counts as line art's.
+    func covers(_ plan: UpscalePlan) -> Bool {
+        let wanted = scaler(width: plan.sourceWidth, height: plan.sourceHeight)
+        return wanted == plan.scaler || (plan.scaler == .lanczos && wanted == .lineArt)
     }
 }
 
@@ -51,12 +94,14 @@ enum UpscaleRouteDecision: Equatable {
         case metalFXUnsupported
         case hdrOrDolbyVision
         case notEightBit420
-        /// `.lineArt` only: neither 8 nor 10-bit 4:2:0.
+        /// `.lineArt` and `.lanczos`: neither 8 nor 10-bit 4:2:0.
         case notFourTwoZero
         case geometryUnknown
         case notBelow1080p
-        /// `.lineArt` only: wider than 1920 or taller than 1080.
+        /// `.lineArt`, `.lanczos` and `upscalesFullHDVideo`: wider than 1920 or taller than 1080.
         case largerThan1080p
+        /// Only `upscalesFullHDVideo` is on, and the source is 1280x720 or smaller.
+        case belowFullHD
         case displayNotLarger
         case wirelessAirPlayRoute
         case demuxedAudioLive
@@ -68,22 +113,25 @@ enum UpscaleRouteDecision: Equatable {
         source: SourceGeometry, isSDR: Bool, isDolbyVision: Bool, isEightBit420: Bool,
         display: CGSize, wirelessAirPlayRoute: Bool, demuxedAudioLive: Bool,
         mlScaleFactors: (Int, Int) -> [Float],
-        scaler: UpscaleScaler = .automatic, isTenBit420: Bool = false,
+        scaler requested: UpscaleScaler = .automatic, isTenBit420: Bool = false, fullHD: Bool = false,
         stageFailedEarlier: (UpscalePlan) -> Bool = { _ in false }
     ) -> UpscaleRouteDecision {
-        guard preference else { return .notTaken(.preferenceOff) }
+        guard preference || fullHD else { return .notTaken(.preferenceOff) }
         guard osSupportsStage else { return .notTaken(.unsupportedOS) }
         guard isSDR, !isDolbyVision else { return .notTaken(.hdrOrDolbyVision) }
-        switch scaler {
+        let sized = UpscaleSizePolicy(lowResolution: preference, requested: requested, fullHD: fullHD)
+            .scaler(width: source.width, height: source.height)
+        switch sized ?? (preference ? requested : .lanczos) {
         case .automatic: guard isEightBit420 else { return .notTaken(.notEightBit420) }
-        case .lineArt: guard isEightBit420 || isTenBit420 else { return .notTaken(.notFourTwoZero) }
+        case .lineArt, .lanczos: guard isEightBit420 || isTenBit420 else { return .notTaken(.notFourTwoZero) }
         }
         guard source.width > 0, source.height > 0 else { return .notTaken(.geometryUnknown) }
-        guard sizeAllowed(width: source.width, height: source.height, scaler: scaler) else {
-            return .notTaken(scaler == .lineArt ? .largerThan1080p : .notBelow1080p)
+        guard let scaler = sized else {
+            return .notTaken(sizeRefusal(source, preference: preference, requested: requested, fullHD: fullHD))
         }
         guard let plan = makePlan(source: source, display: display, mlScaleFactors: mlScaleFactors, scaler: scaler),
-              plan.targetWidth > source.width || plan.targetHeight > source.height
+              plan.targetWidth > source.width || plan.targetHeight > source.height,
+              scaler != .lanczos || plan.scalesUpOnly
         else { return .notTaken(.displayNotLarger) }
         // Without MetalFX an automatic plan needs its ML pass, which then runs alone (the display scales the
         // rest). The line-art stage is plain Metal compute.
@@ -98,31 +146,51 @@ enum UpscaleRouteDecision: Equatable {
         return .taken(plan)
     }
 
+    /// Why no scaler takes the source's size.
+    private static func sizeRefusal(_ source: SourceGeometry, preference: Bool, requested: UpscaleScaler,
+                                    fullHD: Bool) -> Reason {
+        if sizeAllowed(width: source.width, height: source.height, scaler: .lanczos) {
+            return preference ? .notBelow1080p : .belowFullHD
+        }
+        return preference && requested == .automatic && !fullHD ? .notBelow1080p : .largerThan1080p
+    }
+
+    /// Larger than 1280x720 on either axis, at most 1920x1080: the sources `upscalesFullHDVideo` takes. Not
+    /// "1920 or 1080 exactly", because most 1080p rips are cropped (1916x1036, 1904x800, 1920x800).
+    static func isFullHDClass(width: Int, height: Int) -> Bool {
+        sizeAllowed(width: width, height: height, scaler: .lanczos) && (width > 1280 || height > 720)
+    }
+
     /// What a line-art plan falls back to when it overruns (AE#1039): the automatic plan for the same
-    /// source and display, only below 1080p and only with a VT super-resolution pass (MetalFX alone costs
-    /// about what line art does). The pixel aspect comes from the plan's own target.
-    static func lineArtFallback(for plan: UpscalePlan, mlScaleFactors: (Int, Int) -> [Float]) -> UpscalePlan? {
-        guard plan.scaler == .lineArt,
-              sizeAllowed(width: plan.sourceWidth, height: plan.sourceHeight, scaler: .automatic) else { return nil }
+    /// source and display where it has a VT super-resolution pass (below 1080p; MetalFX alone costs about
+    /// what line art does), else Lanczos straight to the target, which costs about a third of line art.
+    /// The automatic route takes 8-bit only, so `eightBit` false goes to Lanczos at every size. The pixel
+    /// aspect comes from the plan's own target.
+    static func lineArtFallback(for plan: UpscalePlan, eightBit: Bool = true,
+                                mlScaleFactors: (Int, Int) -> [Float]) -> UpscalePlan? {
+        guard plan.scaler == .lineArt else { return nil }
         var num = plan.targetWidth * plan.sourceHeight, den = plan.targetHeight * plan.sourceWidth
         guard num > 0, den > 0 else { return nil }
         var a = num, b = den
         while b != 0 { (a, b) = (b, a % b) }
         num /= a; den /= a
-        guard let fallback = makePlan(
-                source: SourceGeometry(width: plan.sourceWidth, height: plan.sourceHeight, sarNum: num, sarDen: den),
-                display: CGSize(width: plan.displayWidth, height: plan.displayHeight),
-                mlScaleFactors: mlScaleFactors, scaler: .automatic),
-              fallback.mlScale != nil else { return nil }
-        return fallback
+        let source = SourceGeometry(width: plan.sourceWidth, height: plan.sourceHeight, sarNum: num, sarDen: den)
+        let display = CGSize(width: plan.displayWidth, height: plan.displayHeight)
+        if eightBit, sizeAllowed(width: plan.sourceWidth, height: plan.sourceHeight, scaler: .automatic),
+           let automatic = makePlan(source: source, display: display, mlScaleFactors: mlScaleFactors, scaler: .automatic),
+           automatic.mlScale != nil {
+            return automatic
+        }
+        return makePlan(source: source, display: display, mlScaleFactors: mlScaleFactors, scaler: .lanczos)
+            .flatMap { $0.scalesUpOnly ? $0 : nil }
     }
 
-    /// Below 1080p for `.automatic` (1080p scales well enough without it, and VT super resolution does not
-    /// take it); up to and including 1080p for `.lineArt`, whose 2x then fills a UHD display.
+    /// Below 1080p for `.automatic` (VT super resolution does not take 1080p); up to and including 1080p for
+    /// `.lineArt`, whose 2x then fills a UHD display, and for `.lanczos`.
     static func sizeAllowed(width: Int, height: Int, scaler: UpscaleScaler) -> Bool {
         switch scaler {
         case .automatic: return width < 1920 && height < 1080
-        case .lineArt: return width <= 1920 && height <= 1080
+        case .lineArt, .lanczos: return width <= 1920 && height <= 1080
         }
     }
 
@@ -148,6 +216,13 @@ enum UpscaleRouteDecision: Equatable {
         targetH = even(min(targetH, displayH))
         guard targetW > 0, targetH > 0 else { return nil }
 
+        if scaler == .lanczos {
+            return UpscalePlan(
+                sourceWidth: source.width, sourceHeight: source.height, mlScale: nil,
+                mlOutputWidth: targetW, mlOutputHeight: targetH,
+                targetWidth: targetW, targetHeight: targetH, displayWidth: displayW, displayHeight: displayH,
+                scaler: .lanczos)
+        }
         if scaler == .lineArt {
             return UpscalePlan(
                 sourceWidth: source.width, sourceHeight: source.height, mlScale: nil,
@@ -228,6 +303,8 @@ enum UpscaleRouteDecision: Equatable {
         switch self {
         case .notTaken(.preferenceOff):
             return nil
+        case let .taken(plan) where plan.scaler == .lanczos:
+            return "[Upscale] taken: \(plan.sourceWidth)x\(plan.sourceHeight) -> \(plan.targetWidth)x\(plan.targetHeight) (Lanczos)"
         case let .taken(plan) where plan.scaler == .lineArt:
             let rest = plan.mlOutputWidth == plan.targetWidth && plan.mlOutputHeight == plan.targetHeight
                 ? "" : ", then bilinear"
@@ -249,7 +326,7 @@ enum UpscaleRouteDecision: Equatable {
 extension UpscaleRouteDecision.Reason {
     var text: String {
         switch self {
-        case .preferenceOff: return "upscalesLowResolutionVideo is off"
+        case .preferenceOff: return "upscalesLowResolutionVideo and upscalesFullHDVideo are off"
         case .unsupportedOS: return "needs OS 26"
         case .metalFXUnsupported: return "MetalFX spatial scaling unsupported on this device"
         case .hdrOrDolbyVision: return "HDR or Dolby Vision source"
@@ -258,6 +335,7 @@ extension UpscaleRouteDecision.Reason {
         case .geometryUnknown: return "source size unknown"
         case .notBelow1080p: return "source is not below 1080p"
         case .largerThan1080p: return "source is larger than 1920x1080"
+        case .belowFullHD: return "source is 720p or smaller and upscalesLowResolutionVideo is off"
         case .displayNotLarger: return "display is not larger than the source"
         case .wirelessAirPlayRoute: return "a wireless AirPlay receiver holds the audio route"
         case .demuxedAudioLive: return "live stream with demuxed audio"

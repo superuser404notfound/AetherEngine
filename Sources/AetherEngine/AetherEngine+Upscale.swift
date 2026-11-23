@@ -17,7 +17,7 @@ extension AetherEngine {
         wirelessAirPlayRoute: Bool, demuxedAudioLive: Bool, outputFrameRate: Double? = nil
     ) -> UpscaleRouteDecision {
         // Spares the off case the Metal device and the display read below.
-        guard options.upscalesLowResolutionVideo else { return .notTaken(.preferenceOff) }
+        guard options.upscalesLowResolutionVideo || options.upscalesFullHDVideo else { return .notTaken(.preferenceOff) }
 
         var source = SourceGeometry(width: 0, height: 0, sarNum: 0, sarDen: 0)
         var frameRate: Double?
@@ -55,24 +55,28 @@ extension AetherEngine {
 
         sourceUpscaleFrameRate = frameRate
         let display = DisplayPixelSize.current() ?? .zero
-        func decide(_ scaler: UpscaleScaler) -> UpscaleRouteDecision {
+        func decide(_ scaler: UpscaleScaler, preference: Bool = options.upscalesLowResolutionVideo,
+                    fullHD: Bool = options.upscalesFullHDVideo) -> UpscaleRouteDecision {
             UpscaleRouteDecision.decide(
-                preference: true, osSupportsStage: osSupportsStage, metalFXSupported: metalFXSupported,
+                preference: preference, osSupportsStage: osSupportsStage, metalFXSupported: metalFXSupported,
                 source: source, isSDR: isSDR, isDolbyVision: dvProfile != nil, isEightBit420: isEightBit420,
                 display: display,
                 wirelessAirPlayRoute: wirelessAirPlayRoute, demuxedAudioLive: demuxedAudioLive,
-                mlScaleFactors: mlScaleFactors, scaler: scaler, isTenBit420: isTenBit420,
+                mlScaleFactors: mlScaleFactors, scaler: scaler, isTenBit420: isTenBit420, fullHD: fullHD,
                 stageFailedEarlier: { UpscaleFailureMemory.contains($0, frameRate: frameRate) })
         }
         let decision = decide(options.upscaleScaler)
         // AE#1039: line art that overran here before starts on the rung it fell back to.
         if let plan = decision.plan, plan.scaler == .lineArt,
            let overrun = LineArtCostMemory.overrun(covering: plan, frameInterval: frameRate.map { 1 / $0 }, rung: .upscale) {
-            let fallback = UpscaleRouteDecision.lineArtFallback(for: plan, mlScaleFactors: mlScaleFactors) != nil
-                ? decide(.automatic) : .notTaken(.stageFailedEarlier)
+            // The fallback's own scaler, decided as if asked for: a 1080p source falls to Lanczos.
+            let next = UpscaleRouteDecision.lineArtFallback(for: plan, eightBit: isEightBit420,
+                                                            mlScaleFactors: mlScaleFactors)?.scaler
+            let fallback = next.map { decide($0, preference: true, fullHD: false) } ?? .notTaken(.stageFailedEarlier)
             EngineLog.emit(String(format: "[Upscale] line art overran on this device earlier (%.1f ms at %.1f ms), %@",
                                   overrun.meanMs, overrun.frameInterval * 1000,
-                                  fallback.plan != nil ? "using the automatic scaler" : "not upscaling"),
+                                  fallback.plan.map { $0.scaler == .lanczos ? "using Lanczos" : "using the automatic scaler" }
+                                    ?? "not upscaling"),
                            category: .engine)
             return fallback
         }

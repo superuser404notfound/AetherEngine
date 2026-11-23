@@ -330,11 +330,11 @@ struct LineArtUpscalerTests {
         #expect(up.isDisabled)
     }
 
-    /// The ladder at 1080p: an overrun first drops the restore pass, a second one switches the stage off
-    /// (nothing below line art takes 1080p). Both rungs are remembered.
+    /// The ladder at 1080p: an overrun first drops the restore pass, a second one falls back to Lanczos, a
+    /// third switches the stage off. Both line-art rungs are remembered.
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    func fullHDOverrunDropsRestoreThenSwitchesOff() throws {
+    func fullHDOverrunDropsRestoreThenFallsBackToLanczos() throws {
         FrameUpscaler.resetLineArtCostMemoryForTesting()
         defer { FrameUpscaler.resetLineArtCostMemoryForTesting() }
         let p = try plan(1920, 1080)
@@ -347,6 +347,9 @@ struct LineArtUpscalerTests {
         #expect(!up.isDisabled && !up.runsLineArtRestore && up.isDegraded)
         #expect(degraded.value?.scaler == .lineArt)
         #expect(up.upscale(input, pts: .invalid) != nil, "the stage without restore delivers frames")
+        for _ in 0..<47 { _ = up.upscale(input, pts: .invalid) }
+        #expect(!up.isDisabled && up.plan.scaler == .lanczos && degraded.value?.scaler == .lanczos)
+        #expect(up.upscale(input, pts: .invalid) != nil, "the Lanczos stage delivers frames")
         for _ in 0..<47 { _ = up.upscale(input, pts: .invalid) }
         #expect(up.isDisabled)
         #expect(LineArtCostMemory.overrun(covering: p, frameInterval: 0.0001, rung: .restore) != nil)
@@ -366,17 +369,18 @@ struct LineArtUpscalerTests {
         #expect(smaller.runsLineArtRestore)
     }
 
-    /// The automatic route takes 8-bit only, so a 10-bit source below 1080p has nothing to fall back to.
+    /// The automatic route takes 8-bit only, so a 10-bit source below 1080p falls back to Lanczos.
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    func tenBitOverrunBelow1080pSwitchesOff() throws {
+    func tenBitOverrunBelow1080pFallsBackToLanczos() throws {
         FrameUpscaler.resetLineArtCostMemoryForTesting()
         defer { FrameUpscaler.resetLineArtCostMemoryForTesting() }
         let up = try #require(FrameUpscaler(plan: try plan(1280, 720), frameInterval: 0.0001))
         let input = try ChainFrames.gradient(1280, 720, tenBit: true)
         for _ in 0..<96 { _ = up.upscale(input, pts: .invalid) }
-        #expect(up.isDisabled)
-        #expect(up.plan.scaler == .lineArt)
+        #expect(!up.isDisabled && up.plan.scaler == .lanczos)
+        let out = try #require(up.upscale(input, pts: .invalid))
+        #expect(CVPixelBufferGetPixelFormatType(out) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
     }
 
     /// Below 1080p the next best is the automatic route: VT super resolution, MetalFX where it is there.
@@ -404,6 +408,163 @@ struct LineArtUpscalerTests {
         #expect(CVPixelBufferGetWidth(out) == 3840 && up.plan.sourceWidth == 1920 && up.plan.scaler == .lineArt)
         #expect(up.upscale(try ChainFrames.gradient(2560, 1440, tenBit: false), pts: .invalid) == nil)
         #expect(!up.isDisabled)
+    }
+}
+
+/// `UpscaleScaler.lanczos` on the GPU: the planes come out as the CPU reference computes them from the same
+/// taps (rows, then columns, rounded to codes), in the input's format, for 2x and for other ratios.
+@Suite("Lanczos upscaler", .serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(5)),
+       .enabled(if: ChainGate.gpuAvailable))
+struct LanczosUpscalerTests {
+
+    /// Codes of one plane (8-bit scale times 4 for 10-bit), component-interleaved per row.
+    private static func plane(_ pb: CVPixelBuffer, _ plane: Int) -> (w: Int, h: Int, c: Int, values: [Double]) {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        let ten = CVPixelBufferGetPixelFormatType(pb) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        let w = CVPixelBufferGetWidthOfPlane(pb, plane), h = CVPixelBufferGetHeightOfPlane(pb, plane)
+        let c = plane == 0 ? 1 : 2
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane)
+        let base = CVPixelBufferGetBaseAddressOfPlane(pb, plane)!
+        var values: [Double] = []
+        values.reserveCapacity(w * h * c)
+        for y in 0..<h {
+            for i in 0..<(w * c) {
+                let row = base.advanced(by: y * stride)
+                values.append(ten ? Double(row.assumingMemoryBound(to: UInt16.self)[i] >> 6)
+                                  : Double(row.assumingMemoryBound(to: UInt8.self)[i]))
+            }
+        }
+        return (w, h, c, values)
+    }
+
+    /// The separable reference: rows, then columns, each component on its own, rounded and clamped.
+    private static func reference(_ p: (w: Int, h: Int, c: Int, values: [Double]), to size: (Int, Int),
+                                  maxCode: Double) throws -> [Double] {
+        let rows = try #require(LanczosTaps(inputCount: p.w, outputCount: size.0))
+        let columns = try #require(LanczosTaps(inputCount: p.h, outputCount: size.1))
+        var out = [Double](repeating: 0, count: size.0 * size.1 * p.c)
+        for comp in 0..<p.c {
+            let wide = (0..<p.h).map { y in rows.apply((0..<p.w).map { p.values[(y * p.w + $0) * p.c + comp] }) }
+            for x in 0..<size.0 {
+                let column = columns.apply((0..<p.h).map { wide[$0][x] })
+                for y in 0..<size.1 { out[(y * size.0 + x) * p.c + comp] = min(max(column[y].rounded(), 0), maxCode) }
+            }
+        }
+        return out
+    }
+
+    /// A picture with hard edges in both planes, so the ringing is in the comparison too.
+    private static func pattern(_ w: Int, _ h: Int, tenBit: Bool) throws -> CVPixelBuffer {
+        let pb = try ChainFrames.buffer(w, h, format: tenBit ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                                                              : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+        CVPixelBufferLockBaseAddress(pb, [])
+        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+        for plane in 0..<2 {
+            let pw = CVPixelBufferGetWidthOfPlane(pb, plane), ph = CVPixelBufferGetHeightOfPlane(pb, plane)
+            let c = plane == 0 ? 1 : 2
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane)
+            let base = CVPixelBufferGetBaseAddressOfPlane(pb, plane)!
+            for y in 0..<ph {
+                for i in 0..<(pw * c) {
+                    let x = i / c
+                    let edge = (x / 5 + y / 3) % 2 == 0
+                    let code = plane == 0 ? (edge ? 16 : 235) - (x * 7 + y * 3) % 9 : (edge ? 40 : 216) + i % 2 * 3
+                    let row = base.advanced(by: y * stride)
+                    if tenBit { row.assumingMemoryBound(to: UInt16.self)[i] = UInt16(code * 4 + (x + y) % 4) << 6 }
+                    else { row.assumingMemoryBound(to: UInt8.self)[i] = UInt8(code) }
+                }
+            }
+        }
+        return pb
+    }
+
+    @Test(arguments: [false, true], [(64, 36, 128, 72), (48, 36, 128, 72), (62, 40, 100, 66)])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func planesMatchTheReference(tenBit: Bool, size: (Int, Int, Int, Int)) throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let queue = try #require(device.makeCommandQueue())
+        let scaler = try LanczosPlaneScaler(device: device, queue: queue, sourceWidth: size.0, sourceHeight: size.1,
+                                            targetWidth: size.2, targetHeight: size.3)
+        let input = try Self.pattern(size.0, size.1, tenBit: tenBit)
+        let (out, work) = try scaler.encode(input, picture: FrameUpscaler.PictureRegion(x: 0, y: 0, width: size.0,
+                                                                                         height: size.1))
+        work.commandBuffer.commit()
+        work.commandBuffer.waitUntilCompleted()
+        _ = try work.finish()
+        #expect(CVPixelBufferGetPixelFormatType(out) == CVPixelBufferGetPixelFormatType(input))
+        let maxCode: Double = tenBit ? 1023 : 255
+        for plane in 0..<2 {
+            let got = Self.plane(out, plane)
+            let want = try Self.reference(Self.plane(input, plane),
+                                          to: plane == 0 ? (size.2, size.3) : (size.2 / 2, size.3 / 2), maxCode: maxCode)
+            let diff = zip(got.values, want).map { abs($0 - $1) }.max() ?? .infinity
+            // Float on the GPU against double here: a sample on a rounding boundary may land one code off.
+            #expect(diff <= 1, "plane \(plane) max difference \(diff) (tenBit \(tenBit), \(size))")
+        }
+    }
+
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func onlyThePictureRegionIsScaled() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let queue = try #require(device.makeCommandQueue())
+        let input = try ChainFrames.flat(320, 196, y: 126, c: 128)
+        ChainFrames.paintRows(input, 0..<16, y: 235)
+        let scaler = try LanczosPlaneScaler(device: device, queue: queue, sourceWidth: 320, sourceHeight: 180,
+                                            targetWidth: 640, targetHeight: 360)
+        let (out, work) = try scaler.encode(input, picture: FrameUpscaler.PictureRegion(x: 0, y: 16, width: 320, height: 180))
+        work.commandBuffer.commit()
+        work.commandBuffer.waitUntilCompleted()
+        _ = try work.finish()
+        #expect(ChainFrames.lumaRange(out) == 126...126)
+    }
+
+    @Test(arguments: [false, true])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func fullHDGoesToUHDThroughTheUpscaler(tenBit: Bool) throws {
+        let plan = try #require(UpscaleRouteDecision.makePlan(
+            source: SourceGeometry(width: 1920, height: 1080, sarNum: 1, sarDen: 1),
+            display: CGSize(width: 3840, height: 2160), mlScaleFactors: { _, _ in [] }, scaler: .lanczos))
+        let up = try #require(FrameUpscaler(plan: plan, frameInterval: 1.0 / 24))
+        let input = try ChainFrames.gradient(1920, 1080, tenBit: tenBit)
+        for _ in 0..<5 {
+            let out = try #require(up.upscale(input, pts: .invalid))
+            #expect(CVPixelBufferGetWidth(out) == 3840 && CVPixelBufferGetHeight(out) == 2160)
+            #expect(CVPixelBufferGetPixelFormatType(out) == CVPixelBufferGetPixelFormatType(input))
+            #expect(CVBufferCopyAttachment(out, kCVImageBufferYCbCrMatrixKey, nil) != nil)
+        }
+        #expect(up.stats.framesUpscaled == 5 && up.stats.failures == 0)
+        #expect(up.delivered?.plan.scaler == .lanczos)
+        print(String(format: "[LanczosUpscalerTests] 1920x1080 -> 3840x2160 (tenBit %@): mean %.2f ms, GPU %.2f ms",
+                     tenBit ? "yes" : "no", up.stats.meanMs, up.stats.stageMeanMs.metalGPU))
+    }
+
+    /// A size change picks the scaler again from the options: a 1080p-only session passes a 720p stretch
+    /// through and upscales again once 1080p is back; with line art asked for, a 720p start moves to line
+    /// art at 1080p, not to Lanczos.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func aSizeChangeAsksTheOptionsAgain() throws {
+        let display = CGSize(width: 3840, height: 2160)
+        let lanczos = try #require(UpscaleRouteDecision.makePlan(
+            source: SourceGeometry(width: 1920, height: 1080, sarNum: 1, sarDen: 1), display: display,
+            mlScaleFactors: { _, _ in [] }, scaler: .lanczos))
+        let up = try #require(FrameUpscaler(plan: lanczos, frameInterval: 1.0 / 24,
+                                            sizePolicy: UpscaleSizePolicy(lowResolution: false, requested: .automatic, fullHD: true)))
+        #expect(up.upscale(try ChainFrames.gradient(1920, 1080, tenBit: false), pts: .invalid) != nil)
+        #expect(up.upscale(try ChainFrames.gradient(1280, 720, tenBit: false), pts: .invalid) == nil)
+        #expect(!up.isDisabled)
+        let back = try #require(up.upscale(try ChainFrames.gradient(1904, 800, tenBit: false), pts: .invalid))
+        #expect(CVPixelBufferGetWidth(back) == 3840 && up.plan.scaler == .lanczos)
+
+        let lineArt = try #require(UpscaleRouteDecision.makePlan(
+            source: SourceGeometry(width: 1280, height: 720, sarNum: 1, sarDen: 1), display: display,
+            mlScaleFactors: { _, _ in [] }, scaler: .lineArt))
+        let drawn = try #require(FrameUpscaler(plan: lineArt, frameInterval: 1.0 / 24,
+                                               sizePolicy: UpscaleSizePolicy(lowResolution: true, requested: .lineArt, fullHD: true)))
+        _ = try #require(drawn.upscale(try ChainFrames.gradient(1920, 1080, tenBit: false), pts: .invalid))
+        #expect(drawn.plan.scaler == .lineArt)
     }
 }
 

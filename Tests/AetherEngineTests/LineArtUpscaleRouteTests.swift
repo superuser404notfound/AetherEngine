@@ -98,16 +98,16 @@ struct LineArtUpscaleRouteTests {
         #expect(!UpscaleRouteDecision.isTenBit420(pixelFormat: AV_PIX_FMT_NONE.rawValue, bitsPerRawSample: 8))
     }
 
-    /// What line art falls back to: the automatic plan below 1080p when it has an ML pass, else nothing.
+    /// What line art falls back to: the automatic plan below 1080p when it has an ML pass, else Lanczos.
     @Test func lineArtFallsBackToTheAutomaticPlanBelow1080p() throws {
         let hd = try #require(decide(source: geo(1280, 720)).plan)
         let fallback = try #require(UpscaleRouteDecision.lineArtFallback(for: hd, mlScaleFactors: { _, _ in [1.5] }))
         #expect(fallback.scaler == .automatic && fallback.mlScale == 1.5)
         #expect(fallback.targetWidth == hd.targetWidth && fallback.targetHeight == hd.targetHeight)
-        #expect(UpscaleRouteDecision.lineArtFallback(for: hd, mlScaleFactors: { _, _ in [] }) == nil)
+        #expect(UpscaleRouteDecision.lineArtFallback(for: hd, mlScaleFactors: { _, _ in [] })?.scaler == .lanczos)
 
         let fullHD = try #require(decide().plan)
-        #expect(UpscaleRouteDecision.lineArtFallback(for: fullHD, mlScaleFactors: { _, _ in [2] }) == nil)
+        #expect(UpscaleRouteDecision.lineArtFallback(for: fullHD, mlScaleFactors: { _, _ in [2] })?.scaler == .lanczos)
 
         let dvd = try #require(decide(source: geo(720, 480, 8, 9)).plan)
         let dvdFallback = try #require(UpscaleRouteDecision.lineArtFallback(for: dvd, mlScaleFactors: { _, _ in [2] }))

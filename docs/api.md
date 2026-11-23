@@ -453,7 +453,7 @@ Both refusals are thrown BEFORE any teardown, so a refused correction leaves the
 | `AetherEngineError.sessionNotReloadable(_:)` | there is no session, or the source is a custom `IOReader` that reported itself non-seekable and cannot be reopened at the current position. Its `SessionReloadRefusal` says which (`.noActiveSession` / `.customSourceNotSeekable`); a correction can also throw the cases below. |
 | `AetherEngineError.sessionNotReloadable(.softwarePathCannotRepresentSource)` | the correction moves a native session onto the software path, and the source's only signal is IPT-PQ-c2 (Dolby Vision HEVC Profile 5 or 20, AV1 Profile 10.0). The software decoders pass that on as YCbCr, so the picture would render green/purple. |
 | `AetherEngineError.sessionNotReloadable(.dualLayerRouteNeedsFreshLoad)` | the correction changes `preferDualLayerDolbyVision` (or `dolbyVisionHandling` or `dualLayerRoute` while the preference is on) on a custom `IOReader` Profile 7 session. The in-place rebuild keeps the route the session was loaded with; call `load()` again with the new option. |
-| `AetherEngineError.sessionNotReloadable(.upscaleRouteNeedsFreshLoad)` | the correction turns `upscalesLowResolutionVideo` on, or changes `upscaleScaler` while it is on (AE#1039), for a custom `IOReader` session. Call `load()` again with the new option. See note 2. |
+| `AetherEngineError.sessionNotReloadable(.upscaleRouteNeedsFreshLoad)` | the correction turns `upscalesLowResolutionVideo` or `upscalesFullHDVideo` on, or changes `upscaleScaler` while the former is on (AE#1039), for a custom `IOReader` session. Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.videoProcessingRouteNeedsFreshLoad)` | the correction turns `videoProcessing` on, or changes its target while it is on, for a custom `IOReader` session (#957). Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.untaggedVideoColorNeedsFreshLoad)` | the correction changes `untaggedVideoColor` for a custom `IOReader` session (AE#1103). Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.demuxedAudioLiveIsNativeOnly)` | the correction moves a demuxed-audio live session onto the software path. The side-audio merge does not exist there, so it would play silent. |
@@ -1824,7 +1824,7 @@ If you need it, say so on the tracker instead of working around it.
 | `nativePlayerLayer` | The engine's own `AVPlayerLayer`, for a host building `AVPictureInPictureController` around a layer rather than around `currentAVPlayer`. |
 | `$softwarePiPSource` | `SoftwarePiPSource` for sample-buffer PiP on the software path. See [Picture in Picture on the software path](#picture-in-picture-on-the-software-path). |
 | `$softwareDisplaySize` | The rectangle the software path's picture is shown at: the coded size under the decoder's pixel aspect. It follows the stream (not latched), so a mid-stream resolution change reshapes it. nil on every other path. |
-| `$activeUpscale` | `UpscaleStatus?`: what the low-resolution upscale stage (`LoadOptions.upscalesLowResolutionVideo`, #846) does for this session. See [Upscale status](#upscale-status). |
+| `$activeUpscale` | `UpscaleStatus?`: what the upscale stage (`LoadOptions.upscalesLowResolutionVideo`, #846, or `upscalesFullHDVideo`) does for this session. See [Upscale status](#upscale-status). |
 | `$activeVideoProcessing` | `VideoProcessingStatus?`: what the picture processing (`LoadOptions.videoProcessing`, #957) does for this session. See [Picture processing status](#picture-processing-status). |
 | `sourceVideoWidth`, `sourceVideoHeight`, `sourceVideoPixelAspectRatio` | The source's CODED size, and the multiplier that turns it into the presented one (`width * ratio`), read once from the probe. See note 1. |
 | `pictureInPictureActive` | Host-set. Keeps the pipeline and the loopback server alive across a background transition, and keeps the software path decoding video for the window. |
@@ -2675,6 +2675,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | `preferredDecodePath` | `.automatic` | A `DecodePath`. `.software` serves this source through `SoftwarePlaybackHost`, whatever the routing concluded. One-way: there is no `.native`. See the note below and [Overriding the decode path](#overriding-the-decode-path). |
 | `escalatesToSoftwarePath` | `true` | Whether a failing native session may be rebuilt once on the software path (AE#561). `false` surfaces the failure as `.error` instead, for a host with its own fallback ladder (AE#629). Correctable. See the note below. |
 | `upscalesLowResolutionVideo` | false | Opt in to upscaling SDR video below 1080p to the display's native pixel size (#846). See [`upscalesLowResolutionVideo`](#upscaleslowresolutionvideo). |
+| `upscalesFullHDVideo` | false | Opt in to upscaling SDR 1080p video to the display with Lanczos-3. See [`upscalesFullHDVideo`](#upscalesfullhdvideo). |
 | `upscaleScaler` | `.automatic` | The scaler that upscale stage runs. `.lineArt` is a 2x line-art network for animation that also takes 1080p and 10-bit SDR (AE#1039). See [`upscaleScaler`](#upscalescaler). |
 | `videoProcessing` | nil | A `VideoProcessingOptions`: tone map HDR10 titles brighter than the display to its peak (#957). nil is off. See [`videoProcessing`](#videoprocessing). |
 | `deinterlaceMode` | `.auto` | A `DeinterlaceMode` for the software path: the Metal / VideoToolbox graph with a CPU bwdif fallback, or `.software` to force the CPU path. |
@@ -3099,6 +3100,27 @@ The load logs one `[Upscale] taken: <source> -> <target> (<stages>)` / `[Upscale
 
 **Correcting it.** A tuning field, correctable through `reloadAtCurrentPosition(applying:)` on a URL source, which re-runs `load()` and decides the route again. On a custom `IOReader` source, turning it off is honoured in place (the session stays on the software path and delivers frames as decoded). Turning it on is refused with `SessionReloadRefusal.upscaleRouteNeedsFreshLoad`.
 
+#### `upscalesFullHDVideo`
+
+Opt in to upscaling SDR 1080p video to the display's native pixel size, with Lanczos-3 (`UpscaleScaler.lanczos`). It takes anything larger than 1280x720 on either axis and at most 1920x1080, so cropped rips (1916x1036, 1904x800) count as 1080p.
+
+**Why.** An Apple TV shows 1080p on a 4K display by scaling it bilinearly, on the native path and the software path alike (measured on an A15, tvOS 27.2, from 4K screenshots against the reference). Over 13 Netflix and SVT test scenes brought from 4K down to 1080p and back up, VMAF NEG reads 85.5 for that bilinear picture, 92.1 for MetalFX spatial scaling and 94.0 for Lanczos-3. [measurements.md › Lanczos for 1080p](measurements.md#lanczos-for-1080p) has the numbers.
+
+**How.** Two passes per plane, along the rows and then the columns, six taps each, straight on the luma and chroma planes (`LanczosPlaneScaler`). There is no RGB round trip, so the matrix and range do not matter, and 10-bit stays 10-bit. Samples are rounded to the plane's codes and clamped only to the code range, so the ringing Lanczos leaves at hard edges (about a tenth of the step) stays as it is.
+
+**What it costs.**
+
+- The software path. Like the low-resolution stage it moves the title onto `SoftwarePlaybackHost`, which for most 1080p titles means a route they would otherwise play natively. That path's rules apply: on tvOS E-AC-3 Atmos plays as a decoded bed, PiP goes through `softwarePiPSource`, no native subtitle renditions. This is why it is its own option: 1080p is most of a library.
+- About 8 ms of GPU time per frame for 1080p to 2160p on an A15 (Apple TV 4K, 3rd generation) in playback at 24 fps, where line art reads about 21 ms. About 3 ms on an M1.
+
+**Not taken** for the same sources as `upscalesLowResolutionVideo` (HDR, Dolby Vision, a display no larger than the source, a wireless AirPlay route, a demuxed-audio live stream), and for 720p or smaller (`[Upscale] not taken (source is 720p or smaller and upscalesLowResolutionVideo is off)`) or above 1920x1080. Lanczos only scales up: a plan that would shrink one axis (a non-square source on a smaller display) is not taken.
+
+**With both options on**, the source's size picks the scaler (`UpscaleSizePolicy`): a `.lineArt` title keeps line art up to 1080p, anything larger than 720p gets Lanczos (also a cropped 1080p the automatic scaler would otherwise take with MetalFX), and the rest gets `upscaleScaler`. A size change mid-stream (an adaptive ladder, a live channel moving between 720p and 1080i) picks again by the same rule, unless an overrun already moved the stage down a rung.
+
+**How it behaves.** The same stage as the low-resolution one, with the same budget, logs and switch-off. The load logs `[Upscale] taken: 1920x1080 -> 3840x2160 (Lanczos)`, and `UpscaleStatus.scaler` is `.lanczos` with `mlScale` nil. A Lanczos stage that overruns has nothing below it and switches off.
+
+**Correcting it.** A tuning field like `upscalesLowResolutionVideo`, with the same rule on a custom `IOReader` source: turning it on there is refused with `SessionReloadRefusal.upscaleRouteNeedsFreshLoad`, turning it off is honoured in place.
+
 #### `upscaleScaler`
 
 Which scaler the upscale stage runs while `upscalesLowResolutionVideo` is on (AE#1039). Ignored while that option is off.
@@ -3107,6 +3129,7 @@ Which scaler the upscale stage runs while `upscalesLowResolutionVideo` is on (AE
 | --- | --- | --- |
 | `.automatic` (default) | VideoToolbox super resolution, then MetalFX, as described above | SDR, 8-bit 4:2:0, below 1080p |
 | `.lineArt` | A 2x line-art network, then a bilinear resample to the display box where 2x does not land on it | SDR, 8 or 10-bit 4:2:0, up to 1920x1080 |
+| `.lanczos` | Lanczos-3 straight to the display box, on the Y'CbCr planes (see [`upscalesFullHDVideo`](#upscalesfullhdvideo)) | SDR, 8 or 10-bit 4:2:0, up to 1920x1080 |
 
 **What `.lineArt` is.** [Anime4K](https://github.com/bloc97/Anime4K)'s "mode A" in its small size (MIT licence), as native Metal compute kernels in half precision. The kernels are `LineArtShaderSource`, generated from the original GLSL by `Scripts/generate-line-art-shader.py` with the weights unchanged. The passes are Clamp_Highlights, Restore CNN (S), then Upscale CNN x2 (S).
 
@@ -3127,8 +3150,8 @@ Which scaler the upscale stage runs while `upscalesLowResolutionVideo` is on (AE
 - Output frames keep the decoder's pixel format: 10-bit stays 10-bit.
 - **Falling back.**
   - The first sustained overrun drops the restore pass and the clamp. This is logged as `[Upscale] degraded: line art over budget ..., dropping the restore pass` and republished with `degraded` true and `scaler` still `.lineArt`. A later stage this overrun covers starts without them.
-  - A second overrun is remembered for the process (`LineArtCostMemory`). Then a source below 1080p falls back to the automatic route for the rest of the session: VideoToolbox super resolution, with MetalFX where available. The new stage builds off the decode thread while frames pass through, and `$activeUpscale` is republished with `degraded` true and `scaler` `.automatic`.
-  - A 1080p source has nothing below line art, so it switches off.
+  - A second overrun is remembered for the process (`LineArtCostMemory`). Then an 8-bit source below 1080p falls back to the automatic route for the rest of the session: VideoToolbox super resolution, with MetalFX where available. The new stage builds off the decode thread while frames pass through, and `$activeUpscale` is republished with `degraded` true and `scaler` `.automatic`.
+  - A 1080p source, a 10-bit one, and one the device offers no VideoToolbox pass for fall back to `.lanczos` instead, which costs about a third of line art. A Lanczos stage that overruns as well switches off.
   - A later load that the remembered overrun covers (at least as large, at least as fast) starts on that fallback directly, logged as `[Upscale] line art overran on this device earlier, ...`.
 - `UpscaleStatus.scaler` is `.lineArt`, and `mlScale` is nil.
 
@@ -3216,8 +3239,8 @@ So correcting it through `reloadAtCurrentPosition(applying:)` does nothing. Call
 | `AudioShaping` | `maxChannels` (nil or 1...8, never upmixes), `dialogueGainDB` (0...`maxDialogueGainDB`, 12), `compressor`, `loudnessTargetLUFS` (nil or within `loudnessTargetRange`, -36...-12; raises by at most `maxLoudnessGainDB`, 18 dB), `lfeMixDB` (nil or within `lfeMixRange`, -20...+10; the LFE level in a fold that drops it), `clamped`, `isActive`, `summary` (the wording the engine's log uses). |
 | `AudioShaping.Compressor` | `thresholdDB` (clamped to -60...0 dBFS), `ratio` (1...20), `makeupGainDB` (0...24 dB), `attackMilliseconds` (0.1...200), `releaseMilliseconds` (10...2000), `kneeDB` (0...18); a non-finite value reads back as a neutral default. `clamped`, and the `night` preset (-30 dB, 4:1, +10 dB makeup, 5 ms attack, 250 ms release, 6 dB knee). |
 | `AudioShapingState` | `.off`, `.applied`, `.unavailable`; see `$audioShapingState`. |
-| `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when MetalFX alone scales), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (see note 3), `scaler` (the `UpscaleScaler` the stage runs). See `$activeUpscale`. |
-| `UpscaleScaler` | `.automatic` or `.lineArt`, the scaler `LoadOptions.upscaleScaler` selects. See [`upscaleScaler`](#upscalescaler). |
+| `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when no VideoToolbox pass runs: MetalFX alone, line art or Lanczos), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (see note 3), `scaler` (the `UpscaleScaler` the stage runs). See `$activeUpscale`. |
+| `UpscaleScaler` | `.automatic`, `.lineArt` or `.lanczos`, the scaler `LoadOptions.upscaleScaler` selects (`.lanczos` is also what `upscalesFullHDVideo` runs). See [`upscaleScaler`](#upscalescaler). |
 | `VideoProcessingOptions` | `targetPeakNits`, the display's peak in nit. `LoadOptions.videoProcessing`; see [`videoProcessing`](#videoprocessing). |
 | `VideoProcessingStatus` | `stages` (`[VideoProcessingStage]`), `sourcePeakNits`, `sourcePeak` (a `ToneMapSourcePeak`), `targetPeakNits`, `disabledReason` (set when the processing switched itself off mid-session). See [Picture processing status](#picture-processing-status). |
 | `VideoProcessingStage` | `.toneMap`, the BT.2390 tone map. |

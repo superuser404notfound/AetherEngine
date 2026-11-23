@@ -28,6 +28,7 @@ struct PerFrameBenchmarkReportsEveryCaseTests {
             "upscale: 720p to 2160p, MetalFX only, wall time",
             "upscale: 1080p to 2160p, line art, wall time",
             "upscale: 1080p to 2160p, line art with restore, wall time",
+            "upscale: 1080p to 2160p, Lanczos, wall time",
         ])
         // A case either ran with ordered numbers or was skipped with a reason.
         let consistent = report.results.allSatisfy { result in
@@ -64,6 +65,8 @@ struct PerFrameBenchmarkReportsEveryCaseTests {
                 == "720x480 -> ML 3x 2160x1440 -> MetalFX 3840x2160")
         #expect(PerFrameBenchmark.describe(try plan(.lineArt1080, factors: []))
                 == "1920x1080 -> line art 3840x2160")
+        #expect(PerFrameBenchmark.describe(try plan(.lanczos1080, factors: []))
+                == "1920x1080 -> Lanczos 3840x2160")
         #expect(Case.allCases.allSatisfy { $0.rawValue.hasPrefix("upscale: ") })
     }
 
