@@ -704,6 +704,8 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         nativeVideoFrameDiagnostics: nativeVideoFrameDiagnostics,
         nativeVideoFrameRecovery: nativeVideoFrameRecovery
     )
+    if let segments = PlayCacheOverrides.forwardBufferSegments { options.forwardBufferSegments = segments }
+    if let budget = PlayCacheOverrides.sessionCacheByteBudget { options.sessionCacheByteBudget = budget }
     // AE#1095: `stopreopen` keeps the stopped session's segments; `stopreopen:off` is the control arm.
     let stopReopen = hostCalls.first(where: { $0.hasPrefix("stopreopen") }).map { call -> (tick: Double, retains: Bool) in
         let spec = call.dropFirst("stopreopen".count)
@@ -2033,4 +2035,11 @@ func liveReopenURL(_ url: URL, freshening name: String) -> URL? {
     parts.queryItems = items
     print("  LIVEREOPEN \(name) -> \(base)r\(n)")
     return parts.url
+}
+
+/// AE#1109: `play --forward-buffer-segments N --session-cache-mb N`, kept out of the long parameter
+/// list because only the prefetch repro reads them.
+enum PlayCacheOverrides {
+    nonisolated(unsafe) static var forwardBufferSegments: Int?
+    nonisolated(unsafe) static var sessionCacheByteBudget: Int?
 }

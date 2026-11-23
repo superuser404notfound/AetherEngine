@@ -248,6 +248,16 @@ Two things keep a Resume of a file without a keyframe index from paying the inde
 
 The producer parks once the segments it has written ahead of the consumer target fill that budget, and resumes as eviction behind the playhead frees room (`PrefetchDiskBudget`). So an opt-in prefetch follows the disk budget, not the source length.
 
+**A restart below a resident band stops at the band (AE#1109).** A backward seek past the first resident segment restarts the producer there. Once it reaches a resident run it could only reproduce, it parks instead of cutting the run again (`awaitResidentRunHandover`). Without this the forward park never held a whole-source prefetch, because its target sits thousands of segments below the head, and one rewind before a resume point fetched the rest of the title a second time (4.8 GB of a 6.7 GB film in the report).
+
+A run qualifies only when every segment in it does:
+
+- It was written on the producer's own axis: the same video shift, audio shift and audio delay (`SegmentLineage`, recorded per segment at adoption).
+- It is not the first segment of its epoch. That one may open below its boundary and has its leading pictures before the keyframe dropped, so the producer cuts it again and parks after it.
+- Its lineage is known. A plain `store` and segments adopted from a parked session (AE#1095) carry none.
+
+The run also has to be at least `forwardWaitWindow` (8) segments deep, or reach the last plan index. Nothing but the run releases the park. When the consumer plays past the run's end, the provider restarts a producer there, the same lazy restart a resident backward target already relies on. The reader's open window still drains after the pump parks (about 8 MB on a 4 Mbit/s fixture), so the saving is everything past that window.
+
 **Where a restart seeks.** A non-disc VOD restart seeks to the exact IRAP stored in the segment plan, on the video stream's own timestamp axis, with that timestamp as the lower bound. A seek on the global time axis can land a whole GOP earlier on multi-stream MP4, and the producer then has to read forward to the IRAP, which is a long remote read (#191). Disc plans use folded multi-clip timestamps (one timeline across several clip files) and keep the global-time seek.
 
 **Restarts on a slow link.** These rules keep a slow remote source from turning one restart into many (#93):
