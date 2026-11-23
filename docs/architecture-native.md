@@ -250,13 +250,19 @@ The producer parks once the segments it has written ahead of the consumer target
 
 **A restart below a resident band stops at the band (AE#1109).** A backward seek past the first resident segment restarts the producer there. Once it reaches a resident run it could only reproduce, it parks instead of cutting the run again (`awaitResidentRunHandover`). Without this the forward park never held a whole-source prefetch, because its target sits thousands of segments below the head, and one rewind before a resume point fetched the rest of the title a second time (4.8 GB of a 6.7 GB film in the report).
 
-A run qualifies only when every segment in it does:
+A segment counts toward such a run only when all of this holds:
 
-- It was written on the producer's own axis: the same video shift, audio shift and audio delay (`SegmentLineage`, recorded per segment at adoption).
+- An earlier producer wrote it with the same video shift, audio shift and audio delay as this one. The cache records that per segment at adoption (`SegmentLineage`), and a parked session (AE#1095) hands it on with the segments.
 - It is not the first segment of its epoch. That one may open below its boundary and has its leading pictures before the keyframe dropped, so the producer cuts it again and parks after it.
-- Its lineage is known. A plain `store` and segments adopted from a parked session (AE#1095) carry none.
+- Its lineage is known. A plain `store` carries none.
 
-The run also has to be at least `forwardWaitWindow` (8) segments deep, or reach the last plan index. Nothing but the run releases the park. When the consumer plays past the run's end, the provider restarts a producer there, the same lazy restart a resident backward target already relies on. The reader's open window still drains after the pump parks (about 8 MB on a 4 Mbit/s fixture), so the saving is everything past that window.
+The run ends at the first hole or at the first segment that does not count. That segment is evicted while the consumer has not asked for it yet, so the consumer misses there and the provider restarts a producer at it, instead of serving it as the continuation of the kept run.
+
+The pump parks only when the run reaches at least 8 segments past its head, or the last plan index. That is the depth the provider uses to keep a producer for a resident backward target. When the consumer plays past the run's end, the provider restarts a producer there.
+
+The park lets go only while the consumer has not reached the head yet and the run stopped holding (evicted or thinned). Once the consumer is past the head, resuming would fetch segments it already played, and eviction behind the playhead would pull the band through a second time.
+
+The reader's open window still drains after the pump parks, a few MB in the measurements. On a 597 MB file resumed at 300 s and rewound to 0, the source traffic after the seek fell from 569 MB to 301 MB, and the 0 to 300 s stretch that had never been fetched is about 298 MB of that.
 
 **Where a restart seeks.** A non-disc VOD restart seeks to the exact IRAP stored in the segment plan, on the video stream's own timestamp axis, with that timestamp as the lower bound. A seek on the global time axis can land a whole GOP earlier on multi-stream MP4, and the producer then has to read forward to the IRAP, which is a long remote read (#191). Disc plans use folded multi-clip timestamps (one timeline across several clip files) and keep the global-time seek.
 

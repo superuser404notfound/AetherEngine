@@ -2744,10 +2744,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return writtenAxis.map { SegmentLineage(axis: $0, opensEpoch: opensEpoch) }
     }
 
-    /// AE#1109: how deep a kept run has to be before the pump stops in front of it. The consumer
-    /// reaching its end then asks for an index the provider restarts at, and AVPlayer asks a few
-    /// segments ahead of what it plays, so a run this deep hands that restart a full cushion. The
-    /// provider keeps a producer for a resident backward target on the same depth.
+    /// AE#1109: how far a kept run has to reach past the pump's head before the pump stops in front
+    /// of it. The consumer reaching its end asks for an index the provider restarts at, and AVPlayer
+    /// asks a few segments ahead of what it plays, so a run this deep hands that restart a full
+    /// cushion. Same depth and same measure as the provider's rule for keeping a producer on a
+    /// resident backward target (`residentBackwardTargetKeepsProducer`).
     static let residentRunMinimumDepth = VideoSegmentProvider.forwardWaitWindow
 
     /// AE#1109: whether a run of kept segments from `head` through `frontier` lets the pump stop in
@@ -2755,50 +2756,65 @@ final class HLSSegmentProducer: @unchecked Sendable {
     static func residentRunHoldsPump(head: Int, frontier: Int, lastIndex: Int,
                                      minimumDepth: Int = residentRunMinimumDepth) -> Bool {
         guard frontier >= head else { return false }
-        return frontier >= lastIndex || frontier - head + 1 >= minimumDepth
+        return frontier >= lastIndex || frontier - head >= minimumDepth
+    }
+
+    /// AE#1109: whether a parked pump goes back to cutting. Only while the consumer has not asked for
+    /// the head yet and the run in front of it stopped holding. Once the consumer is past the head,
+    /// resuming would cut segments it has already been served, and an eviction behind the playhead
+    /// would then pull the band through the pump a second time, one segment per eviction. A segment
+    /// it misses further on is the provider's restart.
+    static func residentRunParkReleases(head: Int, consumerTarget: Int, runStillHolds: Bool) -> Bool {
+        consumerTarget < head && !runStillHolds
     }
 
     /// AE#1109: parks the pump while the segments from `head` on are already resident, written on
-    /// this producer's axis by an earlier producer. Returns true to go on cutting (the run stopped
-    /// qualifying: evicted, thinned, or there was none), false when the pump was asked to stop.
+    /// this producer's axis by an earlier producer. Returns true to go on cutting, false when the
+    /// pump was asked to stop.
     ///
-    /// Nothing but the run itself releases it. If the consumer plays past the run's end, the provider
-    /// restarts a producer there, which replaces this one; resuming here instead would cut segments
-    /// the consumer has already been served.
+    /// While this producer is installed nothing else writes segments, so the run only changes by
+    /// eviction: the full walk runs once, and the recheck after each wake only looks a minimum depth
+    /// ahead. A segment that ends the run without qualifying is evicted, so the consumer misses there
+    /// and the provider restarts a producer at it.
     private func awaitResidentRunHandover(head: Int) -> Bool {
+        guard let axis = writtenAxis,
+              let run = cache.keepableResidentRun(from: head, axis: axis)
+        else { return true }
         let lastIndex = baseIndex + max(0, segmentBoundaries.count - 2)
-        var parkedSince: UInt64?
-        defer {
-            if parkedSince != nil { sideReaderLinkGate?.videoFetchBegan() }
-        }
+        guard Self.residentRunHoldsPump(head: head, frontier: run.frontier, lastIndex: lastIndex)
+        else { return true }
+        let dropped = run.breaker.map { cache.dropForRecut(index: $0) } ?? false
+        let parkedSince = DispatchTime.now().uptimeNanoseconds
+        // #240: a parked pump is not using the link.
+        sideReaderLinkGate?.videoFetchEnded()
+        defer { sideReaderLinkGate?.videoFetchBegan() }
+        if pumpQoSCurrent == QOS_CLASS_UTILITY { pumpRelaxationRate.reset() }
+        EngineLog.emit(
+            "[HLSSegmentProducer] AE#1109 seg-\(head)...seg-\(run.frontier) are resident, written on "
+            + "this producer's axis by an earlier one; parking instead of cutting them again "
+            + "(last plan index \(lastIndex), cacheTarget=\(cache.targetIndex)"
+            + (run.breaker.map { ", seg-\($0) after it \(dropped ? "evicted" : "kept, already asked for") "
+                + "because it was written another way" } ?? "")
+            + ")",
+            category: .session
+        )
+        let recheckLimit = head + Self.residentRunMinimumDepth
         while !checkShouldStop() {
-            guard let axis = writtenAxis,
-                  let frontier = cache.keepableResidentRun(from: head, axis: axis),
-                  Self.residentRunHoldsPump(head: head, frontier: frontier, lastIndex: lastIndex)
-            else {
-                if let since = parkedSince {
-                    let seconds = Double(DispatchTime.now().uptimeNanoseconds - since) / 1e9
-                    EngineLog.emit(
-                        "[HLSSegmentProducer] AE#1109 resident run at seg-\(head) no longer holds "
-                        + "after \(String(format: "%.1f", seconds))s; cutting from there",
-                        category: .session
-                    )
-                }
-                return true
-            }
-            if parkedSince == nil {
-                parkedSince = DispatchTime.now().uptimeNanoseconds
-                // #240: a parked pump is not using the link.
-                sideReaderLinkGate?.videoFetchEnded()
-                if pumpQoSCurrent == QOS_CLASS_UTILITY { pumpRelaxationRate.reset() }
+            cache.awaitChange(timeout: 1.0)
+            let holds = cache.keepableResidentRun(from: head, axis: axis, through: recheckLimit)
+                .map { Self.residentRunHoldsPump(head: head, frontier: $0.frontier, lastIndex: lastIndex) }
+                ?? false
+            if Self.residentRunParkReleases(head: head, consumerTarget: cache.targetIndex,
+                                            runStillHolds: holds) {
+                let seconds = Double(DispatchTime.now().uptimeNanoseconds - parkedSince) / 1e9
                 EngineLog.emit(
-                    "[HLSSegmentProducer] AE#1109 seg-\(head)...seg-\(frontier) are resident, written "
-                    + "on this producer's axis by an earlier one; parking instead of cutting them again "
-                    + "(last plan index \(lastIndex), cacheTarget=\(cache.targetIndex))",
+                    "[HLSSegmentProducer] AE#1109 resident run at seg-\(head) no longer holds after "
+                    + "\(String(format: "%.1f", seconds))s and the consumer has not reached it; "
+                    + "cutting from there",
                     category: .session
                 )
+                return true
             }
-            cache.awaitChange(timeout: 1.0)
         }
         return false
     }

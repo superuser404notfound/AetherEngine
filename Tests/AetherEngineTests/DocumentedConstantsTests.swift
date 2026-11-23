@@ -33,6 +33,12 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("to the other readers of the same source for 60 s", docs)
     }
 
+    func testResidentRunParkDepthMatchesDocumentation() throws {
+        XCTAssertEqual(HLSSegmentProducer.residentRunMinimumDepth, 8)
+        assertDocumented("The pump parks only when the run reaches at least 8 segments past its head",
+                         try documentation())
+    }
+
     func testLazyFragmentProbeCheckMatchesDocumentation() throws {
         XCTAssertEqual(FragmentedMP4RandomAccess.checkedEntries, 4)
         assertDocumented("the probe reads up to four of the `moof`s the entries name", try documentation())
