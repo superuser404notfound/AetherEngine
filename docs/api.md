@@ -3111,7 +3111,7 @@ Opt in to upscaling SDR 1080p video (larger than `upscalesLowResolutionVideo` ta
 **What it costs.**
 
 - The software path. Like the low-resolution stage it moves the title onto `SoftwarePlaybackHost`, which for most 1080p titles means a route they would otherwise play natively. That path's rules apply: on tvOS E-AC-3 Atmos plays as a decoded bed, PiP goes through `softwarePiPSource`, no native subtitle renditions. This is why it is its own option: 1080p is most of a library.
-- About 3 ms of GPU time per frame for 1080p to 2160p on an M1. A 2x Lanczos-3 luma kernel took 5.9 ms on an A15 at 24 and 60 fps.
+- About 8 ms of GPU time per frame for 1080p to 2160p on an A15 (Apple TV 4K, 3rd generation) in playback at 24 fps, where line art reads about 21 ms. About 3 ms on an M1.
 
 **Not taken** for the same sources as `upscalesLowResolutionVideo` (HDR, Dolby Vision, a display no larger than the source, a wireless AirPlay route, a demuxed-audio live stream), and for anything below 1080p (`[Upscale] not taken (source is below 1080p and upscalesLowResolutionVideo is off)`) or above 1920x1080.
 

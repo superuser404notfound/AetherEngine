@@ -665,7 +665,16 @@ Current rule: [api.md › upscalesFullHDVideo](api.md#upscalesfullhdvideo).
 - Lanczos was ahead of bilinear in every scene, by 4.0 (Dancers) to 12.9 VMAF (Aerial).
 - The clips are clean camera originals. Compressed Blu-ray or streaming sources have not been measured.
 
-**Cost on the A15.** A Metal kernel for 2x Lanczos-3 luma plus bilinear chroma, 1080p to 2160p, in a measurement app: 6.9 ms back to back, 5.9 ms paced at 24 fps and at 60 fps. MetalFX spatial took 8.6 ms back to back and 18 ms paced at 24 fps, without the Y'CbCr to RGB conversion it also needs. The engine's stage (two passes per plane, Lanczos chroma too) read 2.9 ms of GPU per frame on an M1 (`LanczosUpscalerTests`). The stage itself has not been measured on an Apple TV yet.
+**Cost on the A15.** A Metal kernel for 2x Lanczos-3 luma plus bilinear chroma, 1080p to 2160p, in a measurement app: 6.9 ms back to back, 5.9 ms paced at 24 fps and at 60 fps. MetalFX spatial took 8.6 ms back to back and 18 ms paced at 24 fps, without the Y'CbCr to RGB conversion it also needs. The engine's stage (two passes per plane, Lanczos chroma too) read 2.9 ms of GPU per frame on an M1 (`LanczosUpscalerTests`).
+
+**The stage on the A15**, Sodalite Release build on Wohnzimmer (tvOS 27.2.1), `[Upscale] timing` lines over 48-frame windows:
+
+| Title | Rate | GPU per frame | Thread held | Lost frames |
+|---|---|---|---|---|
+| 1920x1080 H.264, AC-3 | 25 fps | 7.7 to 8.2 ms | 3.0 to 3.2 ms | 0 |
+| 1920x1080 H.264, TrueHD Atmos rendered to a 5.1.2 PCM bed, Atmos activator on | 23.976 fps | 7.5 to 7.8 ms | 2.8 to 3.1 ms | 0 |
+
+Line art on the same box and source size reads 20 to 22 ms of GPU at 24 fps. The GPU times are paced readings, so the governor's lower clock is in them.
 
 ### Bed regression in a Debug build (AE#1106)
 
