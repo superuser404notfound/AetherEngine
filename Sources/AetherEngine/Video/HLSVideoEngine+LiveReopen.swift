@@ -873,7 +873,23 @@ extension HLSVideoEngine {
     /// producer with a fresh muxer and calls audioBridge.startSegment() (which also rebuilds a
     /// post-EOF-drained encoder), so the known transient causes heal. Aimed like the wedge re-anchor:
     /// a pending never-landed seek target owns the recovery aim, else AVPlayer's real position.
+    /// A full segment volume is not transient and ends the session without a revive.
     func handleVODMuxerFailure() {
+        // A full segment volume comes first: it starves every write, so it explains a quiet bridge
+        // as well as an unwritable moov, and neither the source nor its audio is at fault. A host
+        // reading `vodSourceFailed` here ended its ladder on a file that plays once space is freed.
+        // It is also checked before the revive budget: every rebuild fails the same way, and each
+        // one re-aims at the consumer's position, which is 0:00 before the first segment lands, so
+        // the revives only threw away a resume position.
+        if cache?.storageExhausted == true {
+            EngineLog.emit(
+                "[HLSVideoEngine] VOD muxerFailed on a full segment volume; not reviving",
+                category: .session
+            )
+            surfaceVODSourceFailure(FFmpegErr.enospc, "Device storage is full: video segments cannot be written",
+                                    kind: .storageExhausted)
+            return
+        }
         restartLock.lock()
         let admitted = muxerFailureReviveGate.admit()
         let attempts = muxerFailureReviveGate.attempts
@@ -897,15 +913,6 @@ extension HLSVideoEngine {
             // TRANSCODE, and the two ask a host for opposite things: `vodSourceFailed` reads as "the
             // source is gone" and ends a fallback ladder, while a second player that decodes the track
             // itself plays this file. So name the bridge when the bridge is the one that stayed quiet.
-            //
-            // A full segment volume comes first: it starves every write, so it explains a quiet bridge
-            // as well as an unwritable moov, and neither the source nor its audio is at fault. A host
-            // reading `vodSourceFailed` here ended its ladder on a file that plays once space is freed.
-            if cache?.storageExhausted == true {
-                surfaceVODSourceFailure(FFmpegErr.enospc, "Device storage is full: video segments cannot be written",
-                                        kind: .storageExhausted)
-                return
-            }
             if let bridge = audioBridge?.feedStats, bridge.packetsEmitted == 0 {
                 EngineLog.emit(
                     "[HLSVideoEngine] AE#396 the moov was never buildable because the audio bridge "

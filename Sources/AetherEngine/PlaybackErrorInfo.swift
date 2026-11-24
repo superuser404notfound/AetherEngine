@@ -211,6 +211,13 @@ extension AetherEngine {
     /// names the cause of a live start the error itself (an FFmpeg open failure) cannot.
     @MainActor
     func publishLoadFailure(_ error: Error, isLiveStart: Bool = false, transportFailureCode: Int? = nil) {
+        // A native session that failed while starting already classified its failure.
+        if let failure = error as? HLSVideoEngine.VODSourceFailure {
+            publishError(PlaybackErrorInfo(kind: failure.kind,
+                                           message: "\(failure.reason) (code \(failure.code))",
+                                           underlyingCode: Int(failure.code)))
+            return
+        }
         if let ingest = error as? HLSIngestError {
             switch ingest {
             case .playlistUnreachable(let status) where status > 0:

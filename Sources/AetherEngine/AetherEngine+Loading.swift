@@ -1448,6 +1448,13 @@ extension AetherEngine {
             session.stop(reason: .sourceChanged)
             try checkLoadCurrent(generation)
         }
+        // A terminal failure surfaced during start(), before this session is installed, reaches no
+        // one through `onVODSourceFailed` (its identity check drops it). Fail the load with it
+        // instead of mounting a session that will never serve a segment.
+        if let failure = session.pendingVODSourceFailure {
+            session.stop(reason: .loadFailed)
+            throw failure
+        }
         self.nativeVideoSession = session
         outputRouteHandedOver = true
         if let event = session.pendingVODVideoConfigurationMismatch {

@@ -72,6 +72,55 @@ struct SegmentStorageExhaustionTests {
         #expect(surfaced.snapshot?.code == FFmpegErr.enospc)
     }
 
+    @Test("a full volume ends the session at once instead of reviving at 0:00 (#1124)")
+    func fullVolumeSkipsTheRevives() {
+        let engine = makeEngine()
+        let cache = makeCache()
+        defer { cache.close() }
+        cache.noteStorageExhausted()
+        engine.cache = cache
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 2)
+        let surfaced = SurfacedFailure()
+        engine.onVODSourceFailed = { code, reason, kind in surfaced.set(code, reason, kind) }
+
+        engine.handleVODMuxerFailure()
+
+        #expect(surfaced.snapshot?.kind == .storageExhausted,
+                "each revive fails the same way and re-aims at the consumer's 0:00")
+        #expect(engine.muxerFailureReviveGate.attempts == 0)
+    }
+
+    @Test("a failure surfaced before the session is installed is kept for the load (#1124)")
+    func failureBeforeInstallIsRetained() {
+        let engine = makeEngine()
+        let cache = makeCache()
+        defer { cache.close() }
+        cache.noteStorageExhausted()
+        engine.cache = cache
+        #expect(engine.pendingVODSourceFailure == nil)
+
+        // No onVODSourceFailed wired: loadNative has not installed the session yet.
+        engine.handleVODMuxerFailure()
+
+        #expect(engine.pendingVODSourceFailure?.kind == .storageExhausted)
+        #expect(engine.pendingVODSourceFailure?.code == FFmpegErr.enospc)
+    }
+
+    @MainActor
+    @Test("a load that fails with a startup source failure publishes its kind, not sourceOpenFailed (#1124)")
+    func startupFailurePublishesItsKind() throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+
+        engine.publishLoadFailure(HLSVideoEngine.VODSourceFailure(
+            code: FFmpegErr.enospc, reason: "Device storage is full: video segments cannot be written",
+            kind: .storageExhausted))
+
+        let info = try #require(engine.errorInfo)
+        #expect(info.kind == .storageExhausted)
+        #expect(info.underlyingCode == Int(FFmpegErr.enospc))
+    }
+
     @Test("an exhausted revive with room on the volume keeps the muxer verdict")
     func exhaustedGateWithRoomKeepsTheMuxerVerdict() {
         let engine = makeEngine()
