@@ -859,6 +859,8 @@ if first == "play" {
     // AE#293: the nativeRemoteHLS bypass, the path the #168 carriage watchdog and the carriage probe
     // live on. Pair with --live; without it the m3u8 goes to the raw live path, which rejects it.
     let nativeHLS = takeFlag("--native-hls", from: &rest)
+    // AE#1123: LoadOptions.nativeRemoteHLSReadinessBudgetSeconds, the bypass's #334 ceiling on silence.
+    let readinessBudget = takeDoubleFlag("--readiness-budget", in: 0...maxRunSeconds, from: &rest)
     // AE#495: stand in for a host that has answered `EngineTLS.serverTrustEvaluator`, which is what
     // decides whether a remote https master is relayed through the loopback origin instead of being
     // handed to AVPlayer (which asks no delegate and cannot be told about a private certificate).
@@ -1326,7 +1328,8 @@ if first == "play" {
                  upscalesFullHDVideo: playUpscaleFullHD,
                  videoProcessing: playVideoProcessing,
                  attachSurface: playAttachSurface,
-                 record: playRecord))
+                 record: playRecord,
+                 readinessBudget: readinessBudget))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {

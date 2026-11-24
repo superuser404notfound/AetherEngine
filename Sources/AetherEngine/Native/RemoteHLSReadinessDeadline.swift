@@ -9,10 +9,12 @@ import Foundation
 /// for as long as the host leaves it there. Field shape: a video-only channel carrying HEVC in MPEG-TS,
 /// where the carriage reroute is the fix but there is no audio track to reach readiness with either.
 ///
-/// This is a ceiling on silence, not on how long a slow origin may take. Anything that resolves the
-/// session, readiness at any point, a carriage reroute, an AVPlayer failure that already published a
-/// terminal state, disarms it, so a Jellyfin transcode spin-up or a slow IPTV token handshake never
-/// meets it. Only a session where nothing at all happened for the whole budget fails.
+/// This is a ceiling on silence. Anything that resolves the session, readiness at any point, a carriage
+/// reroute, an AVPlayer failure that already published a terminal state, disarms it. Only a session
+/// where nothing at all happened for the whole budget fails. That includes a server conversion slow
+/// enough to need the whole budget for its first segment (a Jellyfin 4K HDR transcode during a library
+/// scan took 45 s, AE#1123), so a host can lengthen it through
+/// `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds`.
 ///
 /// Pure decision logic; the timing loop lives in NativeAVPlayerHost, like the carriage watchdog's.
 struct RemoteHLSReadinessDeadline {
@@ -31,6 +33,19 @@ struct RemoteHLSReadinessDeadline {
     /// reroute. Everything healthy disarms in the first second, so the budget only ever costs the
     /// sessions that were going to hang anyway.
     static let defaultBudgetSeconds: Double = 45
+
+    /// AE#1123: an hour. A host with a reason to wait longer (a server conversion that takes most of a
+    /// minute to emit its first segment) gets that, but no request turns into a tick count that could
+    /// overflow.
+    static let maximumBudgetSeconds: Double = 3600
+
+    /// AE#1123: the budget a load runs with, from `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds`.
+    /// nil, NaN and infinity keep the default. A shorter request is raised to the default, because
+    /// below it the deadline would fail sessions the deferred carriage probe was about to reroute.
+    static func resolvedBudgetSeconds(requested: Double?) -> Double {
+        guard let requested, requested.isFinite else { return defaultBudgetSeconds }
+        return min(max(requested, defaultBudgetSeconds), maximumBudgetSeconds)
+    }
 
     let budgetTicks: Int
     private(set) var ticksObserved = 0
