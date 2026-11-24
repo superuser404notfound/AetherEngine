@@ -34,7 +34,9 @@ the public-API contract.
   not mounted yet. The load then mounted it anyway, and AVPlayer waited forever with no error. Before
   that, a full segment volume was revived twice at the player's position, which is 0:00 before the
   first segment, so a resume lost its position. Now a full volume before the first stored segment ends
-  the session at once, and a failure reported during startup makes `load()` throw and publish its kind.
+  the session at once, and a failure reported during startup makes `load()` throw and publish its kind. A
+  track switch that rebuilds onto a full volume reports `.storageExhausted` too, not
+  `.audioTrackSwitchFailed`.
 
 - **A resumed server transcode on `nativeRemoteHLS` starts the transcode once (AE#1122).** AVPlayer
   asks for the fMP4 init before the segment it resumes in. Jellyfin builds that init from a job at

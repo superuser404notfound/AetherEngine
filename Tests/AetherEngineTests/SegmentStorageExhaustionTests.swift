@@ -138,6 +138,7 @@ struct SegmentStorageExhaustionTests {
         let info = try #require(engine.errorInfo)
         #expect(info.kind == .storageExhausted)
         #expect(info.underlyingCode == Int(FFmpegErr.enospc))
+        #expect(info.message == "Device storage is full: video segments cannot be written (code -28)")
     }
 
     @Test("an exhausted revive with room on the volume keeps the muxer verdict")

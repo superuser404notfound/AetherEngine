@@ -213,9 +213,7 @@ extension AetherEngine {
     func publishLoadFailure(_ error: Error, isLiveStart: Bool = false, transportFailureCode: Int? = nil) {
         // A native session that failed while starting already classified its failure.
         if let failure = error as? HLSVideoEngine.VODSourceFailure {
-            publishError(PlaybackErrorInfo(kind: failure.kind,
-                                           message: "\(failure.reason) (code \(failure.code))",
-                                           underlyingCode: Int(failure.code)))
+            publishError(failure.errorInfo)
             return
         }
         if let ingest = error as? HLSIngestError {

@@ -1256,9 +1256,7 @@ extension AetherEngine {
                     )
                     return
                 }
-                self.publishError(PlaybackErrorInfo(kind: kind,
-                                                    message: "\(reason) (code \(code))",
-                                                    underlyingCode: Int(code)))
+                self.publishError(HLSVideoEngine.VODSourceFailure(code: code, reason: reason, kind: kind).errorInfo)
             }
         }
         // prepareNativeSubtitles + non-bitmap text tracks: builds the native subtitle table; must be set before start().
@@ -3132,7 +3130,13 @@ extension AetherEngine {
                 category: .engine
             )
             activeAudioTrackIndex = previousAudioIndex
-            publishError(.audioTrackSwitchFailed, "Audio track switch failed: \(error.localizedDescription)", underlying: error)
+            // The rebuilt session failed while starting (a full disk, AE#1124): its kind says more than
+            // "the switch failed", and a host that retries the switch would only hit it again.
+            if let failure = error as? HLSVideoEngine.VODSourceFailure {
+                publishError(failure.errorInfo)
+            } else {
+                publishError(.audioTrackSwitchFailed, "Audio track switch failed: \(error.localizedDescription)", underlying: error)
+            }
             return error
         }
 
