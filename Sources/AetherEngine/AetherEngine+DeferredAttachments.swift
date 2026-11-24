@@ -105,6 +105,7 @@ extension AetherEngine {
             if let budgetURL, OriginRequestBudget.shared.requiresSerialRequests(budgetURL) {
                 EngineLog.emit("[Attachments] skipped: the origin dropped to one request at a time; "
                     + "fontAttachments stays empty", category: .demux)
+                reader?.close()
                 return
             }
             let demuxer = Demuxer()
