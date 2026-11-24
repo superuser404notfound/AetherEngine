@@ -18,8 +18,10 @@ the public-API contract.
   at AVPlayer's 3 s map timeout (`-12889 'No response for map'`). On a session with sidecar subtitles
   the engine now asks for the resume segment first, with the player's own User-Agent, and hands AVPlayer
   the variant playlist only after that. It also serves AVPlayer the variant it had already fetched, so
-  the origin sees one variant fetch instead of two. Against Jellyfin 12.2 the init and the resume
-  segment then came off disk in 0.04 s on every run. Reported and measured by golfista.
+  the origin sees one variant fetch instead of two (not when that variant answer set a cookie).
+  golfista measured the double start on Jellyfin 12.4 (init 2.9 to 3.75 s, then the segment 3.5 to
+  4.1 s). On my Jellyfin 12.2 test server the init and the resume segment came off disk in 0.04 s
+  on every run after the fix. Reported and measured by golfista.
 
 ## [7.74.0] - 2026-11-24
 

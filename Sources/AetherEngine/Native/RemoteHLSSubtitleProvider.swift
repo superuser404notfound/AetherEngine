@@ -2,9 +2,11 @@ import Foundation
 
 /// #316: serves the sidecar renditions the remote-HLS subtitle proxy injects into the origin master.
 ///
-/// It is an `HLSSegmentProvider` that owns no media at all. The A/V variants in the rewritten master
-/// point straight at the origin, so AVPlayer never asks this server for a segment; only `/master.m3u8`
-/// (verbatim, via `staticMasterPlaylistBody`), `/subs_{n}.m3u8` and `/subs_{n}_0.vtt` are ever fetched.
+/// It is an `HLSSegmentProvider` that owns no media at all. Every segment, init and key URI points
+/// straight at the origin, so AVPlayer never asks this server for media. It fetches `/master.m3u8`
+/// (verbatim, via `staticMasterPlaylistBody`), `/subs_{n}.m3u8` and `/subs_{n}_0.vtt`, and with
+/// AE#1122 also the origin's variant at `/origin_variant.m3u8` (`servedVariantPlaylist`), whose answer
+/// can wait up to `RemoteHLSResumeWarm.waitSeconds` for the resume segment.
 /// The single reported segment exists so `buildSubtitleMediaPlaylistText`'s whole-program shape can read
 /// the program duration off the usual `segmentDuration(at:)` path (Sodalite#32) without a special case.
 final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {

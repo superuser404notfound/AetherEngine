@@ -627,9 +627,10 @@ extension AetherEngine {
 
         // #316: sidecars declared at load time can only reach media selection through the playlist, so
         // when there are any, the engine writes a master of its own and AVPlayer opens that instead. The
-        // rewritten master's variants still point at the origin, so this changes nothing about where the
-        // media comes from. Any refusal (live, a playlist that will not rewrite, a slow origin) returns
-        // the origin URL and leaves the sidecars on the host overlay, which is the pre-#316 behaviour.
+        // segments still come from the origin. Only the variant playlist the stand-in already fetched is
+        // served from here (AE#1122, which also asks for the resume segment first). Any refusal (live,
+        // a playlist that will not rewrite, a slow origin) returns the origin URL and leaves the
+        // sidecars on the host overlay, which is the pre-#316 behaviour.
         //
         // AE#495: a host that answered the trust evaluator needs the media on a session the engine
         // owns, and the same stand-in does that. With sidecars it mounts a relay behind the

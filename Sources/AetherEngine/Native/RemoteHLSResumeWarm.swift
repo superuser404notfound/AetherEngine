@@ -124,7 +124,12 @@ extension RemoteHLSResumeWarm {
             lock.lock()
             if task == nil, !cancelled {
                 var headers = self.headers
-                if let userAgent, !userAgent.isEmpty { headers["User-Agent"] = userAgent }
+                if let userAgent, !userAgent.isEmpty {
+                    // URLRequest matches field names case-insensitively, so a host's "user-agent"
+                    // left next to ours would win or lose on dictionary order.
+                    headers = headers.filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
+                    headers["User-Agent"] = userAgent
+                }
                 let target = self.target, waitSeconds = self.waitSeconds, position = startPosition
                 done.enter()
                 // Awaits URLSession only, nothing that blocks, so a plain task is enough.

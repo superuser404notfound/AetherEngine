@@ -91,6 +91,18 @@ struct Issue1122ResumeWarmTests {
         #expect(!lines.contains("https://jf.test/videos/42/main.m3u8?api_key=k"))
     }
 
+    @Test("A served variant that matches no variant line is reported as not served")
+    func unmatchedServedVariantIsNotServed() throws {
+        let rewritten = try RemoteHLSMasterRewrite.rewriteDeclaringNames(
+            originPlaylist: "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nhttp://origin.test/a/main.m3u8\n",
+            originURL: try #require(URL(string: "http://origin.test/master.m3u8")),
+            renditions: [.init(ordinal: 0, name: "English")],
+            servedVariant: .init(originURL: try #require(URL(string: "http://origin.test/b/main.m3u8")),
+                                 localURI: RemoteHLSMasterRewrite.servedVariantURI))
+        #expect(!rewritten.servesVariant)
+        #expect(rewritten.master.contains("http://origin.test/a/main.m3u8"))
+    }
+
     @Test("A media-playlist origin is wrapped around the served copy")
     func wrapNamesTheServedVariant() throws {
         let media = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\n0.ts\n#EXT-X-ENDLIST\n"
@@ -132,14 +144,15 @@ struct Issue1122ResumeWarmTests {
     }
 
     private static func prepare(_ server: CannedHTTPOrigin, resumeAt: Double?,
-                                waitSeconds: TimeInterval = RemoteHLSResumeWarm.waitSeconds)
+                                waitSeconds: TimeInterval = RemoteHLSResumeWarm.waitSeconds,
+                                headers: [String: String] = ["X-Emby-Token": "t0k3n"])
         async throws -> RemoteHLSSubtitleProxy.Prepared {
         let sidecar = try #require(URL(string: "\(server.baseURL)/en.vtt"))
         let master = try #require(URL(string: "\(server.baseURL)/master.m3u8"))
         return try #require(await RemoteHLSSubtitleProxy.prepare(
             originURL: master,
             tracks: [.init(externalID: 100_000, source: ExternalSubtitleTrack(url: sidecar, language: "en"))],
-            httpHeaders: ["X-Emby-Token": "t0k3n"], needsRelay: false, resumeAt: resumeAt,
+            httpHeaders: headers, needsRelay: false, resumeAt: resumeAt,
             resumeWarmWaitSeconds: waitSeconds))
     }
 
@@ -196,14 +209,48 @@ struct Issue1122ResumeWarmTests {
     func slowResumeSegmentDoesNotHoldTheVariant() async throws {
         let server = try Self.origin()
         defer { server.stop() }
-        server.route("/videos/42/hls1/main/2.mp4", .delayed(30, .body("seg2", contentType: "video/mp4")))
+        server.route("/videos/42/hls1/main/2.mp4", .delayed(4, .body("seg2", contentType: "video/mp4")))
 
         let prepared = try await Self.prepare(server, resumeAt: 13, waitSeconds: 0.5)
         defer { prepared.tearDown() }
 
         let started = Date()
         #expect(try await Self.get(Self.variantURL(prepared)).status == 200)
-        #expect(Date().timeIntervalSince(started) < 15, "the variant waited for the segment past its cap")
+        #expect(Date().timeIntervalSince(started) < 2.5, "the variant waited for the segment past its cap")
+    }
+
+    @Test("A host's own User-Agent, in any spelling, gives way to the player's")
+    func playerAgentReplacesTheHostsInAnySpelling() async throws {
+        let server = try Self.origin()
+        defer { server.stop() }
+        server.route("/videos/42/hls1/main/2.mp4", .body("seg2", contentType: "video/mp4"))
+
+        let prepared = try await Self.prepare(
+            server, resumeAt: 13, headers: ["X-Emby-Token": "t0k3n", "user-agent": "Host/1.0"])
+        defer { prepared.tearDown() }
+        _ = try await Self.get(Self.variantURL(prepared), userAgent: "AppleCoreMedia/1.0.0.test")
+
+        let warm = server.requests(to: "/videos/42/hls1/main/2.mp4")
+        #expect(warm.count == 1)
+        #expect(warm.first?.headers["user-agent"] == "AppleCoreMedia/1.0.0.test")
+    }
+
+    @Test("A variant that set a cookie is left to AVPlayer, and nothing is warmed")
+    func cookieVariantStaysAtTheOrigin() async throws {
+        let server = try Self.origin()
+        defer { server.stop() }
+        server.route("/videos/42/main.m3u8", .header(
+            "Set-Cookie", "edge=abc; Path=/",
+            .body(Self.originVariant, contentType: "application/vnd.apple.mpegurl")))
+
+        let prepared = try await Self.prepare(server, resumeAt: 13)
+        defer { prepared.tearDown() }
+
+        let master = try await Self.get(prepared.masterURL)
+        #expect(master.body.contains("\(server.baseURL)/videos/42/main.m3u8"))
+        #expect(!master.body.contains(RemoteHLSMasterRewrite.servedVariantURI))
+        #expect(try await Self.get(Self.variantURL(prepared)).status == 404)
+        #expect(server.requests.allSatisfy { !$0.path.hasSuffix(".mp4") })
     }
 
     @Test("AVPlayer is served the variant the stand-in fetched, and the origin sees it once")
