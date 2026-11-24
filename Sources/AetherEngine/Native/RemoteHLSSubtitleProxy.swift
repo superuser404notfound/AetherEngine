@@ -18,6 +18,10 @@ import Foundation
 /// not line up, and the sidecars stay overlay-only exactly as before. A load is never failed over a
 /// subtitle feature. A refusal with a relay wanted still stands the relay up on its own, because the
 /// media has nowhere else to go.
+///
+/// AE#1122: the variant it fetched is served to AVPlayer from here too, so AVPlayer does not fetch it a
+/// second time (0.8 to 1.8 s per fetch on a Jellyfin transcode). And on a resume, the first answer for
+/// that variant waits until the origin has been asked for the resume segment (`RemoteHLSResumeWarm`).
 enum RemoteHLSSubtitleProxy {
 
     /// A standing stand-in: the caller plays `masterURL` and owns the teardown.
@@ -55,13 +59,16 @@ enum RemoteHLSSubtitleProxy {
                         tracks: [RemoteHLSSubtitleProvider.Track],
                         httpHeaders: [String: String],
                         needsRelay: Bool,
-                        budgetSeconds: TimeInterval = budgetSeconds) async -> Prepared? {
+                        resumeAt startPosition: Double? = nil,
+                        budgetSeconds: TimeInterval = budgetSeconds,
+                        resumeWarmWaitSeconds: TimeInterval = RemoteHLSResumeWarm.waitSeconds) async -> Prepared? {
         guard !tracks.isEmpty || needsRelay else { return nil }
         if !tracks.isEmpty {
             do {
                 let prepared = try await build(
                     originURL: originURL, tracks: tracks, httpHeaders: httpHeaders,
-                    needsRelay: needsRelay, budgetSeconds: budgetSeconds)
+                    needsRelay: needsRelay, startPosition: startPosition, budgetSeconds: budgetSeconds,
+                    resumeWarmWaitSeconds: resumeWarmWaitSeconds)
                 EngineLog.emit(
                     "[AetherEngine] #316: serving \(tracks.count) external subtitle rendition(s) over a "
                     + "rewritten master at \(prepared.masterURL.absoluteString), media "
@@ -122,27 +129,57 @@ enum RemoteHLSSubtitleProxy {
                               tracks: [RemoteHLSSubtitleProvider.Track],
                               httpHeaders: [String: String],
                               needsRelay: Bool,
-                              budgetSeconds: TimeInterval) async throws -> Prepared {
+                              startPosition: Double?,
+                              budgetSeconds: TimeInterval,
+                              resumeWarmWaitSeconds: TimeInterval) async throws -> Prepared {
         let session = makeSession(budgetSeconds: budgetSeconds)
         defer { session.finishTasksAndInvalidate() }
         // Audit NAT-105: the variant is whatever the master names, on any host or scheme, so the
         // host's credentials go only where the host sent them.
         let credentials = CredentialScope(headers: httpHeaders, anchor: originURL)
 
-        let (body, finalURL) = try await fetchPlaylist(originURL, session: session, headers: httpHeaders)
+        let fetched = try await fetchPlaylist(originURL, session: session, headers: httpHeaders)
+        let (body, finalURL) = (fetched.body, fetched.url)
         let parsed = try parse(body, at: finalURL)
-        let duration = try await programDuration(of: parsed, at: finalURL,
-                                                 session: session, credentials: credentials)
+        let program = try await resolveProgram(of: parsed, fetched: fetched,
+                                               session: session, credentials: credentials)
+        let duration = try sumSegmentDurations(program.playlist.segments)
 
+        // AE#1122: AVPlayer gets the variant this build already holds instead of fetching it again.
+        // Not behind a relay: the relay writes its playlists per request, for the address the player
+        // asked from, and a body frozen here would carry one address for every player. Not when the
+        // variant answer set a cookie either: this session is ephemeral and keeps it, so AVPlayer
+        // would ask for the segments without what the origin wanted it to hold.
+        let servedVariant = needsRelay || program.setsCookie
+            ? nil
+            : RemoteHLSMasterRewrite.ServedVariant(
+                originURL: program.namedURL, localURI: RemoteHLSMasterRewrite.servedVariantURI)
         let rewritten = try RemoteHLSMasterRewrite.rewriteDeclaringNames(
             originPlaylist: body,
             originURL: finalURL,
-            renditions: RemoteHLSSubtitleProvider.renditions(for: tracks))
+            renditions: RemoteHLSSubtitleProvider.renditions(for: tracks),
+            servedVariant: servedVariant)
         let master = rewritten.master
 
         let provider = RemoteHLSSubtitleProvider(tracks: tracks, masterBody: master,
                                                  programDuration: duration,
                                                  defaultHeaders: httpHeaders, mediaURL: originURL)
+        if servedVariant != nil, !rewritten.servesVariant {
+            EngineLog.emit(
+                "[AetherEngine] AE#1122: no variant line in the master matched the fetched variant, so "
+                + "AVPlayer fetches it from the origin and there is no resume warm", category: .engine)
+        }
+        if rewritten.servesVariant {
+            provider.setVariantPlaylistBody(
+                RemoteHLSMasterRewrite.absolutizedMediaPlaylist(program.body, against: program.url))
+            if let target = RemoteHLSResumeWarm.target(
+                startPosition: startPosition, playlist: program.playlist, playlistURL: program.url,
+                variantCount: program.variantCount) {
+                provider.setResumeWarm(RemoteHLSResumeWarm.Gate(
+                    target: target, headers: credentials.headers(for: target.url),
+                    startPosition: startPosition ?? 0, waitSeconds: resumeWarmWaitSeconds))
+            }
+        }
         let relay: HLSOriginRelay? = needsRelay ? HLSOriginRelay() : nil
         // Audit NET-109: the grant belongs to the URL the host handed over. A redirect target is
         // only allowed, or a cross-host redirect would move the token to the edge and leave the
@@ -195,11 +232,18 @@ enum RemoteHLSSubtitleProxy {
     /// (audit NAT-5).
     private static let maximumPlaylistBytes = 2 * 1024 * 1024
 
-    /// Returns the body and the URL it finally came from; every relative URI in the playlist resolves
-    /// against the latter, so a redirecting origin (Plex's transcode handoff) still rewrites correctly.
+    struct FetchedPlaylist {
+        let body: String
+        /// Where the body finally came from. Every relative URI in the playlist resolves against it,
+        /// so a redirecting origin (Plex's transcode handoff) still rewrites correctly.
+        let url: URL
+        /// The final response carried `Set-Cookie`.
+        let setsCookie: Bool
+    }
+
     private static func fetchPlaylist(_ url: URL,
                                       session: URLSession,
-                                      headers: [String: String]) async throws -> (String, URL) {
+                                      headers: [String: String]) async throws -> FetchedPlaylist {
         var request = URLRequest(engineURL: url)
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
         let data: Data
@@ -216,7 +260,8 @@ enum RemoteHLSSubtitleProxy {
         guard let body = String(data: data, encoding: .utf8) else {
             throw Refusal.fetchFailed("body is not UTF-8")
         }
-        return (body, response.url ?? url)
+        let setsCookie = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Set-Cookie") != nil
+        return FetchedPlaylist(body: body, url: response.url ?? url, setsCookie: setsCookie)
     }
 
     private static func parse(_ body: String, at url: URL) throws -> HLSPlaylist {
@@ -227,28 +272,47 @@ enum RemoteHLSSubtitleProxy {
         }
     }
 
-    /// Sum of the origin's own EXTINFs. A master is resolved through its first variant; the durations
-    /// are identical across variants, and one small GET buys both the length and the VOD verdict.
-    private static func programDuration(of playlist: HLSPlaylist,
-                                        at url: URL,
-                                        session: URLSession,
-                                        credentials: CredentialScope) async throws -> Double {
+    /// The media playlist that carries the program, as it was fetched.
+    struct Program {
+        let playlist: HLSMediaPlaylist
+        let body: String
+        /// Where the body finally came from; its relative URIs resolve against this.
+        let url: URL
+        /// The variant URL as the master names it, resolved but before any redirect. The origin URL
+        /// itself when the origin is a media playlist.
+        let namedURL: URL
+        /// Variants the master declares; 1 for a media playlist.
+        let variantCount: Int
+        /// The response that carried `body` set a cookie.
+        let setsCookie: Bool
+    }
+
+    /// A master is resolved through its first variant: the durations are identical across variants,
+    /// and one small GET buys the length, the VOD verdict and the segment list.
+    private static func resolveProgram(of playlist: HLSPlaylist,
+                                       fetched: FetchedPlaylist,
+                                       session: URLSession,
+                                       credentials: CredentialScope) async throws -> Program {
+        let url = fetched.url
         switch playlist {
         case .media(let media):
             guard media.hasEndList else { throw Refusal.notVOD }
-            return try sumSegmentDurations(media.segments)
+            return Program(playlist: media, body: fetched.body, url: url, namedURL: url, variantCount: 1,
+                           setsCookie: fetched.setsCookie)
         case .master(let master):
             guard let variant = master.variants.first,
                   let variantURL = HLSPlaylistParser.resolve(uri: variant.uri, against: url) else {
                 throw Refusal.unusablePlaylist("master declares no resolvable variant")
             }
-            let (body, finalURL) = try await fetchPlaylist(
+            let fetchedVariant = try await fetchPlaylist(
                 variantURL, session: session, headers: credentials.headers(for: variantURL))
-            guard case .media(let media) = try parse(body, at: finalURL) else {
+            let (variantBody, finalURL) = (fetchedVariant.body, fetchedVariant.url)
+            guard case .media(let media) = try parse(variantBody, at: finalURL) else {
                 throw Refusal.unusablePlaylist("variant is not a media playlist")
             }
             guard media.hasEndList else { throw Refusal.notVOD }
-            return try sumSegmentDurations(media.segments)
+            return Program(playlist: media, body: variantBody, url: finalURL, namedURL: variantURL,
+                           variantCount: master.variants.count, setsCookie: fetchedVariant.setsCookie)
         }
     }
 

@@ -10,6 +10,10 @@ final class CannedHTTPOrigin: @unchecked Sendable {
         case body(String, contentType: String)
         case redirect(to: String)
         case status(Int)
+        /// The inner answer, after the server has sat on the request this long.
+        indirect case delayed(TimeInterval, Answer)
+        /// The inner answer with one more response header.
+        indirect case header(String, String, Answer)
     }
 
     struct Request: Sendable {
@@ -88,11 +92,21 @@ final class CannedHTTPOrigin: @unchecked Sendable {
             headers[line[..<colon].lowercased()] =
                 line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
-        let answer = lock.withLock { () -> Answer? in
+        let routed = lock.withLock { () -> Answer? in
             _requests.append(Request(path: path, headers: headers))
             return _routes[path]
         }
-        let response: String
+        var answer = routed
+        if case .delayed(let seconds, let inner) = answer {
+            Thread.sleep(forTimeInterval: seconds)
+            answer = inner
+        }
+        var extraHeader = ""
+        if case .header(let name, let value, let inner) = answer {
+            extraHeader = "\(name): \(value)\r\n"
+            answer = inner
+        }
+        var response: String
         switch answer {
         case .body(let body, let contentType):
             response = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\n"
@@ -102,8 +116,13 @@ final class CannedHTTPOrigin: @unchecked Sendable {
                 + "Content-Length: 0\r\nConnection: close\r\n\r\n"
         case .status(let code):
             response = "HTTP/1.1 \(code) Status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        case .delayed, .header:
+            response = "HTTP/1.1 500 Nested Wrapper\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         case nil:
             response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        if !extraHeader.isEmpty, let statusEnd = response.range(of: "\r\n") {
+            response.insert(contentsOf: extraHeader, at: statusEnd.upperBound)
         }
         let bytes = Array(response.utf8)
         var sent = 0

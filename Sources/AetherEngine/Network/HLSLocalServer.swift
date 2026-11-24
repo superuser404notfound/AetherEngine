@@ -76,6 +76,11 @@ protocol HLSSegmentProvider: AnyObject {
     /// describe them with. Nil on every producer-backed provider, which builds its master as before.
     var staticMasterPlaylistBody: String? { get }
 
+    /// AE#1122: the origin variant playlist the remote-HLS proxy already fetched, served VERBATIM at
+    /// `/origin_variant.m3u8`. Its URIs are absolute, so the media still comes from the origin. May block
+    /// the connection thread on a resume (`RemoteHLSResumeWarm.Gate`); `userAgent` is the requester's.
+    func servedVariantPlaylist(userAgent: String?) -> String?
+
     /// Master-playlist metadata. When masterCodecs is non-nil the server publishes master.m3u8; nil means media-playlist-only.
     var masterCodecs: String? { get }
     var masterResolution: (width: Int, height: Int)? { get }
@@ -200,6 +205,7 @@ extension HLSSegmentProvider {
     func didServeMediaSegment(index: Int, delivered: Bool) {}
     func didDeliverProgressiveChunk(index: Int) {}
     var staticMasterPlaylistBody: String? { nil }
+    func servedVariantPlaylist(userAgent: String?) -> String? { nil }
     var firstVisibleSegmentIndex: Int { 0 }
     func segmentIsDiscontinuous(at index: Int) -> Bool { false }
     func initVersionID(forSegment index: Int) -> Int { 0 }
@@ -1161,6 +1167,15 @@ final class HLSLocalServer: @unchecked Sendable {
                                contentType: "application/vnd.apple.mpegurl")
             }
             return send404(fd: fd, path: normalizedPath, reason: "no masterCodecs")
+
+        case "/\(RemoteHLSMasterRewrite.servedVariantURI)":
+            let userAgent = Self.requestHeader(
+                named: "user-agent", in: Array(text.components(separatedBy: "\r\n").dropFirst()))
+            guard let body = provider?.servedVariantPlaylist(userAgent: userAgent) else {
+                return send404(fd: fd, path: normalizedPath, reason: "no served origin variant")
+            }
+            return send200(fd: fd, path: normalizedPath, data: Data(body.utf8),
+                           contentType: "application/vnd.apple.mpegurl")
 
         case "/master_hdr.m3u8":
             // #98: HDR-preserving reduced master (DV signaling dropped, source range + subtitle
