@@ -127,7 +127,8 @@ extension RemoteHLSResumeWarm {
                 if let userAgent, !userAgent.isEmpty { headers["User-Agent"] = userAgent }
                 let target = self.target, waitSeconds = self.waitSeconds, position = startPosition
                 done.enter()
-                task = Task.detached { [done] in
+                // Awaits URLSession only, nothing that blocks, so a plain task is enough.
+                task = Task { [done] in
                     let outcome = await RemoteHLSResumeWarm.warm(
                         target, headers: headers, waitSeconds: waitSeconds)
                     RemoteHLSResumeWarm.log(outcome, target: target, startPosition: position)
