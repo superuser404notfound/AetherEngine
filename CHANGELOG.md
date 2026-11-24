@@ -20,6 +20,13 @@ the public-API contract.
   values are raised to 45 s (the carriage reroute needs that long), longer ones are capped at an hour.
   `aetherctl play --readiness-budget` drives it. Requested by golfista.
 
+### Changed
+
+- **AV1 software decoding uses dav1d 1.5.5 (FFmpegBuild 3.19.1).** It brings new AArch64 assembly for the
+  CDEF filters, `emu_edge` and 8-bit `ipred_filter`, faster film grain and palette decoding, and fixes in
+  error paths (a failed T.35 metadata allocation, tile state reallocation or frame task creation). The
+  dav1d API is unchanged.
+
 ### Fixed
 
 - **A resumed server transcode on `nativeRemoteHLS` starts the transcode once (AE#1122).** AVPlayer
