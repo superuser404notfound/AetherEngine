@@ -33,9 +33,8 @@ the public-API contract.
   failure reported while the native session was still starting was dropped, because the session was
   not mounted yet. The load then mounted it anyway, and AVPlayer waited forever with no error. Before
   that, a full segment volume was revived twice at the player's position, which is 0:00 before the
-  first segment, so a resume lost its position. Now a full volume ends the session at once, and a
-  failure reported during startup makes `load()` throw and publish its kind. Seen on an Apple TV 4K
-  (2nd gen) with 503 MB free, resuming a 4K HEVC remux; with space freed it resumed in about 5 s.
+  first segment, so a resume lost its position. Now a full volume before the first stored segment ends
+  the session at once, and a failure reported during startup makes `load()` throw and publish its kind.
 
 - **A resumed server transcode on `nativeRemoteHLS` starts the transcode once (AE#1122).** AVPlayer
   asks for the fMP4 init before the segment it resumes in. Jellyfin builds that init from a job at

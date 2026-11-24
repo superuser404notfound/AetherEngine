@@ -72,7 +72,7 @@ struct SegmentStorageExhaustionTests {
         #expect(surfaced.snapshot?.code == FFmpegErr.enospc)
     }
 
-    @Test("a full volume ends the session at once instead of reviving at 0:00 (#1124)")
+    @Test("a full volume before the first stored segment ends the session at once (#1124)")
     func fullVolumeSkipsTheRevives() {
         let engine = makeEngine()
         let cache = makeCache()
@@ -88,6 +88,25 @@ struct SegmentStorageExhaustionTests {
         #expect(surfaced.snapshot?.kind == .storageExhausted,
                 "each revive fails the same way and re-aims at the consumer's 0:00")
         #expect(engine.muxerFailureReviveGate.attempts == 0)
+    }
+
+    @Test("a full volume mid-session still gets its revives, and the cap names the storage (#1124)")
+    func fullVolumeMidSessionRevivesFirst() {
+        let engine = makeEngine()
+        let cache = makeCache()
+        defer { cache.close() }
+        #expect(cache.store(index: 0, data: Data(count: 16)))
+        cache.noteStorageExhausted()
+        engine.cache = cache
+        engine.muxerFailureReviveGate = ReviveBudget(maxAttempts: 0)
+        let surfaced = SurfacedFailure()
+        engine.onVODSourceFailed = { code, reason, kind in surfaced.set(code, reason, kind) }
+
+        engine.handleVODMuxerFailure()
+
+        #expect(engine.muxerFailureReviveGate.attempts == 1,
+                "a dip below the free reserve mid-film can clear, so the budget is spent first")
+        #expect(surfaced.snapshot?.kind == .storageExhausted)
     }
 
     @Test("a failure surfaced before the session is installed is kept for the load (#1124)")
