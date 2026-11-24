@@ -70,9 +70,10 @@ struct DemuxerOpenProfile: Sendable {
     /// the one shape a held connection must not take.
     var avioHeldConnection: Bool = false
 
-    /// AE#956: open a Matroska source without reading its attachments (`skip_attachments`). The
-    /// session's probe demuxer is the only open whose attachments anything reads (fonts, cover art),
-    /// so it follows `LoadOptions.skipsContainerAttachments`; side readers and reopens always skip.
+    /// AE#956: open a Matroska source without reading its attachments (`skip_attachments`). Only two
+    /// opens read them: the session's probe demuxer when the load's `AttachmentReadPlan` says
+    /// `.atOpen`, and the attachment side reader that fetches them after the first frame (AE#1129).
+    /// Every other side reader and reopen skips them.
     var skipsAttachments: Bool = false
 
     /// `LoadOptions.declaredDurationSeconds`: caller-trusted duration override consumed by
@@ -254,6 +255,19 @@ struct DemuxerOpenProfile: Sendable {
     /// ceiling still bounds that fallback pass and honors an even tighter caller budget (#68). Keeps the
     /// playback AVIO tuning (prefetch, chunk size, per-chunk timeout): the reader does sustained paced
     /// reads, not a one-shot still fetch.
+    /// AE#1129: the reader that fetches a Matroska source's attachments once the first frame is up. It
+    /// needs `avformat_open_input` only (the header and the Attachments element, found through the
+    /// SeekHead wherever it sits), so the stream analysis is skipped. Keeps the playback AVIO tuning:
+    /// the attachments are one sequential read of up to tens of megabytes.
+    static let attachmentSideReader: DemuxerOpenProfile = {
+        var profile = playback
+        profile.skipStreamInfo = true
+        profile.skipsAttachments = false
+        profile.auditsRecordlessDolbyVision = false
+        profile.readerLabel = "attachments"
+        return profile
+    }()
+
     static func subtitleSideDemuxer(callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?) -> DemuxerOpenProfile {
         let probeCeiling: Int64 = 4 * 1024 * 1024
         let analyzeCeiling: Int64 = 5 * 1_000_000

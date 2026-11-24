@@ -1127,19 +1127,24 @@ public struct LoadOptions: Sendable, Equatable {
     /// Caller-bounded demux probe budget in microseconds, mapped to `AVFormatContext.max_analyze_duration` for the main playback open. nil keeps the engine default (60 s). Pass a positive value to set an explicit cap; do NOT pass `0` expecting "no cap": FFmpeg maps `0` to a container-dependent heuristic (~5-7 s for MPEG-TS, longer elsewhere) that is SHORTER than the engine's 60 s default. Same scope and fail-open trade-off as `probesize`. Default nil (#68).
     public var maxAnalyzeDuration: Int64?
 
-    /// Open a Matroska source without reading its attached files (AE#956). Matroska carries the fonts
-    /// of its ASS subtitles as attachments, tens of megabytes on anime releases, and the demuxer reads
-    /// every byte of them while the file opens, before the first packet; over a slow origin that is
-    /// most of the startup. With this on the open passes over them: `fontAttachments` stays empty and
-    /// a Matroska cover image is not reported in `metadata`. Tracks, their indices and every packet
-    /// are unchanged. For a host that renders text subtitles itself or does without the embedded
-    /// fonts; one that renders ASS with them leaves it off. Other containers are unaffected.
-    /// Default false.
-    ///
-    /// Only the session's first open reads attachments either way: the engine's side readers
-    /// (embedded subtitles, scrub stills, I-frames, the Atmos and Dolby Vision passes) and its
-    /// reopens of the same source always pass over them, since nothing reads them there.
+    /// Never read a Matroska source's attached files (AE#956). Matroska carries the fonts of its ASS
+    /// subtitles as attachments, tens of megabytes on anime releases. By default the engine reads them
+    /// after the first frame on a second reader (AE#1129); with this on it does not read them at all:
+    /// `fontAttachments` stays empty and a Matroska cover image is not reported in `metadata`. Tracks,
+    /// their indices and every packet are unchanged. For a host that renders text subtitles itself or
+    /// does without the embedded fonts. Other containers are unaffected. Default false.
     public var skipsContainerAttachments: Bool = false
+
+    /// Read a Matroska source's attached files while it opens, before the first frame, as the engine
+    /// did before AE#1129. By default the session's open passes over them and a second reader fetches
+    /// them once the first frame is up, so `fontAttachments` and a Matroska cover in `metadata` arrive
+    /// a moment after `load()` returns (observe `$fontAttachments` / `$metadata`). Turn this on for a
+    /// host that reads `fontAttachments` once at load and cannot wait for it. The engine also reads
+    /// them at open on its own where a second reader is not possible: live sources, a custom reader
+    /// that cannot hand out an independent cursor, `sequentialOrigin`, `heldSourceConnection`, and an
+    /// origin limited to one request at a time. Ignored when `skipsContainerAttachments` is on.
+    /// Default false.
+    public var readsContainerAttachmentsAtOpen: Bool = false
 
     /// Ordered audio-language preference (ISO 639-1 / 639-2 codes or English names, e.g. `["en", "de"]`). When non-empty and no explicit `audioSourceStreamIndex` is passed to `load`, the engine resolves the first-frame audio track from its single internal probe: the first track whose language matches an entry (preferences scanned in order, case-insensitive, ISO 639-1/2 B+T and English-name synonyms), falling back to the container default when none match. This lets a host honor a saved language preference on the first frame from one open, instead of probing separately or reloading via `selectAudioTrack` after load (#72). An explicit `audioSourceStreamIndex` still wins. Default empty.
     public var preferredAudioLanguages: [String]
@@ -1425,6 +1430,7 @@ public struct LoadOptions: Sendable, Equatable {
         probesize: Int64? = nil,
         maxAnalyzeDuration: Int64? = nil,
         skipsContainerAttachments: Bool = false,
+        readsContainerAttachmentsAtOpen: Bool = false,
         preferredAudioLanguages: [String] = [],
         preferredSubtitleLanguages: [String] = [],
         externalSubtitles: [ExternalSubtitleTrack] = [],
@@ -1506,6 +1512,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.probesize = probesize
         self.maxAnalyzeDuration = maxAnalyzeDuration
         self.skipsContainerAttachments = skipsContainerAttachments
+        self.readsContainerAttachmentsAtOpen = readsContainerAttachmentsAtOpen
         self.preferredAudioLanguages = preferredAudioLanguages
         self.preferredSubtitleLanguages = preferredSubtitleLanguages
         self.externalSubtitles = externalSubtitles

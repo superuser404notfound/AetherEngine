@@ -15,6 +15,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+ClosedCaptions.swift` | In-band CEA-608 closed captions and A53/SEI extraction: `ClosedCaptionTap` (read-only producer observer) plus cue mirroring (#77, #131). |
 | `AetherEngine+Live.swift` | Live window publishing, edge snap, resume clamp, scrub thumbnails. |
 | `AetherEngine+Diagnostics.swift` | Memory probe and live-telemetry bridge. |
+| `AetherEngine+DeferredAttachments.swift` | AE#1129: `AttachmentReadPlan` (read a Matroska source's attachments at open, after the first frame, or never) and the side read that fetches them after the first frame and publishes `fontAttachments` and a cover. |
 | `AetherEngine+SubtitleDelivery.swift` | Emits the #357 subtitle-delivery line. See note. |
 | `AetherEngine+SubtitleResolution.swift` | Emits the #250 subtitle-resolution line. See note. |
 | `AetherEngine+AudioTap.swift` | Opt-in decoded PCM audio tap (#95): `installAudioTap()` returns the `AsyncStream` and picks native loopback, remote HLS or software mirror. |

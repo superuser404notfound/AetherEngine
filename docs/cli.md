@@ -609,6 +609,7 @@ Other lines `play` prints:
 | `--preserve-ass-markup` | `LoadOptions.preserveASSMarkup`. | off |
 | `--bitmap-text` | `LoadOptions.recognizesBitmapSubtitleText` (AE#1114). The cue log prints a `TEXT` line per bitmap cue read. | off |
 | `--skip-attachments` | `LoadOptions.skipsContainerAttachments` (AE#956). | off |
+| `--attachments-at-open` | `LoadOptions.readsContainerAttachmentsAtOpen` (AE#1129). | off |
 | `--iframes` | `LoadOptions.serveIFramePlaylist` (AE#682) on a full session, where the still ladder prefetches into the rendition. | off |
 
 **Audio**
@@ -1093,6 +1094,8 @@ With `--frame-times` the output reads `ft=24` a second and the `[SWDiag]` lines 
 **`--iframes`** sets `LoadOptions.serveIFramePlaylist` (AE#682). `serve --iframes` only lists the rendition; `play` also runs the 1 Hz still ladder that reads into it. The log says `[StillLadder] reading through the I-frame rendition`. To see the effect, add `--served-url`, wait about 25 s, and `curl` `iframe<N>.mp4` next to the printed URL. An index near the playhead is answered from the cache in about a millisecond, one far from it pays the read (and for HDR the tone map). The window reads back to back once the ladder starts at 15 s, so 30 segments either way take a few seconds, not two minutes.
 
 **`--skip-attachments`** sets `LoadOptions.skipsContainerAttachments` (AE#956). A Matroska source then opens without reading its attached files (the fonts of its ASS subtitles). The observable is the open itself. Against a throttled origin and an MKV that carries fonts, the time to the first `[AetherEngine]` load line drops by the fonts' transfer time, and the `[AVIOReader]` byte counts drop by their size.
+
+**`--attachments-at-open`** sets `LoadOptions.readsContainerAttachmentsAtOpen` (AE#1129), the read of the Matroska attachments at open that the default moved behind the first frame. `play` prints `FONTS count=<n> bytes=<b> t+<s>` when `fontAttachments` fills, on the same load clock as `FIRSTFRAME`, so one run each way shows both sides of the trade: the first frame moves earlier by the fonts' transfer time, and the fonts land later by about the same amount.
 
 **`--held-connection`** declares `LoadOptions.heldSourceConnection` (#377). The reader asks the origin once and pulls the whole file over that connection, instead of ending at the window high water and asking again every drain cycle.
 

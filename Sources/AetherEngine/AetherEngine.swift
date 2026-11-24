@@ -2962,9 +2962,32 @@ public final class AetherEngine: ObservableObject {
     /// attach and the `pasp` the loopback fMP4 carries.
     public private(set) var sourceVideoPixelAspectRatio: Double = 1
 
-    /// MKV font attachments from the probe. Hosts write these to disk for ASS renderer font config (AetherEngine#30).
-    /// Not @Published and not in SourceProbe: payloads are 10-30 MB and only playback hosts need them.
-    public private(set) var fontAttachments: [FontAttachment] = []
+    /// MKV font attachments. Hosts write these to disk for ASS renderer font config (AetherEngine#30).
+    /// Not in SourceProbe: payloads are 10-30 MB and only playback hosts need them.
+    ///
+    /// AE#1129: by default they arrive after the first frame, read by a second reader, so a host
+    /// observes `$fontAttachments` rather than reading it once at load. Empty until then, and for good
+    /// under `LoadOptions.skipsContainerAttachments`. `readsContainerAttachmentsAtOpen` restores the
+    /// read at open, where the list is complete when `load()` returns.
+    @Published public private(set) var fontAttachments: [FontAttachment] = []
+
+    /// Where this load reads its Matroska attachments (AE#1129), resolved once per load before the first
+    /// open. `playbackOpenProfile(options:)` reads it, so every open of the session agrees.
+    var attachmentReadPlan: AttachmentReadPlan = .skip
+    var deferredAttachmentTask: Task<Void, Never>?
+    var deferredAttachmentDemuxer: Demuxer?
+    /// Identifies the side read that may still publish; replaced by every start and cleared with the item.
+    var deferredAttachmentToken: UUID?
+
+    /// AE#1129: the side read's results land here, on the session that started it. A cover only fills a
+    /// `metadata` that has none, so a container tag is never replaced.
+    func publishDeferredAttachments(fonts: [FontAttachment], artwork: Data?) {
+        if !fonts.isEmpty { fontAttachments = fonts }
+        if let artwork, let current = metadata, current.artworkData == nil {
+            metadata = MediaMetadata(title: current.title, artist: current.artist, album: current.album,
+                                     artworkData: artwork)
+        }
+    }
 
     /// Latched at load; reused by audio-track-switch reload to re-derive activeVideoDecoder without re-probing.
     /// Reset to AV_CODEC_ID_NONE in stopInternal.
@@ -5071,6 +5094,7 @@ public final class AetherEngine: ObservableObject {
         }
         loadedURL = url
         loadedOptions = options
+        attachmentReadPlan = resolveAttachmentReadPlan(options: options, url: url)
         // AE#792: a fresh store per load, so a header rotated on the previous session can never reach
         // this one through a reader that outlived it.
         sessionRequestHeaders = RequestHeaderStore(options.httpHeaders)
@@ -5763,6 +5787,7 @@ public final class AetherEngine: ObservableObject {
                 throw error
             }
             startAtmosConfirmation()
+            startDeferredAttachmentRead()
             return sourceProbe
         }
 
@@ -6783,6 +6808,8 @@ public final class AetherEngine: ObservableObject {
         applyPreferredSubtitleSelection(startAnchor: startPosition, sourceDuration: sourceProbe?.durationSeconds)
         // #214 follow-up: opt-in JOC confirmation runs behind the session, never in front of the first frame.
         startAtmosConfirmation()
+        // AE#1129: the Matroska attachments the open passed over, fetched once the first frame is up.
+        startDeferredAttachmentRead()
         return sourceProbe
     }
 
@@ -7878,6 +7905,8 @@ public final class AetherEngine: ObservableObject {
         detachRemoteHLSCueClock()   // AE#616
         // Font attachments are session-scoped but must survive stopInternal (audio-track-switch skips the probe;
         // clearing in stopInternal would leave the session with an empty font list after any audio switch).
+        // The side read that fills them (AE#1129) belongs to the item for the same reason.
+        cancelDeferredAttachmentRead()
         fontAttachments = []
         // Container chapters belong to the source URL, not to the pipeline: the internal reopens of the same
         // source (audio switch, iOS background return, #127 expiry) run through stopInternal without

@@ -29,7 +29,7 @@ import AetherLibavutil
 @Suite(.timeLimit(.minutes(3)))
 struct Issue1129AttachmentProbeTests {
 
-    private static func fixture() throws -> Data {
+    static func fixture() throws -> Data {
         guard let packed = Data(base64Encoded: base64.joined()) else { throw CocoaError(.fileReadCorruptFile) }
         return try (packed as NSData).decompressed(using: .zlib) as Data
     }
@@ -93,7 +93,7 @@ struct Issue1129AttachmentProbeTests {
         #expect(!Demuxer.attachmentNeedsNoProbe(codecID: AV_CODEC_ID_NONE, codecType: AVMEDIA_TYPE_UNKNOWN))
     }
 
-    private static let base64 = [
+    static let base64 = [
         "7d1djJzXYR7gGW4Od7k/2D+7UBm1HDqGrdY0/8IqisyL/bgkI6GSlhUpV0rUeFfkimJEkSq5q0ipL/YsNzYj64PtSHHcGRXY+oiI",
         "igqCXLuMHCHoAHZQX9iFXaBRGxjoBrmg0OYibg24V23n8JMU9abonYvD55HofWc8O979SMiYd8+82nnsP6d05HOxfeSng1//Lf7c",
         "kf8eR46sX31qaeXSxctPLh35/OCu347bbju5drbdGpj5ra9M399b+f79b71w8l9ufPjef/H4ydfWp4aam3/j1OtP5pvP3f9WPbh5",

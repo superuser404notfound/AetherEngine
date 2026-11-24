@@ -1167,6 +1167,9 @@ if first == "play" {
     // AE#956: LoadOptions.skipsContainerAttachments. Pair it with a throttled origin and an MKV that
     // carries fonts to see the open stop paying for them.
     let skipAttachments = takeFlag("--skip-attachments", from: &rest)
+    // AE#1129: LoadOptions.readsContainerAttachmentsAtOpen, the read at open the default moved behind
+    // the first frame. The FONTS line says when `fontAttachments` filled, against FIRSTFRAME.
+    let attachmentsAtOpen = takeFlag("--attachments-at-open", from: &rest)
     // AE#682: LoadOptions.serveIFramePlaylist on a full session, where the still ladder runs and
     // fills the rendition ahead of AVKit (`[StillLadder] reading through the I-frame rendition`).
     let playServesIFrames = takeFlag("--iframes", from: &rest)
@@ -1318,6 +1321,7 @@ if first == "play" {
                  assertDolbyVision: playAssertDV,
                  preserveASSMarkup: preserveASSMarkup,
                  skipAttachments: skipAttachments,
+                 attachmentsAtOpen: attachmentsAtOpen,
                  serveIFrames: playServesIFrames,
                  bitmapText: playBitmapText,
                  dolbyVisionHandling: playDVHandling,

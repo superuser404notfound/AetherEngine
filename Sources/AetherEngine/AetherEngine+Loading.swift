@@ -20,7 +20,7 @@ extension AetherEngine {
             probesize: options.probesize, maxAnalyzeDuration: options.maxAnalyzeDuration)
             .withSequentialOrigin(options.sequentialOrigin, declaredDuration: options.declaredDurationSeconds)
             .withHeldSourceConnection(options.heldSourceConnection)
-            .skippingAttachments(options.skipsContainerAttachments)
+            .skippingAttachments(!attachmentReadPlan.readsAtOpen)
             .withSourceOpenPolicy(options.sourceOpenPolicy)
             .withUntaggedVideoColor(options.untaggedVideoColor)
             .withDiagnosticContext(options.sourceDiagnosticsContext)

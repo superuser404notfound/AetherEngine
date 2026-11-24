@@ -2561,7 +2561,8 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
 | `sequentialOrigin` | false | Declare an origin that fakes its range answers: one long-lived unranged GET, no ranged probes, a non-seekable byte source (pb). See [`sequentialOrigin`](#sequentialorigin). |
 | `declaredDurationSeconds` | nil | Trusted duration, overriding the container's. Required together with `sequentialOrigin` on VOD, where the tail read is gone. |
 | `probesize`, `maxAnalyzeDuration` | nil | Caller-bounded open-time probe budget (defaults 50 MB / 60 s). `probesize` is in bytes, `maxAnalyzeDuration` in **microseconds** (60 s is `60_000_000`). See the note below. |
-| `skipsContainerAttachments` | false | Open a Matroska source without reading its attached files (AE#956). See [`skipsContainerAttachments`](#skipscontainerattachments). |
+| `skipsContainerAttachments` | false | Never read a Matroska source's attached files (AE#956). See [`skipsContainerAttachments`](#skipscontainerattachments). |
+| `readsContainerAttachmentsAtOpen` | false | Read a Matroska source's attached files while it opens, before the first frame, instead of after it (AE#1129). See [`readsContainerAttachmentsAtOpen`](#readscontainerattachmentsatopen). |
 
 **`probesize`, `maxAnalyzeDuration`.** They fail **open** as long as some stream resolves: a budget that is too tight loads, with late-resolving tracks silently missing. If you tighten them, check that the tracks you need are there. A budget within which no stream resolves throws. Do not pass `0` for `maxAnalyzeDuration`; FFmpeg maps it to a shorter heuristic.
 
@@ -2778,14 +2779,25 @@ Declares an origin that fakes its range answers: one long-lived unranged GET, no
 
 #### `skipsContainerAttachments`
 
-Matroska carries the fonts of its ASS subtitles as attachments, tens of megabytes on anime releases. The demuxer reads all of them while the file opens, before the first packet. Over a slow origin that is most of the startup time.
+Matroska carries the fonts of its ASS subtitles as attachments, tens of megabytes on anime releases. By default the engine reads them after the first frame on a second reader (see [`readsContainerAttachmentsAtOpen`](#readscontainerattachmentsatopen)). With this option on, it does not read them at all.
 
-- With this on, the open skips them (FFmpegBuild's `skip_attachments` matroska option). `fontAttachments` stays empty, and a Matroska cover image is not reported in `metadata`. Tracks, their indices and packets are unchanged.
+- `fontAttachments` stays empty, and a Matroska cover image is not reported in `metadata`. Tracks, their indices and packets are unchanged.
 - It suits a host that renders text subtitles itself, or does without the embedded fonts. A host that renders ASS with them (see [formats.md › Authored ASS styling](formats.md#authored-ass-styling)) leaves it off.
 - Other containers are unaffected.
-- Only the session's first open reads attachments either way. The side readers (embedded subtitles, scrub stills, I-frames, the Atmos and Dolby Vision passes) and the reopens of the same source always skip them.
 - Correctable through `reloadAtCurrentPosition(applying:)` on a URL source, which re-runs `load()`.
 - `AetherEngine.probe(...)` honours it too (AE#1029). Without it, a probe of a Matroska file pays for the whole attachment set, so a probe under a `ProbeLimits.maxInputBytes` smaller than the fonts stops with `ProbeError.inputLimit` instead of answering from the header. With it, `SourceProbe.metadata` has no Matroska cover image.
+
+#### `readsContainerAttachmentsAtOpen`
+
+Off by default. The session's own open then passes over a Matroska source's attached files, and a second reader fetches them once the first frame is up (AE#1129). The fonts used to sit in front of the first frame: 94 MB of them took the first frame from about 1 s to 12 s over a 68 Mbit/s link.
+
+- **`fontAttachments` and a Matroska cover arrive after `load()` returns.** Both are `@Published`, so observe `$fontAttachments` (and `$metadata` for the cover) instead of reading them once at load. A host that keeps the fonts in a per-title cache can render with that cache at once and refresh when the list lands.
+- **The second reader shares the link with playback.** It starts at the first frame (or right away on a source without video) and reads the attachments in one pass, so they take longer than at open: 15.9 s instead of 11.5 s for the 94 MB above. Playback did not stall meanwhile.
+- **Turn this on** for a host that reads `fontAttachments` once at load and cannot follow the publisher. The read then happens at open, as before, and the list is complete when `load()` returns.
+- **The engine reads at open by itself where a second reader is not possible:** live sources, a custom reader without an independent cursor, `sequentialOrigin`, `heldSourceConnection`, and an origin already limited to one request at a time. The log says why with `[Attachments] read at open: <reason>`.
+- The side read logs `[Attachments] side read: <n> font(s), <bytes> B, cover=<yes|no>, <ms> ms`, or that it failed. A failure leaves `fontAttachments` empty and never fails the session.
+- No other reader reads attachments: the embedded subtitle readers, scrub stills, I-frames, the Atmos and Dolby Vision passes and every reopen of the source skip them.
+- Ignored when `skipsContainerAttachments` is on. Correctable through `reloadAtCurrentPosition(applying:)` on a URL source.
 
 #### `liveEdgeCushionSeconds`
 

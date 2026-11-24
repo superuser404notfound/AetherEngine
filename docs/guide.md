@@ -964,7 +964,8 @@ Details in [formats.md › Audio shaping](formats.md#audio-shaping).
 
 | Option | What it gives you | Default |
 | --- | --- | --- |
-| `skipsContainerAttachments` | Opens a Matroska file without reading its attached fonts, tens of MB on anime releases (AE#956). Leave it off if you render ASS with those fonts | false |
+| `skipsContainerAttachments` | Never reads a Matroska file's attached fonts, tens of MB on anime releases (AE#956). Leave it off if you render ASS with those fonts | false |
+| `readsContainerAttachmentsAtOpen` | Reads those fonts before the first frame, as before AE#1129. By default they arrive after it, so observe `$fontAttachments` | false |
 | `audioBridgeMode` | `.lossless` sends FLAC up to 7.1 (PCM for a layout FLAC cannot label) for a sink that takes multichannel PCM, instead of E-AC-3 | `.surroundCompat` |
 | `objectAudioRendering` | Keeps the heights of TrueHD Atmos and DTS:X. Needs the package traits ([installation.md](installation.md#optional-components)) | `.off` |
 | `rendersDTSXObjectAudio` | `false` keeps DTS:X on the channel bridge while TrueHD Atmos still renders | true |
