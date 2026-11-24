@@ -25,7 +25,8 @@ the public-API contract.
 - **Matroska fonts are read after the first frame (AE#1129).** libavformat reads a file's attachments
   while it opens, so the fonts of an ASS release sat in front of the first frame: 94 MB of them took the
   start from 1.0 s to 12.1 s over a 68 Mbit/s link. The session's open now passes over them, and a second
-  reader fetches them once the first frame is up (they landed at 15.9 s, playback did not stall).
+  reader fetches them once the first frame is up and playback has a 15 s cushion (they landed at 16.4 s,
+  playback did not stall).
   `fontAttachments` is now `@Published` and fills after `load()` returns, and a Matroska cover reaches
   `metadata` the same way. **A host that reads `fontAttachments` once at load has to observe
   `$fontAttachments` instead**, or set the new `LoadOptions.readsContainerAttachmentsAtOpen` to keep the

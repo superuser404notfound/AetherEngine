@@ -2978,6 +2978,12 @@ public final class AetherEngine: ObservableObject {
     var deferredAttachmentDemuxer: Demuxer?
     /// Identifies the side read that may still publish; replaced by every start and cleared with the item.
     var deferredAttachmentToken: UUID?
+    /// Test seam: holds the side read between registering its demuxer and opening it, so a test can
+    /// stop the session in that window. Zero in production.
+    var deferredAttachmentReadDelayNanosForTesting: UInt64 = 0
+    /// How long the side read waits after the first frame for playback to build its cushion
+    /// (`AetherEngine.deferredAttachmentBufferSeconds`). 10 s; tests set 0.
+    var deferredAttachmentCushionWaitNanos: UInt64 = 10_000_000_000
 
     /// AE#1129: the side read's results land here, on the session that started it. A cover only fills a
     /// `metadata` that has none, so a container tag is never replaced.
@@ -5094,7 +5100,6 @@ public final class AetherEngine: ObservableObject {
         }
         loadedURL = url
         loadedOptions = options
-        attachmentReadPlan = resolveAttachmentReadPlan(options: options, url: url)
         // AE#792: a fresh store per load, so a header rotated on the previous session can never reach
         // this one through a reader that outlived it.
         sessionRequestHeaders = RequestHeaderStore(options.httpHeaders)
@@ -5115,6 +5120,8 @@ public final class AetherEngine: ObservableObject {
                 ingest.setJoinsAtPlaylistStart(options.liveJoinsAtPlaylistStart)
             }
         }
+        // AE#1129: after the host limit above, which decides whether this origin takes a second reader.
+        attachmentReadPlan = resolveAttachmentReadPlan(options: options, url: url)
         // #170: the carryover is consumed by THIS load only (registration site below, or never on
         // the branches that return before it); it must not persist into loadedOptions where a later
         // host-initiated reload would resurrect a stale session snapshot.

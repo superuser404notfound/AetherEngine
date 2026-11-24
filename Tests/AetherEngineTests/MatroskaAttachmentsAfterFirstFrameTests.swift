@@ -2,12 +2,11 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-/// AE#1129: a Matroska source's attachments are read after the first frame on a second reader, so the
-/// fonts no longer sit in front of the startup. The session's own open passes over them; where a
+/// A Matroska source's attachments are read after the first frame on a second reader, so the fonts no
+/// longer sit in front of the startup (AE#1129). The session's own open passes over them; where a
 /// second reader is not possible, the open reads them as before.
-@Suite(.serialized, .timeLimit(.minutes(3)))
-@MainActor
-struct Issue1129DeferredAttachmentTests {
+@Suite(.timeLimit(.minutes(3)))
+struct AttachmentReadPlanTests {
 
     private func plan(skips: Bool = false, readsAtOpen: Bool = false, isLive: Bool = false,
                       sequential: Bool = false, held: Bool = false, serial: Bool = false,
@@ -17,18 +16,21 @@ struct Issue1129DeferredAttachmentTests {
             heldSourceConnection: held, originSerial: serial, customReaderCanFork: canFork)
     }
 
-    @Test func aURLSourceReadsAfterTheFirstFrame() {
+    @Test("AE#1129: a URL source reads after the first frame")
+    func urlSourceReadsLater() {
         #expect(plan() == .afterFirstFrame)
         #expect(plan(canFork: true) == .afterFirstFrame)
         #expect(!plan().readsAtOpen)
     }
 
-    @Test func skippingWinsOverEverything() {
+    @Test("AE#1129: skipping wins over every other input")
+    func skippingWins() {
         #expect(plan(skips: true, readsAtOpen: true, isLive: true, canFork: false) == .skip)
         #expect(!AttachmentReadPlan.skip.readsAtOpen)
     }
 
-    @Test func aSourceThatCannotTakeASecondReaderReadsAtOpen() {
+    @Test("AE#1129: a source that cannot take a second reader reads at open")
+    func noSecondReaderReadsAtOpen() {
         #expect(plan(readsAtOpen: true).readsAtOpen)
         #expect(plan(isLive: true).readsAtOpen)
         #expect(plan(sequential: true).readsAtOpen)
@@ -37,7 +39,8 @@ struct Issue1129DeferredAttachmentTests {
         #expect(plan(canFork: false).readsAtOpen)
     }
 
-    @Test func onlyMatroskaHasSomethingToFetch() {
+    @Test("AE#1129: only Matroska has attachments the open passed over")
+    func onlyMatroska() {
         #expect(AetherEngine.deferredAttachmentReadApplies(plan: .afterFirstFrame, containerFormat: "matroska,webm"))
         #expect(!AetherEngine.deferredAttachmentReadApplies(plan: .afterFirstFrame, containerFormat: "mov,mp4,m4a,3gp,3g2,mj2"))
         #expect(!AetherEngine.deferredAttachmentReadApplies(plan: .afterFirstFrame, containerFormat: nil))
@@ -45,25 +48,47 @@ struct Issue1129DeferredAttachmentTests {
         #expect(!AetherEngine.deferredAttachmentReadApplies(plan: .skip, containerFormat: "matroska,webm"))
     }
 
-    @Test func theSideReaderReadsTheAttachmentsAndNothingElse() throws {
+    @Test("AE#1129: the read waits for the first frame and a buffer cushion")
+    func startGate() {
+        func may(_ picture: Bool, _ frame: Bool, _ now: Double, _ buffered: Double, _ duration: Double = 600) -> Bool {
+            AetherEngine.attachmentReadMayStart(hasPicture: picture, firstFrame: frame, currentTime: now,
+                                                bufferedPosition: buffered, duration: duration)
+        }
+        #expect(!may(true, false, 0, 60))     // no picture yet
+        #expect(!may(true, true, 0, 10))      // picture, thin buffer
+        #expect(may(true, true, 0, 15))       // picture and the cushion
+        #expect(may(true, true, 0, 9.6, 10))  // a short file, all of it buffered
+        #expect(may(false, false, 0, 20))     // no picture to wait for
+        #expect(!may(false, false, 0, 5))
+    }
+
+    @Test("AE#1129: the side reader reads the attachments and skips the stream analysis")
+    func sideReaderReadsAttachments() throws {
         let profile = DemuxerOpenProfile.attachmentSideReader
         #expect(profile.skipStreamInfo)
         #expect(!profile.skipsAttachments)
         #expect(profile.readerLabel == "attachments")
-        let url = try writeFixture()
+        let url = try writeAttachmentFixture()
         defer { try? FileManager.default.removeItem(at: url) }
         let result = try #require(AetherEngine.readAttachments(
             demuxer: Demuxer(), url: url, reader: nil, formatHint: nil, headers: [:]))
         #expect(result.fonts.map(\.filename) == ["a.ttf", "b.otf"])
         #expect(result.fonts.first?.data == Data("AE1129-FONT-A".utf8))
     }
+}
 
-    @Test func aSessionGetsItsFontsAfterTheLoad() async throws {
-        let url = try writeFixture()
+@Suite(.serialized, .timeLimit(.minutes(3)))
+@MainActor
+struct MatroskaAttachmentsAfterFirstFrameTests {
+
+    @Test("AE#1129: a session gets its fonts after load() returns")
+    func fontsArriveAfterTheLoad() async throws {
+        let url = try writeAttachmentFixture()
         defer { try? FileManager.default.removeItem(at: url) }
         let engine = try AetherEngine()
         defer { engine.stop() }
         engine.volume = 0
+        engine.deferredAttachmentCushionWaitNanos = 0
         _ = try await engine.load(url: url, options: LoadOptions())
         #expect(engine.attachmentReadPlan == .afterFirstFrame)
         // The side read starts at the end of the load and publishes after a hop, so the load returns
@@ -73,8 +98,9 @@ struct Issue1129DeferredAttachmentTests {
         #expect(engine.fontAttachments.map(\.filename) == ["a.ttf", "b.otf"])
     }
 
-    @Test func readingAtOpenHasThemWhenTheLoadReturns() async throws {
-        let url = try writeFixture()
+    @Test("AE#1129: readsContainerAttachmentsAtOpen has them when load() returns")
+    func readAtOpen() async throws {
+        let url = try writeAttachmentFixture()
         defer { try? FileManager.default.removeItem(at: url) }
         let engine = try AetherEngine()
         defer { engine.stop() }
@@ -87,8 +113,9 @@ struct Issue1129DeferredAttachmentTests {
         #expect(engine.deferredAttachmentTask == nil)
     }
 
-    @Test func skippingStartsNoSideRead() async throws {
-        let url = try writeFixture()
+    @Test("AE#1129: skipsContainerAttachments starts no side read")
+    func skippingStartsNothing() async throws {
+        let url = try writeAttachmentFixture()
         defer { try? FileManager.default.removeItem(at: url) }
         let engine = try AetherEngine()
         defer { engine.stop() }
@@ -101,29 +128,29 @@ struct Issue1129DeferredAttachmentTests {
         #expect(engine.fontAttachments.isEmpty)
     }
 
-    @Test func stoppingCancelsTheSideRead() async throws {
-        let url = try writeFixture()
+    /// The seam holds the read after it registered its demuxer, so the stop lands inside the read, and
+    /// the finished task is awaited. Two guards keep the fonts out: the stop's `markClosed()` aborts the
+    /// open, and the token check drops a read that finished anyway. Without both they are published.
+    @Test("AE#1129: a side read that outlives its session publishes nothing")
+    func stoppedSessionGetsNothing() async throws {
+        let url = try writeAttachmentFixture()
         defer { try? FileManager.default.removeItem(at: url) }
         let engine = try AetherEngine()
         engine.volume = 0
+        engine.deferredAttachmentCushionWaitNanos = 0
+        engine.deferredAttachmentReadDelayNanosForTesting = 500_000_000
         _ = try await engine.load(url: url, options: LoadOptions())
+        try await waitFor { engine.deferredAttachmentDemuxer != nil }
+        let task = try #require(engine.deferredAttachmentTask)
         engine.stop()
-        #expect(engine.deferredAttachmentTask == nil)
-        #expect(engine.deferredAttachmentToken == nil)
-        try await Task.sleep(nanoseconds: 300_000_000)
+        await task.value
         #expect(engine.fontAttachments.isEmpty)
+        #expect(engine.deferredAttachmentToken == nil)
     }
+}
 
-    private func writeFixture() throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("ae1129b-\(UUID().uuidString).mkv")
-        try Issue1129AttachmentProbeTests.fixture().write(to: url)
-        return url
-    }
-
-    /// No deadline of its own; the suite's time limit catches a hang.
-    private func waitFor(_ condition: () -> Bool) async throws {
-        while !condition() {
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-    }
+private func writeAttachmentFixture() throws -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("ae1129b-\(UUID().uuidString).mkv")
+    try Issue1129AttachmentProbeTests.fixture().write(to: url)
+    return url
 }

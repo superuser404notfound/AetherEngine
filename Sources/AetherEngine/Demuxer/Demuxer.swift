@@ -243,19 +243,7 @@ struct DemuxerOpenProfile: Sendable {
         return profile
     }()
 
-    /// Open profile for the embedded subtitle side-demuxer (#76, #87). `EmbeddedSubtitleDecoder`
-    /// needs only `codec_id` / `codec_type` (carried in the container header / MPEG-TS PMT,
-    /// resolved by `avformat_open_input` itself) and seeds bitmap (PGS/DVB/DVD) canvas dims
-    /// from the source video size, so the `find_stream_info` chase after sparse, never-resolving
-    /// subtitle streams is pure cost. Every PGS track keeps `has_codec_parameters` false to the
-    /// budget cap (the #75 pattern), so even the #76 5 s ceiling is paid in full on a remote URL
-    /// source, landing as a flat ~5 s startup stall when the track is selected at load (#87). So
-    /// `skipStreamInfo` opts out of the chase entirely; the side reader runs a bounded find_stream_info
-    /// on demand only if its target subtitle stream's codec is genuinely unresolved at open. The probe
-    /// ceiling still bounds that fallback pass and honors an even tighter caller budget (#68). Keeps the
-    /// playback AVIO tuning (prefetch, chunk size, per-chunk timeout): the reader does sustained paced
-    /// reads, not a one-shot still fetch.
-    /// AE#1129: the reader that fetches a Matroska source's attachments once the first frame is up. It
+    /// AE#1129: the reader that fetches a Matroska source's attachments once playback is up. It
     /// needs `avformat_open_input` only (the header and the Attachments element, found through the
     /// SeekHead wherever it sits), so the stream analysis is skipped. Keeps the playback AVIO tuning:
     /// the attachments are one sequential read of up to tens of megabytes.
@@ -268,6 +256,18 @@ struct DemuxerOpenProfile: Sendable {
         return profile
     }()
 
+    /// Open profile for the embedded subtitle side-demuxer (#76, #87). `EmbeddedSubtitleDecoder`
+    /// needs only `codec_id` / `codec_type` (carried in the container header / MPEG-TS PMT,
+    /// resolved by `avformat_open_input` itself) and seeds bitmap (PGS/DVB/DVD) canvas dims
+    /// from the source video size, so the `find_stream_info` chase after sparse, never-resolving
+    /// subtitle streams is pure cost. Every PGS track keeps `has_codec_parameters` false to the
+    /// budget cap (the #75 pattern), so even the #76 5 s ceiling is paid in full on a remote URL
+    /// source, landing as a flat ~5 s startup stall when the track is selected at load (#87). So
+    /// `skipStreamInfo` opts out of the chase entirely; the side reader runs a bounded find_stream_info
+    /// on demand only if its target subtitle stream's codec is genuinely unresolved at open. The probe
+    /// ceiling still bounds that fallback pass and honors an even tighter caller budget (#68). Keeps the
+    /// playback AVIO tuning (prefetch, chunk size, per-chunk timeout): the reader does sustained paced
+    /// reads, not a one-shot still fetch.
     static func subtitleSideDemuxer(callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?) -> DemuxerOpenProfile {
         let probeCeiling: Int64 = 4 * 1024 * 1024
         let analyzeCeiling: Int64 = 5 * 1_000_000

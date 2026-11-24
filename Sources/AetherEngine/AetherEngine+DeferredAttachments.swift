@@ -71,8 +71,9 @@ extension AetherEngine {
     }
 
     /// Start the side read for the loaded session. Called at the end of `load()` next to
-    /// `startAtmosConfirmation()`. It waits for the first frame so its bytes never compete with the
-    /// startup, except on a source without video, where nothing would ever latch it.
+    /// `startAtmosConfirmation()`. It waits until playback has a cushion (`attachmentReadMayStart`) so
+    /// its bytes never compete with the startup, and it inherits the session's request headers, so a
+    /// token rotated meanwhile (`updateRequestHeaders(_:)`) reaches it too.
     func startDeferredAttachmentRead() {
         cancelDeferredAttachmentRead()
         guard Self.deferredAttachmentReadApplies(plan: attachmentReadPlan, containerFormat: sourceContainerFormat),
@@ -84,21 +85,35 @@ extension AetherEngine {
         }
         let token = UUID()
         deferredAttachmentToken = token
+        let profile = DemuxerOpenProfile.attachmentSideReader
+            .withSourceOpenPolicy(loadedOptions.sourceOpenPolicy)
+            .withDiagnosticContext(loadedOptions.sourceDiagnosticsContext)
+            .withRequestHeaders(sessionRequestHeaders)
         let headers = loadedOptions.httpHeaders
         let formatHint = customFormatHint
-        let waitsForFirstFrame = sourceVideoCodecName != nil
+        let hasPicture = sessionPublishesVideoDisplaySignal && !loadedOptions.audioOnly
+        let budgetURL = isCustomSource ? nil : url
+        let testDelay = deferredAttachmentReadDelayNanosForTesting
         deferredAttachmentTask = Task { @MainActor [weak self] in
-            if waitsForFirstFrame { await self?.awaitFirstFrameForAttachments() }
+            await self?.awaitAttachmentReadStart(hasPicture: hasPicture)
             guard let self, !Task.isCancelled, self.deferredAttachmentToken == token else {
                 reader?.close()
                 return
             }
+            // An origin the budget lowered to one request since the load (429 / 503 on the pump)
+            // would take this read as one more refusal, or stall the pump behind it.
+            if let budgetURL, OriginRequestBudget.shared.requiresSerialRequests(budgetURL) {
+                EngineLog.emit("[Attachments] skipped: the origin dropped to one request at a time; "
+                    + "fontAttachments stays empty", category: .demux)
+                return
+            }
             let demuxer = Demuxer()
             self.deferredAttachmentDemuxer = demuxer
+            if testDelay > 0 { try? await Task.sleep(nanoseconds: testDelay) }
             let started = DispatchTime.now().uptimeNanoseconds
             let result = await BlockingWork.detached(priority: .utility) {
-                Self.readAttachments(demuxer: demuxer, url: url, reader: reader,
-                                     formatHint: formatHint, headers: headers)
+                Self.readAttachments(demuxer: demuxer, url: url, reader: reader, formatHint: formatHint,
+                                     headers: headers, profile: profile)
             }.value
             if self.deferredAttachmentDemuxer === demuxer { self.deferredAttachmentDemuxer = nil }
             guard !Task.isCancelled, self.deferredAttachmentToken == token else { return }
@@ -126,24 +141,48 @@ extension AetherEngine {
         deferredAttachmentDemuxer = nil
     }
 
-    /// Waits until the first frame is ready for display, bounded so a path that never latches it still
-    /// gets its fonts. A 100 ms check on the main actor: the wait normally ends within a second, and a
-    /// Combine subscription across the task boundary is not Sendable.
-    private func awaitFirstFrameForAttachments() async {
-        let deadline = DispatchTime.now().uptimeNanoseconds + Self.deferredAttachmentFirstFrameTimeoutNanos
-        while !hasFirstFrameReadyForDisplay, !Task.isCancelled,
-              DispatchTime.now().uptimeNanoseconds < deadline {
+    /// Whether the side read may start: the first frame is up (on a session that shows one) and
+    /// playback holds `deferredAttachmentBufferSeconds` ahead, or everything is buffered already. A bulk
+    /// read of tens of megabytes started at the first frame, when the forward buffer is thinnest,
+    /// would compete with exactly the segments that keep the picture going.
+    nonisolated static func attachmentReadMayStart(
+        hasPicture: Bool, firstFrame: Bool, currentTime: Double, bufferedPosition: Double, duration: Double
+    ) -> Bool {
+        if hasPicture, !firstFrame { return false }
+        if bufferedPosition - currentTime >= deferredAttachmentBufferSeconds { return true }
+        return duration > 0 && bufferedPosition >= duration - 0.5
+    }
+
+    nonisolated static let deferredAttachmentBufferSeconds: Double = 15
+
+    /// Waits for `attachmentReadMayStart` in two bounded steps: up to 30 s for the first frame, then up
+    /// to `deferredAttachmentCushionWaitNanos` for the cushion, so a session whose buffer stays shallow
+    /// (a link near the stream's bitrate) still gets its fonts. A 100 ms check on the main actor: the
+    /// wait normally ends within a few seconds, and a Combine subscription across the task boundary is
+    /// not Sendable.
+    private func awaitAttachmentReadStart(hasPicture: Bool) async {
+        let frameDeadline = DispatchTime.now().uptimeNanoseconds + Self.deferredAttachmentFirstFrameTimeoutNanos
+        while hasPicture, !hasFirstFrameReadyForDisplay, !Task.isCancelled,
+              DispatchTime.now().uptimeNanoseconds < frameDeadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let cushionDeadline = DispatchTime.now().uptimeNanoseconds + deferredAttachmentCushionWaitNanos
+        while !Task.isCancelled, DispatchTime.now().uptimeNanoseconds < cushionDeadline,
+              !Self.attachmentReadMayStart(hasPicture: hasPicture, firstFrame: hasFirstFrameReadyForDisplay,
+                                           currentTime: currentTime, bufferedPosition: bufferedPosition,
+                                           duration: duration) {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
     }
 
-    /// The bound on that wait. Long enough for any healthy start, short of leaving a session without
-    /// its fonts.
+    /// The bound on the first-frame wait. Long enough for any healthy start, short of leaving a session
+    /// without its fonts.
     nonisolated static let deferredAttachmentFirstFrameTimeoutNanos: UInt64 = 30_000_000_000
 
     /// Open, read, close. Nil when the source does not open; a background enrichment never throws.
     nonisolated static func readAttachments(
-        demuxer: Demuxer, url: URL, reader: IOReader?, formatHint: String?, headers: [String: String]
+        demuxer: Demuxer, url: URL, reader: IOReader?, formatHint: String?, headers: [String: String],
+        profile: DemuxerOpenProfile = .attachmentSideReader
     ) -> (fonts: [FontAttachment], artwork: Data?)? {
         defer {
             demuxer.close()
@@ -151,9 +190,9 @@ extension AetherEngine {
         }
         do {
             if let reader {
-                try demuxer.open(reader: reader, formatHint: formatHint, profile: .attachmentSideReader)
+                try demuxer.open(reader: reader, formatHint: formatHint, profile: profile)
             } else {
-                try demuxer.open(url: url, extraHeaders: headers, profile: .attachmentSideReader)
+                try demuxer.open(url: url, extraHeaders: headers, profile: profile)
             }
         } catch {
             return nil

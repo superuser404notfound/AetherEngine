@@ -1611,7 +1611,7 @@ Hosts that render authored ASS styling themselves (positioning, speaker colours,
 
 Measured on a 970 MB MKV with 14 fonts and about 5 Mbit/s of video and audio, over a 68 Mbit/s link: the analysis went from 4.5 s and 36.7 MB to 0.22 s and 256 KB.
 
-**The fonts themselves are read after the first frame (AE#1129).** libavformat reads the whole Attachments element inside `avformat_open_input`, so before this the fonts' full transfer sat in front of the first frame: on the file above, 11.2 s of its 12.1 s start. Now the session's open skips them and a second reader fetches them once the first frame is up, which took that start to 1.0 s, with the fonts arriving at 15.9 s. Details and the cases that still read at open: [api › `readsContainerAttachmentsAtOpen`](api.md#readscontainerattachmentsatopen).
+**The fonts themselves are read after the first frame (AE#1129).** libavformat reads the whole Attachments element inside `avformat_open_input`, so before this the fonts' full transfer sat in front of the first frame: on the file above, 11.2 s of its 12.1 s start. Now the session's open skips them and a second reader fetches them once the first frame is up, which took that start to 1.0 s, with the fonts arriving at 16.4 s. Details and the cases that still read at open: [api › `readsContainerAttachmentsAtOpen`](api.md#readscontainerattachmentsatopen).
 
 `ASSScriptBuilder` reassembles raw event cues + header into a complete script for whole-file renderers such as swift-ass-renderer's `loadTrack(content:)`. It is hardened against real-world Matroska tracks: it synthesizes an `[Events]` section, strips NULs, and dedupes by content, since real files hardcode `ReadOrder: 0`.
 
