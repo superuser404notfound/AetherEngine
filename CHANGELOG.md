@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.74.0] - 2026-11-24
+
 ### Added
 
 - **1080p can be upscaled too, with Lanczos-3.** `LoadOptions.upscalesFullHDVideo` scales SDR 1080p to the
