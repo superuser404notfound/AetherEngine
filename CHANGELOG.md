@@ -29,6 +29,12 @@ the public-API contract.
 
 ### Fixed
 
+- **A revive during startup keeps the resume position (AE#1126).** A VOD producer that died before the
+  first frame (a read error, a renewed credential, a muxer failure, the audio moov prime) was rebuilt at
+  the player's rendered position, which is 0 before anything renders. AVPlayer was mounted at the start
+  position and asked for a segment there, while the producer cut from the beginning of the file. The
+  revive now aims at the load's start position until the first frame. Reported by robertontheair.
+
 - **A full disk at startup ends the load with `.storageExhausted` instead of a hang at 0:00 (AE#1124).** A VOD
   failure reported while the native session was still starting was dropped, because the session was
   not mounted yet. The load then mounted it anyway, and AVPlayer waited forever with no error. Before

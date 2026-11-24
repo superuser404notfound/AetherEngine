@@ -345,6 +345,16 @@ So a VOD serve still running at 2 s sends the response headers early: a `200` wi
 - `ItemDeathReviveGate` caps this at 3 attempts per dead spot. Playback progress, or a user seek away, restores the budget.
 - The fresh item resumes only if the host's play intent says the viewer was playing. A paused title whose item dies (a tvOS screensaver taking the display is one way) is reloaded and stays paused.
 
+### Where a producer revive aims
+
+When a VOD pump dies (a read error, a refused credential renewed by the host, a muxer failure, the AE#222 audio moov prime), the engine rebuilds the producer at one spot. `consumerRecoveryTarget()` picks it, in this order:
+
+1. A seek the viewer asked for that never landed.
+2. The load's start position, while no frame has rendered yet. AVPlayer was mounted there and asks for a segment near it (AE#1126).
+3. AVPlayer's rendered position.
+
+Rule 2 is what keeps a resume. Before the first frame the rendered position is still 0, so a revive during startup used to restart the producer at seg0 while AVPlayer waited for a segment near the resume point. A sequential origin is the exception: its first producer reads from byte 0 anyway, so there is no start position to keep.
+
 ### End-of-item recovery
 
 When an item ends, native recovery first records the highest published clock value and how fresh it is, then awaits AVFoundation's off-main reading. A slow reading therefore cannot invalidate that proof of the end and replay an audio tail that already finished.
