@@ -10,6 +10,8 @@ final class CannedHTTPOrigin: @unchecked Sendable {
         case body(String, contentType: String)
         case redirect(to: String)
         case status(Int)
+        /// The inner answer, after the server has sat on the request this long.
+        indirect case delayed(TimeInterval, Answer)
     }
 
     struct Request: Sendable {
@@ -88,9 +90,14 @@ final class CannedHTTPOrigin: @unchecked Sendable {
             headers[line[..<colon].lowercased()] =
                 line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
-        let answer = lock.withLock { () -> Answer? in
+        let routed = lock.withLock { () -> Answer? in
             _requests.append(Request(path: path, headers: headers))
             return _routes[path]
+        }
+        var answer = routed
+        if case .delayed(let seconds, let inner) = answer {
+            Thread.sleep(forTimeInterval: seconds)
+            answer = inner
         }
         let response: String
         switch answer {
@@ -102,6 +109,8 @@ final class CannedHTTPOrigin: @unchecked Sendable {
                 + "Content-Length: 0\r\nConnection: close\r\n\r\n"
         case .status(let code):
             response = "HTTP/1.1 \(code) Status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        case .delayed:
+            response = "HTTP/1.1 500 Nested Delay\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         case nil:
             response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         }

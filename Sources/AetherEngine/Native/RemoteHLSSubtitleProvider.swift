@@ -22,6 +22,11 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
     /// the server has answered anything.
     private(set) var staticMasterPlaylistBody: String?
 
+    /// AE#1122: the origin variant the proxy already fetched, served at
+    /// `RemoteHLSMasterRewrite.servedVariantURI` so AVPlayer does not fetch it again. Nil when the
+    /// master still points at the origin's own copy. Written once during build, like the master.
+    private(set) var staticVariantPlaylistBody: String?
+
     /// Total program seconds, summed from the origin's own variant playlist. TARGETDURATION and the
     /// single EXTINF of every subtitle rendition are built from it.
     private let programDuration: Double
@@ -53,6 +58,24 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         staticMasterPlaylistBody = body
     }
 
+    /// AE#1122: held by the first variant answer on a resume. Written once during build.
+    private var resumeWarm: RemoteHLSResumeWarm.Gate?
+
+    func setVariantPlaylistBody(_ body: String) {
+        staticVariantPlaylistBody = body
+    }
+
+    func setResumeWarm(_ gate: RemoteHLSResumeWarm.Gate) {
+        resumeWarm = gate
+    }
+
+    /// The served variant, once the resume segment has been asked for with the player's own agent.
+    func servedVariantPlaylist(userAgent: String?) -> String? {
+        guard let body = staticVariantPlaylistBody else { return nil }
+        resumeWarm?.passThrough(userAgent: userAgent)
+        return body
+    }
+
     /// The renditions as the rewriter needs to declare them, in `subs_{ordinal}` order.
     static func renditions(for tracks: [Track]) -> [RemoteHLSMasterRewrite.Rendition] {
         tracks.enumerated().map { ordinal, track in
@@ -78,7 +101,10 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
             holdingUnpicked: holdingUnpicked)
     }
 
-    func cancelFill() { fillQueue.cancel() }
+    func cancelFill() {
+        fillQueue.cancel()
+        resumeWarm?.cancel()
+    }
 
     /// AE#984: the host picked `ordinal`; its sidecar fills next (see `ExternalSubtitleFillQueue.prioritize`).
     func prioritizeFill(ordinal: Int) {

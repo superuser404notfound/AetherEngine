@@ -58,11 +58,24 @@ enum RemoteHLSMasterRewrite {
     static func rewrite(originPlaylist: String,
                         originURL: URL,
                         renditions: [Rendition],
-                        mediaPlaylistBandwidth: Int = 5_000_000) throws -> String {
+                        mediaPlaylistBandwidth: Int = 5_000_000,
+                        servedVariant: ServedVariant? = nil) throws -> String {
         try rewriteDeclaringNames(originPlaylist: originPlaylist, originURL: originURL,
                                   renditions: renditions,
-                                  mediaPlaylistBandwidth: mediaPlaylistBandwidth).master
+                                  mediaPlaylistBandwidth: mediaPlaylistBandwidth,
+                                  servedVariant: servedVariant).master
     }
+
+    /// AE#1122: a variant the loopback origin serves itself, because the proxy already fetched it.
+    /// Every variant line that resolves to `originURL` is written as `localURI` instead, which stays
+    /// relative for the same reason the rendition URIs do (the AirPlay host swap).
+    struct ServedVariant: Equatable, Sendable {
+        var originURL: URL
+        var localURI: String
+    }
+
+    /// Where `HLSLocalServer` serves the variant the proxy fetched.
+    static let servedVariantURI = "origin_variant.m3u8"
 
     /// The rewritten master, and the NAME it declares for each rendition, in `renditions` order.
     struct Rewritten: Equatable, Sendable {
@@ -77,7 +90,8 @@ enum RemoteHLSMasterRewrite {
     static func rewriteDeclaringNames(originPlaylist: String,
                                       originURL: URL,
                                       renditions: [Rendition],
-                                      mediaPlaylistBandwidth: Int = 5_000_000) throws -> Rewritten {
+                                      mediaPlaylistBandwidth: Int = 5_000_000,
+                                      servedVariant: ServedVariant? = nil) throws -> Rewritten {
         guard !renditions.isEmpty else { throw Refusal.noRenditions }
         let lines = originPlaylist.components(separatedBy: .newlines)
         guard lines.contains(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("#EXTM3U") }) else {
@@ -87,17 +101,19 @@ enum RemoteHLSMasterRewrite {
             let names = declaredNames(for: renditions, taken: [])
             return Rewritten(
                 master: wrapMediaPlaylist(originURL: originURL, renditions: renditions, names: names,
-                                          bandwidth: mediaPlaylistBandwidth),
+                                          bandwidth: mediaPlaylistBandwidth, servedVariant: servedVariant),
                 renditionNames: names)
         }
-        return try rewriteMaster(lines: lines, originURL: originURL, renditions: renditions)
+        return try rewriteMaster(lines: lines, originURL: originURL, renditions: renditions,
+                                 servedVariant: servedVariant)
     }
 
     // MARK: - Master
 
     private static func rewriteMaster(lines: [String],
                                       originURL: URL,
-                                      renditions: [Rendition]) throws -> Rewritten {
+                                      renditions: [Rendition],
+                                      servedVariant: ServedVariant?) throws -> Rewritten {
         // Which groups the injected renditions have to join: every SUBTITLES group the origin declares
         // (a variant references exactly one, and different variants may reference different ones), plus
         // our own group if any variant references none.
@@ -125,7 +141,7 @@ enum RemoteHLSMasterRewrite {
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if expectVariantURI, !trimmed.isEmpty, !trimmed.hasPrefix("#") {
-                out.append(absolute(trimmed, against: originURL))
+                out.append(variantURI(absolute(trimmed, against: originURL), servedVariant: servedVariant))
                 expectVariantURI = false
                 sawVariantURI = true
                 continue
@@ -160,14 +176,50 @@ enum RemoteHLSMasterRewrite {
     private static func wrapMediaPlaylist(originURL: URL,
                                           renditions: [Rendition],
                                           names: [String],
-                                          bandwidth: Int) -> String {
+                                          bandwidth: Int,
+                                          servedVariant: ServedVariant?) -> String {
         var lines = ["#EXTM3U", "#EXT-X-INDEPENDENT-SEGMENTS"]
         lines.append(contentsOf: mediaTags(renditions: renditions,
                                            names: names,
                                            groups: [injectedGroupID]))
         lines.append("#EXT-X-STREAM-INF:BANDWIDTH=\(bandwidth),SUBTITLES=\"\(injectedGroupID)\"")
-        lines.append(originURL.absoluteString)
+        lines.append(variantURI(originURL.absoluteString, servedVariant: servedVariant))
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func variantURI(_ resolved: String, servedVariant: ServedVariant?) -> String {
+        guard let servedVariant, resolved == servedVariant.originURL.absoluteString else { return resolved }
+        return servedVariant.localURI
+    }
+
+    // MARK: - Served variant
+
+    /// AE#1122: a media playlist moved onto the loopback origin, with every URI it carries made absolute
+    /// against the URL it was fetched from, so the segments, the init (`EXT-X-MAP`) and any key are
+    /// still fetched from the origin. Unlike the master's tag list, any tag's `URI=` counts here.
+    static func absolutizedMediaPlaylist(_ body: String, against base: URL) -> String {
+        var out: [String] = []
+        // Split on \n and drop a trailing \r: splitting on any newline reads CRLF as one Character and
+        // a blank line between every real one.
+        for rawLine in body.components(separatedBy: "\n") {
+            let line = rawLine.hasSuffix("\r") ? String(rawLine.dropLast()) : rawLine
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                out.append(line)
+            } else if trimmed.hasPrefix("#") {
+                guard let uri = HLSPlaylistParser.attribute("URI", in: trimmed), !uri.isEmpty else {
+                    out.append(line)
+                    continue
+                }
+                let resolved = absolute(uri, against: base)
+                out.append(resolved == uri
+                    ? line
+                    : line.replacingOccurrences(of: "URI=\"\(uri)\"", with: "URI=\"\(resolved)\""))
+            } else {
+                out.append(absolute(trimmed, against: base))
+            }
+        }
+        return out.joined(separator: "\n")
     }
 
     // MARK: - EXT-X-MEDIA
