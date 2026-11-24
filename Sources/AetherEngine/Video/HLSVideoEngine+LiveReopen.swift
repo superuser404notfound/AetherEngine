@@ -873,7 +873,23 @@ extension HLSVideoEngine {
     /// producer with a fresh muxer and calls audioBridge.startSegment() (which also rebuilds a
     /// post-EOF-drained encoder), so the known transient causes heal. Aimed like the wedge re-anchor:
     /// a pending never-landed seek target owns the recovery aim, else AVPlayer's real position.
+    /// A full segment volume before the first segment is stored ends the session without a revive.
     func handleVODMuxerFailure() {
+        // Before the first segment is stored, a full volume is not worth a revive: the rebuild
+        // fails the same way, and it re-aims at the consumer's position, which is 0:00 until a
+        // segment lands, so a resume position is lost (AE#1124). Mid-session the latch can be set
+        // by a brief dip below the free reserve that eviction or the OS clears, so the revives run
+        // first and the cap-reached arm below names the full volume.
+        if cache?.storageExhausted == true, (cache?.totalStoredCount ?? 0) == 0 {
+            EngineLog.emit(
+                "[HLSVideoEngine] VOD muxerFailed on a full segment volume before any segment was stored; "
+                + "not reviving",
+                category: .session
+            )
+            surfaceVODSourceFailure(FFmpegErr.enospc, "Device storage is full: video segments cannot be written",
+                                    kind: .storageExhausted)
+            return
+        }
         restartLock.lock()
         let admitted = muxerFailureReviveGate.admit()
         let attempts = muxerFailureReviveGate.attempts
