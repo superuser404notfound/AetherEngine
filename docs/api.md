@@ -2394,7 +2394,7 @@ Every playback, probe and restart open logs one `[Demuxer] open timings (<reader
 
 An open that ran the stream analysis appends how it ended, after the budget:
 
-`; probe stop=<resolved|probesize|analyzeduration|eof|read-error|stopped|interrupted>, unresolved=<n>, programs=<n>, pmtMissing=<n>, headerWait=<released@Nms|->, probeBytes=<n>, closeToReturn=<Nms|->`
+`; probe stop=<resolved|probesize|analyzeduration|eof|read-error|stopped|interrupted>, unresolved=<n>, programs=<n>, pmtMissing=<n>, headerWait=<released@Nms|->, probeBytes=<n>, closeToReturn=<Nms|->, attachmentsParked=<n>`
 
 - `stop` is the first cause that applies, in this order:
   - a close (`stopped`)
@@ -2407,6 +2407,7 @@ An open that ran the stream analysis appends how it ended, after the budget:
 - `unresolved` counts the audio and video streams still missing their size, or their sample rate and channels.
 - `pmtMissing` counts the MPEG-TS programs whose PMT never arrived, and `headerWait` says when the engine released the wait for one (see [A PAT program that never sends its PMT](formats.md#raw-live-mpeg-ts-and-the-live-join)).
 - `probeBytes` is what the analysis read from the source, `closeToReturn` how long it took to end after a close.
+- `attachmentsParked` counts the attached files without a codec id that the analysis skipped, mostly fonts labelled `font/ttf` or `font/otf` (see [Authored ASS styling](formats.md#authored-ass-styling), AE#1129). A slow open of a font-heavy MKV that shows `0` here has another cause.
 
 A failed analysis adds `; find_stream_info failed (<code>)` after those fields. The line carries no URL, header or payload.
 

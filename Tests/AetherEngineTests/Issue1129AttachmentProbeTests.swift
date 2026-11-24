@@ -56,6 +56,8 @@ struct Issue1129AttachmentProbeTests {
         let (demuxer, url, size) = try open()
         defer { demuxer.close(); try? FileManager.default.removeItem(at: url) }
         #expect(demuxer.unnamedAttachmentsParked == 2)
+        #expect(demuxer.probeReport?.attachmentsParked == 2)
+        #expect(demuxer.probeReport?.logFields.hasSuffix("attachmentsParked=2") == true)
         let read = try #require(demuxer.probeReport?.probeBytes)
         #expect(read < Int64(size) / 2, "the stream analysis read \(read) of \(size) bytes")
     }

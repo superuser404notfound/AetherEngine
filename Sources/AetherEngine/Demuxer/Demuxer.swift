@@ -1348,6 +1348,7 @@ public final class Demuxer: @unchecked Sendable {
 
     private func probeStreams(_ ctx: UnsafeMutablePointer<AVFormatContext>) throws {
         unresolvableAudioStreams = []
+        unnamedAttachmentsParked = 0
         // #87: the subtitle side demuxer opts out of find_stream_info. avformat_open_input already
         // carries codec_id / codec_type for every subtitle track (container header / PMT), and
         // reclassifyAttachedPictures only exists to bound the find_stream_info cost, so both are skipped.
@@ -1374,7 +1375,8 @@ public final class Demuxer: @unchecked Sendable {
         unparkUnnamedAttachments(ctx, parkedAttachments)
         probeReport = makeProbeReport(ctx, parkedAudio: parked, bytesBefore: bytesBefore,
                                       callStart: callStart, callReturn: callReturn,
-                                      headerWaitReleasedAfter: headerWaitReleasedAfter)
+                                      headerWaitReleasedAfter: headerWaitReleasedAfter,
+                                      attachmentsParked: parkedAttachments.count)
         guard findRet >= 0 else {
             emitOpenTimings(outcome: "find_stream_info failed (\(findRet))")
             throw DemuxerError.streamInfoFailed(code: findRet)
@@ -1405,7 +1407,7 @@ public final class Demuxer: @unchecked Sendable {
     /// the line says how the pass ended without reaching inside it.
     private func makeProbeReport(_ ctx: UnsafeMutablePointer<AVFormatContext>, parkedAudio: [Int],
                                  bytesBefore: Int64, callStart: UInt64, callReturn: UInt64,
-                                 headerWaitReleasedAfter: UInt64?) -> ProbeReport {
+                                 headerWaitReleasedAfter: UInt64?, attachmentsParked: Int) -> ProbeReport {
         let isMPEGTS = ctx.pointee.iformat.map { String(cString: $0.pointee.name) == "mpegts" } ?? false
         var programs = 0
         var pmtMissing = 0
@@ -1445,7 +1447,7 @@ public final class Demuxer: @unchecked Sendable {
         let closeToReturn = closedAt.map { callReturn - max($0, callStart) }
         return ProbeReport(stop: stop, unresolved: unresolved, programs: programs, pmtMissing: pmtMissing,
                            headerWaitReleasedAfter: headerWaitReleasedAfter, probeBytes: bytes,
-                           closeToReturn: closeToReturn)
+                           closeToReturn: closeToReturn, attachmentsParked: attachmentsParked)
     }
 
     /// An audio stream this build can never resolve, named so a report can say why a source came up
@@ -1616,9 +1618,11 @@ public final class Demuxer: @unchecked Sendable {
     /// `application/x-font`, `application/vnd.ms-opentype`, `binary`). MKVToolNix writes the RFC 8081
     /// types (`font/ttf`, `font/otf`, `font/sfnt`) by default, on Windows since v58, and since v99 it
     /// rewrites the old names to them on every remux. So the fonts of nearly every current anime release
-    /// arrive as `AV_CODEC_ID_NONE`, and `has_codec_parameters` fails those with "unknown codec". An attachment never carries a packet, so nothing resolves it, and
-    /// the probe reads on until `max_analyze_duration`: 60 s of content, 36.7 MB and 4.5 s on a test
-    /// file shaped like the report, at 68 Mbit/s. An attachment that does carry a codec id is resolved.
+    /// arrive as `AV_CODEC_ID_NONE`, and `has_codec_parameters` fails those with "unknown codec". An
+    /// attachment never carries a packet, so nothing resolves it, and the probe reads on until
+    /// `max_analyze_duration`: 60 s of content. On a test file shaped like the report (about 5 Mbit/s
+    /// of video and audio) that was 36.7 MB, 4.5 s over a 68 Mbit/s link. An attachment that does
+    /// carry a codec id is resolved.
     static func attachmentNeedsNoProbe(codecID: AVCodecID, codecType: AVMediaType) -> Bool {
         codecType == AVMEDIA_TYPE_ATTACHMENT && codecID == AV_CODEC_ID_NONE
     }
@@ -2074,7 +2078,9 @@ public final class Demuxer: @unchecked Sendable {
         defer { accessLock.unlock() }
         guard let ctx = formatContext else { return }
         reclassifyAttachedPictures(ctx)
+        let parkedAttachments = parkUnnamedAttachments(ctx)
         _ = avformat_find_stream_info(ctx, nil)
+        unparkUnnamedAttachments(ctx, parkedAttachments)
         refreshStreamTableLocked(rebuildTracks: true)
     }
 
@@ -4288,12 +4294,15 @@ struct ProbeReport: Equatable, Sendable {
     let probeBytes: Int64
     /// From the close request to the call's return, nil without a close.
     let closeToReturn: UInt64?
+    /// Attachments without a codec id kept out of the pass (`parkUnnamedAttachments`, AE#1129).
+    var attachmentsParked = 0
 
     var logFields: String {
         func ms(_ ns: UInt64) -> String { "\(ns / 1_000_000)ms" }
         return "probe stop=\(stop.rawValue), unresolved=\(unresolved), programs=\(programs), "
             + "pmtMissing=\(pmtMissing), headerWait=\(headerWaitReleasedAfter.map { "released@\(ms($0))" } ?? "-"), "
-            + "probeBytes=\(probeBytes), closeToReturn=\(closeToReturn.map(ms) ?? "-")"
+            + "probeBytes=\(probeBytes), closeToReturn=\(closeToReturn.map(ms) ?? "-"), "
+            + "attachmentsParked=\(attachmentsParked)"
     }
 
     /// The first cause that applies, in the order a pass can end: a close or an interrupt ends it

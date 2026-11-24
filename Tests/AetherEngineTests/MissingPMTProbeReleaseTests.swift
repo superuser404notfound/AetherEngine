@@ -155,11 +155,11 @@ struct ProbeStopReportTests {
                                    headerWaitReleasedAfter: 2_504_900_000, probeBytes: 1_814_528,
                                    closeToReturn: nil)
         #expect(released.logFields == "probe stop=resolved, unresolved=0, programs=2, pmtMissing=1, "
-                + "headerWait=released@2504ms, probeBytes=1814528, closeToReturn=-")
+                + "headerWait=released@2504ms, probeBytes=1814528, closeToReturn=-, attachmentsParked=0")
         let stopped = ProbeReport(stop: .stopped, unresolved: 1, programs: 0, pmtMissing: 0,
                                   headerWaitReleasedAfter: nil, probeBytes: 0, closeToReturn: 3_200_000)
         #expect(stopped.logFields == "probe stop=stopped, unresolved=1, programs=0, pmtMissing=0, "
-                + "headerWait=-, probeBytes=0, closeToReturn=3ms")
+                + "headerWait=-, probeBytes=0, closeToReturn=3ms, attachmentsParked=0")
         #expect(ProbeReport.Stop.readError.rawValue == "read-error")
     }
 }
