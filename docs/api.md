@@ -84,7 +84,7 @@ A load the ENGINE superseded does not throw it. When the software-path rebuild (
 
 Log the message inside `.error` verbatim, but do not classify on it. It comes from two places:
 
-- **The engine's own sentence.** It names the cause, not the symptom. Examples: `"AVFoundation built no track for it within 45s and the source's carriage could not be identified"`, `"Live source unavailable"`, or the Dolby Vision hardware refusal. A host timeout that fires first replaces it with the host's own sentence.
+- **The engine's own sentence.** It names the cause, not the symptom. Examples: `"AVFoundation built no track for it within 45s and the source's carriage could not be identified"` (the number follows `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds`), `"Live source unavailable"`, or the Dolby Vision hardware refusal. A host timeout that fires first replaces it with the host's own sentence.
 - **Forwarded from the failure underneath.** On the native paths this is `AVPlayerItem.error.localizedDescription` verbatim. AVFoundation localizes it into the device language. The `NSError` domain and code survive only if the localized text happens to contain them.
 
 `$errorInfo` publishes a `PlaybackErrorInfo` beside the state. Its fields:
@@ -2604,6 +2604,7 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
 | `liveBlockingReload` | nil (auto) | LL-HLS blocking-reload override for loopback live sessions. Auto decides from the observed upstream cadence, which is what keeps a bursty relay out of a `-15410` loop. |
 | `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Built for `isLive: true`; a remote HLS VOD URL reaches this route anyway (AE#154). The clock here is item time; see `clock.$sourceTime` (AE#616). |
 | `nativeRemoteHLSIngestFallback` | true | The #168 / #293 carriage recovery and the #363 recovery after a 401/403 refusal on the bypass. Setting it false turns both off. |
+| `nativeRemoteHLSReadinessBudgetSeconds` | nil (45 s) | How long a `nativeRemoteHLS` session may show no readiness, no failure and no reroute before it ends with `.noPlayableTrackWithinBudget` (#334). Raise it for a server transcode that is slow to start (AE#1123). Kept between 45 s and an hour. A tuning field. |
 | `hostRetriesExhaustedLiveReplay` | `false` | The host owns the retry after a verified live replay exhausts the in-engine reopen: the engine publishes `liveSourceReplayExhausted` and holds production until `retryLiveSourceRecovery()`. `false` publishes `liveSourceReset` for the same exhaustion. |
 
 1. **`dvrWindowSeconds`.** The disk budget bounds what is actually kept: a quarter of the free space, at most 2 GiB unless `liveDVRByteBudget` lifts it on the software route. So a long window on a high-bitrate channel, or on a small volume, holds less than it asks for. With several engines running, each one's quarter comes from the free space the others have not claimed yet, so a tile added on a tight volume holds less history than the first one (AE#687).

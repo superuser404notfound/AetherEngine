@@ -987,6 +987,17 @@ public struct LoadOptions: Sendable, Equatable {
     /// it along with the watchdog.
     public var nativeRemoteHLSIngestFallback: Bool
 
+    /// How long a `nativeRemoteHLS` session may sit with no readiness, no failure and no reroute before
+    /// the engine ends it with `.noPlayableTrackWithinBudget` (#334). nil keeps the default of 45 s.
+    ///
+    /// Raise it for a source that is slow to produce its first segment, such as a server transcode: a
+    /// Jellyfin 4K HDR conversion on a busy server can take most of a minute, and a host with its own
+    /// start watchdog wants that one to fire, not the engine's. Values below 45 s are raised to 45 s,
+    /// because the carriage probe needs that long to reroute a stream AVFoundation cannot play; values
+    /// above an hour are capped at an hour. A session that becomes ready, fails or reroutes is never
+    /// affected, only one where nothing happens at all. Default `nil` (AE#1123).
+    public var nativeRemoteHLSReadinessBudgetSeconds: Double? = nil
+
     /// Emit raw ASS event lines (`ReadOrder,Layer,Style,...,Text` including override tags) instead of plain-text extraction. Opt-in for hosts that render ASS styling themselves; pair with `TrackInfo.assHeader`. Only affects ASS / SSA codecs, on embedded and sidecar tracks alike: libavcodec normalises SubRip, WebVTT and mov_text through `ff_ass_add_rect` as well, so those carry an ASS payload the engine could emit but never does, and a session that mixes an ASS track with a SubRip one needs no reload to cross between them (AE#587). Default `false` (AetherEngine#30).
     public var preserveASSMarkup: Bool
 
@@ -1397,6 +1408,7 @@ public struct LoadOptions: Sendable, Equatable {
         clampsLiveResumeToWindow: Bool = true,
         nativeRemoteHLS: Bool = false,
         nativeRemoteHLSIngestFallback: Bool = true,
+        nativeRemoteHLSReadinessBudgetSeconds: Double? = nil,
         preserveASSMarkup: Bool = false,
         prepareNativeSubtitles: Bool = false,
         recognizesBitmapSubtitleText: Bool = false,
@@ -1477,6 +1489,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.clampsLiveResumeToWindow = clampsLiveResumeToWindow
         self.nativeRemoteHLS = nativeRemoteHLS
         self.nativeRemoteHLSIngestFallback = nativeRemoteHLSIngestFallback
+        self.nativeRemoteHLSReadinessBudgetSeconds = nativeRemoteHLSReadinessBudgetSeconds
         self.preserveASSMarkup = preserveASSMarkup
         self.prepareNativeSubtitles = prepareNativeSubtitles
         self.recognizesBitmapSubtitleText = recognizesBitmapSubtitleText

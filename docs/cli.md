@@ -588,6 +588,7 @@ Other lines `play` prints:
 | `--dvr-window N` | DVR ring size in seconds. See [Shared flags](#shared-flags). | none (live-only) |
 | `--live-ingest` | Loads through `HLSLiveIngestReader` as a custom source. | off |
 | `--native-hls` | `LoadOptions.nativeRemoteHLS`. | off |
+| `--readiness-budget SECONDS` | `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds` (AE#1123): how long the bypass waits with nothing happening before `.noPlayableTrackWithinBudget`. Pair with `--native-hls`. | engine default (45 s) |
 | `--standard-join`, `--fast-zap`, `--live-cushion SECONDS` | Live join profile and cushion. See [Shared flags](#shared-flags). | `.fastZap`, engine default |
 | `--live-start-immediately` / `--no-live-start-immediately` | `LoadOptions.liveJoinStartsImmediately` (AE#440). | on |
 | `--live-join-at-start` | `LoadOptions.liveJoinsAtPlaylistStart` (AE#1090): joins at the oldest listed segment. Pair with [`hlsfixture --recording-backlog`](#a-recording-in-progress---recording-backlog). | off |

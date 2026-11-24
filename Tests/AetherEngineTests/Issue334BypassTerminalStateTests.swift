@@ -103,3 +103,50 @@ struct RemoteHLSReadinessDeadlineTests {
         #expect(RemoteHLSReadinessDeadline.defaultBudgetSeconds > probeCeiling + 10)
     }
 }
+
+/// AE#1123: the budget became a LoadOptions field. A server conversion that needs most of a minute for
+/// its first segment met the fixed 45 s before the host's own, longer start watchdog could fire.
+@Suite("Bypass readiness budget from LoadOptions (AE#1123)")
+struct RemoteHLSReadinessBudgetOptionTests {
+
+    @Test("no request keeps today's 45 s", .timeLimit(.minutes(3)))
+    func unsetKeepsTheDefault() {
+        #expect(LoadOptions().nativeRemoteHLSReadinessBudgetSeconds == nil)
+        #expect(RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: nil) == 45)
+    }
+
+    @Test("a longer request is honoured", .timeLimit(.minutes(3)))
+    func longerRequestWins() {
+        #expect(RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: 85) == 85)
+        let ticks = RemoteHLSReadinessDeadline(
+            budgetSeconds: RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: 85),
+            tickSeconds: 0.5).budgetTicks
+        #expect(ticks == 170)
+    }
+
+    /// Below 45 s the deadline would end sessions the deferred carriage probe was still going to
+    /// reroute, so a shorter request is raised rather than obeyed.
+    @Test("a shorter request is raised to the default", .timeLimit(.minutes(3)))
+    func shorterRequestIsRaised() {
+        #expect(RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: 10) == 45)
+        #expect(RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: 0) == 45)
+        #expect(RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: -5) == 45)
+    }
+
+    /// A huge value would overflow the tick count in `Int(...)`, which traps.
+    @Test("NaN and infinity keep the default, a huge value is capped", .timeLimit(.minutes(3)))
+    func nonFiniteAndHugeAreBounded() {
+        #expect(RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: .nan) == 45)
+        #expect(RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: .infinity) == 45)
+        #expect(RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: 1e300) == 3600)
+        _ = RemoteHLSReadinessDeadline(
+            budgetSeconds: RemoteHLSReadinessDeadline.resolvedBudgetSeconds(requested: 1e300),
+            tickSeconds: 0.5)
+    }
+
+    @Test("the field is a tuning field, not part of the session's identity", .timeLimit(.minutes(3)))
+    func fieldIsCorrectable() {
+        #expect(SessionOptionCorrection.knownFields.contains("nativeRemoteHLSReadinessBudgetSeconds"))
+        #expect(!SessionOptionCorrection.loadIdentityFields.contains("nativeRemoteHLSReadinessBudgetSeconds"))
+    }
+}

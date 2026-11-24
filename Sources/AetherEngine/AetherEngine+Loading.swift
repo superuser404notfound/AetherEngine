@@ -685,7 +685,8 @@ extension AetherEngine {
                       // #334: the ceiling on silence this path never had. AVPlayer's "gave up" covers an
                       // origin that stops answering; it does not cover one that answers everything while
                       // AVFoundation builds no track, where nothing terminal is ever published.
-                      readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds,
+                      readinessDeadline: RemoteHLSReadinessDeadline.resolvedBudgetSeconds(
+                          requested: options.nativeRemoteHLSReadinessBudgetSeconds),
                       // No probe lists this route's audio, so the item's own tracks are the list.
                       readsBackAudioTracks: true))
 
