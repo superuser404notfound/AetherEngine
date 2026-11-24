@@ -205,18 +205,21 @@ struct Issue1122ResumeWarmTests {
         #expect(server.requests.allSatisfy { !$0.path.hasSuffix(".mp4") })
     }
 
+    /// The segment answers after 60 s and the cap is 0.5 s, so a variant that went out before the
+    /// segment proves the cap without a tight wall-clock bound: a fixed 2.5 s bound over a 4 s segment
+    /// failed on a loaded runner (the one-thread pool CI job, 2026-11-24) while the cap was honoured.
     @Test("A resume segment that does not answer in time still lets the variant go out")
     func slowResumeSegmentDoesNotHoldTheVariant() async throws {
         let server = try Self.origin()
         defer { server.stop() }
-        server.route("/videos/42/hls1/main/2.mp4", .delayed(4, .body("seg2", contentType: "video/mp4")))
+        server.route("/videos/42/hls1/main/2.mp4", .delayed(60, .body("seg2", contentType: "video/mp4")))
 
         let prepared = try await Self.prepare(server, resumeAt: 13, waitSeconds: 0.5)
         defer { prepared.tearDown() }
 
         let started = Date()
         #expect(try await Self.get(Self.variantURL(prepared)).status == 200)
-        #expect(Date().timeIntervalSince(started) < 2.5, "the variant waited for the segment past its cap")
+        #expect(Date().timeIntervalSince(started) < 30, "the variant waited for the segment past its cap")
     }
 
     @Test("A host's own User-Agent, in any spelling, gives way to the player's")
