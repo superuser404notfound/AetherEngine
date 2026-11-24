@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.75.0] - 2026-11-24
+
 ### Added
 
 - **A host can give a slow remote-HLS start longer than 45 s (AE#1123).** The bypass ended a session
