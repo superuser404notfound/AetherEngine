@@ -449,6 +449,10 @@ public final class Demuxer: @unchecked Sendable {
     /// stream-info probing on the most recent open. See `reclassifyAttachedPictures`. (#75)
     private(set) var attachedPictureStreamsReclassified: Int = 0
 
+    /// Attachment streams the most recent open kept out of stream-info probing because the demuxer
+    /// could not name their codec. See `parkUnnamedAttachments`. (AE#1129)
+    private(set) var unnamedAttachmentsParked: Int = 0
+
     // Memory probe: compare against RSS growth; 0 for file:// sources.
     var avioBytesFetched: Int64 { avioProvider?.cumulativeBytesFetched ?? 0 }
 
@@ -1357,6 +1361,7 @@ public final class Demuxer: @unchecked Sendable {
         let parked = parkUnresolvableAudio(ctx)
         let parkedPGS = parkPGSSubtitles(ctx)
         let parkedData = parkUnnamedDataStreams(ctx)
+        let parkedAttachments = parkUnnamedAttachments(ctx)
         let bytesBefore = ctx.pointee.pb?.pointee.bytes_read ?? 0
         let callStart = DispatchTime.now().uptimeNanoseconds
         interrupt.armHeaderWait(ctx, startedAt: callStart)
@@ -1366,6 +1371,7 @@ public final class Demuxer: @unchecked Sendable {
         unparkUnresolvableAudio(ctx, parked)
         unparkPGSSubtitles(ctx, parkedPGS)
         unparkUnnamedDataStreams(ctx, parkedData)
+        unparkUnnamedAttachments(ctx, parkedAttachments)
         probeReport = makeProbeReport(ctx, parkedAudio: parked, bytesBefore: bytesBefore,
                                       callStart: callStart, callReturn: callReturn,
                                       headerWaitReleasedAfter: headerWaitReleasedAfter)
@@ -1601,6 +1607,44 @@ public final class Demuxer: @unchecked Sendable {
                                           _ parked: [(Int, AVDiscard)]) {
         for (i, discard) in parked where i < Int(ctx.pointee.nb_streams) {
             ctx.pointee.streams[i]?.pointee.discard = discard
+        }
+    }
+
+    /// Whether this is an attached file whose type the demuxer could not name. (AE#1129)
+    ///
+    /// `matroskadec` names an attachment only from a short MIME list (`application/x-truetype-font`,
+    /// `application/x-font`, `application/vnd.ms-opentype`, `binary`). MKVToolNix writes the RFC 8081
+    /// types (`font/ttf`, `font/otf`, `font/sfnt`) by default, on Windows since v58, and since v99 it
+    /// rewrites the old names to them on every remux. So the fonts of nearly every current anime release
+    /// arrive as `AV_CODEC_ID_NONE`, and `has_codec_parameters` fails those with "unknown codec". An attachment never carries a packet, so nothing resolves it, and
+    /// the probe reads on until `max_analyze_duration`: 60 s of content, 36.7 MB and 4.5 s on a test
+    /// file shaped like the report, at 68 Mbit/s. An attachment that does carry a codec id is resolved.
+    static func attachmentNeedsNoProbe(codecID: AVCodecID, codecType: AVMediaType) -> Bool {
+        codecType == AVMEDIA_TYPE_ATTACHMENT && codecID == AV_CODEC_ID_NONE
+    }
+
+    /// Give unnamed attachments `AV_CODEC_ID_BIN_DATA` for the duration of the probe, which
+    /// `has_codec_parameters` accepts for an attachment, so the pass stops once the real tracks are
+    /// known. The restore follows the probe because `find_stream_info` writes its context back over
+    /// `codecpar`; the payload in `extradata` is never touched, and `fontAttachmentInfos` goes by
+    /// MIME type and file name, not by codec. (AE#1129)
+    private func parkUnnamedAttachments(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> [Int] {
+        var parked: [Int] = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let codecpar = ctx.pointee.streams[i]?.pointee.codecpar,
+                  Self.attachmentNeedsNoProbe(codecID: codecpar.pointee.codec_id,
+                                              codecType: codecpar.pointee.codec_type)
+            else { continue }
+            codecpar.pointee.codec_id = AV_CODEC_ID_BIN_DATA
+            parked.append(i)
+        }
+        unnamedAttachmentsParked = parked.count
+        return parked
+    }
+
+    private func unparkUnnamedAttachments(_ ctx: UnsafeMutablePointer<AVFormatContext>, _ parked: [Int]) {
+        for i in parked where i < Int(ctx.pointee.nb_streams) {
+            ctx.pointee.streams[i]?.pointee.codecpar?.pointee.codec_id = AV_CODEC_ID_NONE
         }
     }
 

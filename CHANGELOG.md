@@ -29,6 +29,13 @@ the public-API contract.
 
 ### Fixed
 
+- **Matroska fonts labelled `font/ttf` or `font/otf` no longer add up to 60 s of reading to the open
+  (AE#1129).** libavformat does not know these MIME types (MKVToolNix writes them by default), so it left
+  the fonts without a codec id, and the stream analysis kept reading until its 60 s window was full
+  while it waited for them to identify. On a 970 MB release with 14 fonts at 68 Mbit/s that was
+  36.7 MB and 4.5 s before the first frame; it is now 256 KB and 0.22 s. The fonts themselves are
+  unchanged. Reported by zacaronii.
+
 - **A revive during startup keeps the resume position (AE#1126).** A VOD producer that died before the
   first frame (a read error, a renewed credential, a muxer failure, the audio moov prime) was rebuilt at
   the player's rendered position, which is 0 before anything renders. AVPlayer was mounted at the start
