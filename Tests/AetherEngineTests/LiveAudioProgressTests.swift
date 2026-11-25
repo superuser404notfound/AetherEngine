@@ -407,17 +407,20 @@ struct LiveAudioProgressTests {
         let log = EngineLogCapture()
         defer { log.end() }
         engine.play()
-        let finished = try await waitFor(upTo: .seconds(150)) {
+        // Under the suite's 3 minute limit with room for the load, so a hang reports its state.
+        let finished = try await waitFor(upTo: .seconds(120)) {
             engine.state == .ended || engine.errorInfo != nil
         }
         if !finished {
+            // The capture hears every engine in the process, so the tail can hold other suites' lines.
             let tail = log.matching("[SWHost]").suffix(12) + log.matching("[AudioOutput]").suffix(6)
             Issue.record("""
-                no end after 150 s: state=\(engine.state) time=\(engine.currentTime) \
+                no end after 120 s: state=\(engine.state) time=\(engine.currentTime) \
                 rebuffering=\(host.isRebuffering) clockRate=\(String(describing: host.clockRateForTesting)) \
                 parked=\(host.parkedVideoCountForTesting) \
                 queued=\(String(describing: host.directLiveReadAheadForTesting?.packets.queuedPacketCount)) \
                 handedOver=\(host.videoRendererForTesting.takeCadence().handedOver)
+                engine log tail (process-wide):
                 \(tail.joined(separator: "\n"))
                 """)
             return

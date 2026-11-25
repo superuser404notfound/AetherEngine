@@ -14,9 +14,11 @@ the public-API contract.
 
 - **`.rebuffering` no longer shows up while the software clock is still running.** The software
   host published `isRebuffering` before it paused the synchronizer, and the flag travels to the main
-  actor on its own hop, so a reader there could see the hold a moment before the clock stopped (and
-  `isRebuffering == false` before a resume had restarted it). The pumps now stop or start the clock
-  first and publish second. Found by a CI test that read the clock right after the flag.
+  actor on its own hop, so a reader there could see the hold a moment before the clock stopped. The
+  pumps now pause the clock first and publish second, and on a resume they ask the clock to start
+  before they clear the flag. A resume that goes through the video preroll still starts the clock
+  up to a few seconds after the flag clears, as any start from a standing clock does. Found by a CI
+  test that read the clock right after the flag.
 
 ## [7.75.0] - 2026-11-24
 

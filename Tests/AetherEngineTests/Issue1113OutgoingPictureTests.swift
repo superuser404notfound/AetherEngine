@@ -60,6 +60,8 @@ struct Issue1113OutgoingPictureTests {
         defer { try? FileManager.default.removeItem(at: file) }
         let engine = try AetherEngine()
         defer { engine.stop() }
+        // Not a timing test either; see the ended case below for why the default budget is too short.
+        engine.heldPictureFrameWaitSeconds = AetherEngine.heldPictureDolbyVisionBudgetSeconds
         _ = try await engine.load(url: file)
         try await waitFor { engine.hasFirstFrameReadyForDisplay }
 
