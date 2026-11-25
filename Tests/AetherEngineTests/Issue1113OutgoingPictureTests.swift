@@ -79,6 +79,10 @@ struct Issue1113OutgoingPictureTests {
         defer { try? FileManager.default.removeItem(at: file) }
         let engine = try AetherEngine()
         defer { engine.stop() }
+        // The 0.5 s default is a UI budget, and a Mac running two suites at once missed it
+        // (2026-11-25). Whether an ended item renders again at all is the question here, not how
+        // fast, so the read gets the most the engine allows.
+        engine.heldPictureFrameWaitSeconds = AetherEngine.heldPictureDolbyVisionBudgetSeconds
         _ = try await engine.load(url: file)
         try await waitFor { engine.state == .ended }
 

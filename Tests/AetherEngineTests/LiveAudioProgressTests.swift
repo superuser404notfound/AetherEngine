@@ -404,8 +404,24 @@ struct LiveAudioProgressTests {
         engine.setRate(2)
 
         // Act - consume the finite source through the ordinary Live route.
+        let log = EngineLogCapture()
+        defer { log.end() }
         engine.play()
-        try await waitFor { engine.state == .ended || engine.errorInfo != nil }
+        let finished = try await waitFor(upTo: .seconds(150)) {
+            engine.state == .ended || engine.errorInfo != nil
+        }
+        if !finished {
+            let tail = log.matching("[SWHost]").suffix(12) + log.matching("[AudioOutput]").suffix(6)
+            Issue.record("""
+                no end after 150 s: state=\(engine.state) time=\(engine.currentTime) \
+                rebuffering=\(host.isRebuffering) clockRate=\(String(describing: host.clockRateForTesting)) \
+                parked=\(host.parkedVideoCountForTesting) \
+                queued=\(String(describing: host.directLiveReadAheadForTesting?.packets.queuedPacketCount)) \
+                handedOver=\(host.videoRendererForTesting.takeCadence().handedOver)
+                \(tail.joined(separator: "\n"))
+                """)
+            return
+        }
 
         // Assert - reaching EOF in the producer did not discard the consumer's tail.
         #expect(engine.errorInfo == nil)

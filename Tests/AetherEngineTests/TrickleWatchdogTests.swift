@@ -366,10 +366,17 @@ struct TrickleWatchdogTests {
         // (live reads return short since AE#1076), so a read waits on forward data for the whole
         // observation, which is the state the verdict is evaluated in.
         _ = Self.startReading(reader, bytes: 256 * 1024)
-        let ended = try await waitFor(upTo: .seconds(8 * Self.stallTimeout)) {
-            reader.trickleEndCountForTesting > 0 || origin.requests.count > 1
+        // Only the trickle verdict is under test. A drip that lands more than the 0.5 s stall
+        // threshold late (a starved runner) ends the connection through the gap watchdog, which is
+        // that watchdog doing its job, so a second request alone proves nothing here (CI, 2026-11-24:
+        // requests [0, 4096] after 0.8 s, no trickle verdict).
+        let judged = try await waitFor(upTo: .seconds(8 * Self.stallTimeout)) {
+            reader.trickleEndCountForTesting > 0
         }
-        #expect(!ended, "a low-bitrate live connection was replaced: \(origin.requests.map(\.start))")
+        #expect(!judged, """
+            a low-bitrate live connection was ended as a trickle: requests \
+            \(origin.requests.map(\.start)), gap ends \(reader.deliveryGapEndCountForTesting)
+            """)
         #expect(reader.trickleEndCountForTesting == 0)
     }
 
