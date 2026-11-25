@@ -276,6 +276,10 @@ The reader's open window still drains after the pump parks, a few MB in the meas
 
 **Holes in the cache.** Scrubbing leaves retained bands of segments with gaps between them, inside the cache's stored min/max index range. So an index inside that range is no proof the segment exists. A fetch inside the range waits (2 s) only when the active producer's forward march actually covers the requested index. Otherwise it restarts at once (#129).
 
+**A short forward jump waits only while the march is faster than a restart (#932, AE#1128).** A request 1 to 8 segments past the producer's front (`forwardWaitWindow`) can either wait for the running producer to get there or restart it at the target. `MarchRateTracker` measures how fast the producer seals segments, and the provider waits only while the march would arrive sooner than a restart costs (3 s until one has been measured in the session).
+
+A seek in the first seconds of playback comes before the march has two completions, so there is nothing to decide on and the request waits. That wait is decided again at every completion that lands while it lasts, so the first measurement can still turn it into a restart. Before AE#1128 the request held until AVPlayer timed it out and asked again: 5 s of a 14.5 s landing in the report, and 26 s against 18.7 s to land in the repro (`aetherctl play --seek-after`, see the CLI docs).
+
 ### Seek deadline and recovery
 
 The public `seek(to:)` on the native path waits for AVPlayer's real landing (the first frame shown at the target), so `isSeeking` covers it (#37/#38). The wait is capped at 8 s (#65, #129).

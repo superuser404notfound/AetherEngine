@@ -461,6 +461,59 @@ struct ForwardWaitMarchRateTests {
         #expect(recorder.all.isEmpty)
     }
 
+    /// AE#1128: a seek in the first seconds of playback comes before the march has two completions,
+    /// so the decision is the stock wait. The measurement arrives a moment later and says the march
+    /// is far too slow, but the wait used to hold for its full 30 s until AVPlayer gave up and asked
+    /// again (repro: 8 s of a 13 s landing; reporter's log: 5 s of 14.5 s).
+    @Test("a jump made before any measurement restarts once the march is measured slow",
+          .timeLimit(.minutes(3)))
+    func jumpBeforeMeasurementRestartsOnceMeasuredSlow() {
+        let cache = makeCache()
+        defer { cache.close() }
+        for i in 0...25 { cache.store(index: i, data: Data(repeating: 0xC1, count: 8)) }
+        let recorder = Recorder()
+        let provider = makeProvider(cache: cache, recorder: recorder, producerBase: 0, initialRestartIndex: 0,
+                                    backpressureWait: 30.0)
+        _ = provider.mediaSegment(at: 25)
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.2)
+            self.recordSlowMarch(provider, 18...25)
+        }
+
+        let start = DispatchTime.now()
+        let served = provider.mediaSegment(at: 31)
+
+        #expect(served != nil)
+        #expect(recorder.all == [31])
+        #expect(seconds(since: start) < 10.0)
+    }
+
+    @Test("a jump made before any measurement keeps waiting when the march is measured fast",
+          .timeLimit(.minutes(3)))
+    func jumpBeforeMeasurementWaitsWhenMeasuredFast() {
+        let cache = makeCache()
+        defer { cache.close() }
+        for i in 0...25 { cache.store(index: i, data: Data(repeating: 0xC2, count: 8)) }
+        let recorder = Recorder()
+        let provider = makeProvider(cache: cache, recorder: recorder, producerBase: 0, initialRestartIndex: 0,
+                                    backpressureWait: 30.0)
+        _ = provider.mediaSegment(at: 25)
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.2)
+            self.recordSlowMarch(provider, 18...25, segmentSeconds: 0.1)
+            for i in 26...31 {
+                Thread.sleep(forTimeInterval: 0.1)
+                cache.store(index: i, data: Data(repeating: 0xC3, count: 8))
+                provider.recordMarchStore(index: i, bytes: 34_500_000)
+            }
+        }
+
+        let served = provider.mediaSegment(at: 31)
+
+        #expect(served != nil)
+        #expect(recorder.all.isEmpty)
+    }
+
     // MARK: - Pure pieces
 
     @Test("the march rate is one over the median interval of the active run")

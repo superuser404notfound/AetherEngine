@@ -907,6 +907,9 @@ if first == "play" {
     // shape needs both halves: the burst leaves the store in the state under test, and only the
     // playing half shows what the overlay carries through it.
     let seekCount = takeIntFlag("--seek-count", from: &rest)
+    // AE#1128: the first seek may come before the producer has a measured march rate, which only a
+    // seek in the first seconds of playback reaches. Seeks fire past this tick (default 10).
+    let seekAfter = takeIntFlag("--seek-after", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
     let playForceSW = takeFlag("--sw", from: &rest)
     let playSoftwareEscalation = !takeFlag("--no-sw-escalation", from: &rest)
@@ -1300,7 +1303,7 @@ if first == "play" {
         }
         done.wait()
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, liveCushion: liveCushion, liveJoinAtStart: liveJoinAtStart, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, liveReopenParameter: liveReopenParameter, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, liveCushion: liveCushion, liveJoinAtStart: liveJoinAtStart, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, liveReopenParameter: liveReopenParameter, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, seekAfter: seekAfter, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, servedURL: servedURL, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, nativeVideoFrameDiagnostics: nativeVideoFrameDiagnostics, nativeVideoFrameRecovery: nativeVideoFrameRecovery, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,

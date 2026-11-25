@@ -12,6 +12,15 @@ the public-API contract.
 
 ### Fixed
 
+- **A seek in the first seconds of a slow remote session no longer waits on a march it already
+  knows is too slow (AE#1128).** The provider decides between waiting for the running producer and
+  restarting it at the target from the measured march rate. A seek before the second segment was
+  sealed had no measurement, so it waited, and the measurement that arrived a moment later was never
+  read: the request held until AVPlayer timed it out and asked again. The wait is now decided again
+  at every segment the producer seals. Measured on a 30 Mbit/s H.264 + DTS file over a link at about
+  media rate, a seek to 30 s right after the start landed in 18.7 s instead of 26 s (4 runs each).
+  `aetherctl play` gains `--seek-after N` to put a seek that early.
+
 - **ASS tracks whose events sit in the track header now show their subtitles (AE#1127).** Some
   Matroska muxers write every `Dialogue:` line of an ASS track into its CodecPrivate and no subtitle
   blocks. libass reads them from there, so mpv showed the lines, but the engine only sees blocks and
