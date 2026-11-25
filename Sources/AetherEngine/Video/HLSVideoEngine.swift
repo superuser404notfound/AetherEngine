@@ -2791,6 +2791,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             },
             // #93 residual: the first producer may be anchored at the resume segment; without this
             // the cold-start heuristic (abs(index - lastRestartIndex) > 2) restarts it immediately.
+            // AE#1128: only a keyframe-aligned plan lets the media playlist call its segments independent.
+            segmentsStartOnRandomAccess: planBoundariesClaimRandomAccess,
             initialRestartIndex: initialProducerBaseIndex,
             nativeSubtitleStores: nativeSubtitleCueStoresForSession,
             nativeSubtitleLanguages: nativeSubtitleLanguagesForSession,

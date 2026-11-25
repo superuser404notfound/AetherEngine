@@ -892,6 +892,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// A forward jump inside the wait window waits for the march only while the measured march gets
     /// there sooner than a restart would. Off = the fixed-window rule alone.
     private let decidesForwardWaitByMarchRate: Bool
+    /// The session's plan is keyframe-aligned (`HLSVideoEngine.planBoundariesClaimRandomAccess`).
+    let segmentsStartOnRandomAccess: Bool
     /// How long a restart decision for a burst press waits for a newer target before it fires, so the
     /// presses after the first restart once, at the last one. Longer than a remote's repeat gap.
     /// Read per press, so a test can hold the earlier presses of a burst without a deadline and
@@ -1153,6 +1155,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         producerFinished: (() -> Bool)? = nil,
         sourceBytesFetched: (() -> Int64)? = nil,
         decidesForwardWaitByMarchRate: Bool = true,
+        segmentsStartOnRandomAccess: Bool = false,
         marchRateSettleSeconds: TimeInterval = 0.7,
         marchRateBurstWindowSeconds: TimeInterval = 1.5,
         initialRestartIndex: Int = 0,
@@ -1211,6 +1214,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.producerFinished = producerFinished
         self.sourceBytesFetched = sourceBytesFetched
         self.decidesForwardWaitByMarchRate = decidesForwardWaitByMarchRate
+        self.segmentsStartOnRandomAccess = segmentsStartOnRandomAccess
         self._marchRateSettleSeconds = marchRateSettleSeconds
         self.marchRateBurstWindowSeconds = marchRateBurstWindowSeconds
         self._lastRestartIndex = initialRestartIndex

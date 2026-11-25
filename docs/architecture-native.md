@@ -134,6 +134,8 @@ The producer follows the plan with `VODSegmentCutter`, a cut in decode order tha
 
 Background: [measurements.md, Segment cutting by decode time](measurements.md#segment-cutting-by-decode-time).
 
+**Both playlists say so.** A VOD media playlist on a keyframe-aligned plan carries `EXT-X-INDEPENDENT-SEGMENTS`, as the master always did. The engine hands AVPlayer the media playlist directly whenever it needs no master (most SDR H.264 films: no HDR, no subtitle or audio rendition). Without the tag there, AVPlayer assumed a segment could depend on the one before it and began every exact seek 1 to 3 segments early, more for a longer GOP. A seek to 60 s on 4 s segments asked seg13 instead of seg15 at a 2 s GOP, and on a 6 Mbit/s link a 4 s GOP file landed in 17 s instead of 7.7 s (AE#1128). A plan without a usable keyframe index (MPEG-TS, a remote MKV whose Cues could not be read, a sequential archive) does not carry it either. Its uniform grid opens a segment at the first keyframe past the boundary, up to a GOP late, so the frames before that keyframe sit in the segment before. Live playlists do not carry it, because a live cut can be forced (an ad seam) and a join starts mid-GOP.
+
 **Which timestamp "reaches" a boundary depends on the container.** The plan's boundaries are the container's own index entries, and containers disagree on what an entry means:
 
 - a mov/mp4 sample table holds decode times,
