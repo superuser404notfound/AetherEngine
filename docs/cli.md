@@ -573,7 +573,8 @@ Other lines `play` prints:
 | `--start-position S` | Resume anchor, see [Shared flags](#shared-flags). Also judged, see [Resume landing](#resume-landing-ae724). | none |
 | `--paused` | Mounts with `autoplay = false`. | off |
 | `--host-calls <list>` | Replays host calls against the session. See [Host calls](#host-calls). | none |
-| `--seek-every N` | Seeks once every N ticks past tick 10. | off |
+| `--seek-every N` | Seeks once every N ticks past tick 10 (or past `--seek-after`). | off |
+| `--seek-after N` | The tick the seeks start after. | 10 |
 | `--seek-pattern <abs,...>` | Absolute targets `--seek-every` walks through. | a short backward hop |
 | `--seek-count K` | Stops after K seeks. | unlimited |
 | `--throttle-kbps N` | See [Shared flags](#shared-flags). | no cap |
@@ -796,6 +797,16 @@ Fetch the init segment only. A second client asking for the playlist or for segm
 ### Seek bursts (`--seek-every`)
 
 `--seek-every N` seeks once every N ticks past tick 10. It walks `--seek-pattern <abs,abs,...>` if given, otherwise it makes a short backward hop. `--seek-count K` stops after K seeks, so a run can be a BURST and then play.
+
+`--seek-after N` moves the first seek earlier (or later) than tick 10. Tick 10 is late enough that the producer has always measured its march rate by then, so a seek in the first seconds of playback, which decides on no measurement, needs an earlier tick. This is the AE#1128 shape, with the playing check one tick after `readyToPlay` so AVPlayer is not still holding a deferred seek:
+
+```bash
+python3 Scripts/slowrange.py dts30.mkv 8829 48000 0.3 &   # 30 Mbit/s source, 48 Mbit/s link
+aetherctl play --seconds 25 --seek-after 4 --seek-every 1 --seek-count 1 --seek-pattern 30 \
+  http://127.0.0.1:8829/dts30.mkv
+```
+
+The log shows `march-rate wait reason=no-measurement` for the seek, then `march-rate restart (...) branch=c-revisit` once the march has two completions.
 
 You need both halves to study what a seek sequence leaves behind. The burst puts the store in the state under test, and only the playing half shows what the overlay carries through it. This pairing reproduces AE#362's second mechanism: a hole between a restarted pump and the island the previous run left ahead of it, decoded across and then never re-read.
 
