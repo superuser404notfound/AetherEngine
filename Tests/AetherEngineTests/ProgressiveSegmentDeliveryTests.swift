@@ -209,11 +209,11 @@ struct ProgressiveSegmentDeliveryTests {
 
     // MARK: - Option
 
-    @Test("the option is off by default and a tuning field, not an identity one")
+    @Test("the option is on by default and a tuning field, not an identity one")
     func optionDefaults() {
-        #expect(!LoadOptions().progressiveSegmentDelivery)
+        #expect(LoadOptions().progressiveSegmentDelivery)
         var proposed = LoadOptions()
-        proposed.progressiveSegmentDelivery = true
+        proposed.progressiveSegmentDelivery = false
         #expect(SessionOptionCorrection.refusedFields(from: LoadOptions(), to: proposed).isEmpty)
     }
 

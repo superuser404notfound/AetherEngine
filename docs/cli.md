@@ -656,7 +656,7 @@ Other lines `play` prints:
 | `--sequential-origin` | `LoadOptions.sequentialOrigin` (#346, AE#958). | off |
 | `--declared-duration S` | `LoadOptions.declaredDurationSeconds`. Needed with `--sequential-origin` on VOD. | none |
 | `--held-connection` | `LoadOptions.heldSourceConnection` (#377). | off |
-| `--progressive-segments` | `LoadOptions.progressiveSegmentDelivery`. | off |
+| `--no-progressive-segments` | Sets `LoadOptions.progressiveSegmentDelivery` to false. `--progressive-segments` is still accepted and changes nothing. | on |
 | `--forward-buffer-segments N` | `LoadOptions.forwardBufferSegments`. `2700` is the opt-in whole-source prefetch. | engine default |
 | `--session-cache-mb N` | `LoadOptions.sessionCacheByteBudget`, in MiB. | engine default |
 | `--max-concurrent-requests N` | `LoadOptions.maxConcurrentSourceRequests` (#377). See [Shared flags](#shared-flags). | engine default |
@@ -1118,7 +1118,9 @@ With `--frame-times` the output reads `ft=24` a second and the `[SWDiag]` lines 
 - The engine's own repositions onto segment 0 right after the open still cost one connection each.
 - Slow-origin case: serve 11 MB HEVC-in-TS segments from a keep-alive origin at 200 KB/s shared across its connections. Each segment then takes about 58 s, longer than the 45 s cap a whole exchange had before #732.
 
-**`--progressive-segments`** sets `LoadOptions.progressiveSegmentDelivery`: each VOD segment is served while it is written. Run it against a throttled origin and compare the `FIRSTFRAME` and first `PHASE playing` times with and without the flag. The session log shows `serving while it is written` for every segment that went out that way. On a local or fast source the segments are cut before AVPlayer asks, and the two runs look the same.
+**`--no-progressive-segments`** turns off `LoadOptions.progressiveSegmentDelivery`, which is on by default since AE#1129. Each VOD segment is then served only once it is cut. Run both arms against a throttled origin and compare the `FIRSTFRAME` and first `PHASE playing` times. The session log shows `serving while it is written` for every segment that went out progressively. On a local or fast source the segments are cut before AVPlayer asks, and the two runs look the same.
+
+Measured for AE#1129 on a Mac: HEVC Main 10 1440x1080 with FLAC at 8 Mbit/s, first keyframes at 0 and 10.677 s, behind a 25 Mbit/s origin with 150 ms per request. Off, the first frame came at 5.8 s and playback at 5.8 s. On, they came at 1.9 s and 2.8 s. Three runs per arm, all within 0.2 s.
 
 **`--forward-buffer-segments 2700 --session-cache-mb N`** turns on the whole-source prefetch, which is what leaves a resident band behind a resume. Rewinding before the resume point is the AE#1109 repro: serve the file over HTTP, then
 

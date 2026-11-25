@@ -1051,9 +1051,11 @@ if first == "play" {
     // drain cycle. This is the knob for an origin that refuses new requests in windows: run it
     // against one and count the ranges in its own log, or read `conn start ... held` here.
     let heldConnection = takeFlag("--held-connection", from: &rest)
-    // LoadOptions.progressiveSegmentDelivery: serve each VOD segment while it is written. Pair it
-    // with a throttled origin to see the startup difference; on a fast source nothing changes.
-    let progressiveSegments = takeFlag("--progressive-segments", from: &rest)
+    // LoadOptions.progressiveSegmentDelivery, on by default since AE#1129. --no-progressive-segments
+    // is the other arm of an A/B against a throttled origin; --progressive-segments stays accepted
+    // so older recipes still parse.
+    _ = takeFlag("--progressive-segments", from: &rest)
+    let progressiveSegments = !takeFlag("--no-progressive-segments", from: &rest)
     // AE#1109: the opt-in whole-source prefetch, which is what leaves a resident band behind a
     // resume for a backward seek to restart under.
     PlayCacheOverrides.forwardBufferSegments = takeIntFlag("--forward-buffer-segments", from: &rest)

@@ -1243,9 +1243,12 @@ public struct LoadOptions: Sendable, Equatable {
     /// waiting for all of it. On a fast or local source a segment is cut long before AVPlayer asks
     /// for it and nothing changes; on a slow link it is the difference between waiting for a whole
     /// segment (seconds of a long GOP at the link's rate) and waiting for its first fragment.
-    /// Default false. VOD only: live keeps its own window and blocking-reload contracts. Ignored for
-    /// `nativeRemoteHLS` and on the software path, which serve no loopback segments.
-    public var progressiveSegmentDelivery: Bool = false
+    /// Default true since AE#1129: a source whose first keyframe interval is 10 s made every start
+    /// wait for that whole first segment (5.8 s to the first frame at 25 Mbit/s, 1.9 s with this on).
+    /// Set false to serve each segment only once it is cut. VOD only: live keeps its own window and
+    /// blocking-reload contracts. Ignored for `nativeRemoteHLS` and on the software path, which
+    /// serve no loopback segments.
+    public var progressiveSegmentDelivery: Bool = true
 
     /// Autostart at load completion. Default `true`: every load path ends in `host.play()` and a
     /// `.playing` state (current behavior, byte-identical). Set `false` to mount PAUSED: a host that
@@ -1441,7 +1444,7 @@ public struct LoadOptions: Sendable, Equatable {
         sessionCacheFreeReserveBytes: Int = 0,
         softwarePacketCacheStorage: SoftwarePacketCacheStorage = .automatic,
         retainsSessionCacheAfterStop: Bool = false,
-        progressiveSegmentDelivery: Bool = false,
+        progressiveSegmentDelivery: Bool = true,
         autoplay: Bool = true,
         teletextPage: Int? = nil,
         audioDelaySeconds: Double = 0,
