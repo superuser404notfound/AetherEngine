@@ -39,6 +39,11 @@ final class DocumentedConstantsTests: XCTestCase {
                          try documentation())
     }
 
+    func testLiftedHeaderEventCeilingMatchesDocumentation() throws {
+        XCTAssertEqual(ASSHeaderEvents.maxPayloadBytesPerTrack, 4 * 1024 * 1024)
+        assertDocumented("At most 4 MB of event text per track is lifted", try documentation())
+    }
+
     func testLazyFragmentProbeCheckMatchesDocumentation() throws {
         XCTAssertEqual(FragmentedMP4RandomAccess.checkedEntries, 4)
         assertDocumented("the probe reads up to four of the `moof`s the entries name", try documentation())

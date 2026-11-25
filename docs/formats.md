@@ -1209,6 +1209,21 @@ What a host sees:
 
 How the harvest, the packet store, the drain and the prefetcher work: [architecture › Subtitle cue pipeline](architecture-native.md#subtitle-cue-pipeline).
 
+#### ASS events stored in the track header (AE#1127)
+
+Some Matroska muxers write every event of an ASS track into its CodecPrivate (the `[Events]` section with all its `Dialogue:` lines) and no subtitle blocks at all. libass reads events from the header, so mpv shows them. libavformat only turns blocks into packets, so the track used to deliver nothing (`packets=0` on the `#357 subtitle-delivery` line).
+
+The engine now lifts those lines out of the header when the track is opened:
+
+- Each line becomes a packet in Matroska block form and joins the session's packet store, so the overlay drains it like any harvested packet. On the native route the same events also fill the WebVTT rendition.
+- A sidecar container with such a track (an `.mks`, or a container URL with `sourceStreamIndex`) decodes them the same way.
+- The lines are removed from `TrackInfo.assHeader` and `sidecarASSHeader`, so a host rendering the header with libass does not draw each one twice.
+- Only lines inside `[Events]` are lifted. Their fields are found through the section's `Format:` line and rewritten into the fixed Matroska block order.
+- At most 4 MB of event text per track is lifted. A full film is around 150 KB, a heavily typeset episode a few MB. Lines past the ceiling stay in the header, so a libass host still draws them.
+- A track that carries the same events as blocks too does not show them twice. The lifted packets are numbered like mkvmerge numbers its blocks, so the two copies are byte-identical and the packet store keeps one.
+
+`aetherctl play --subs ass <file>` shows the `CUE` lines arriving.
+
 #### Sidecar fetch (AE#984)
 
 Sidecars are fetched once. A text sidecar over HTTP (SRT, WebVTT, ASS/SSA, by extension or `formatHint`) is one plain GET for the whole body. The engine waits up to 120 s without a byte for it, then decodes it locally. So a server that extracts the stream before it answers still delivers. Container and `.sup` sidecars stay on the source reader.
@@ -1619,7 +1634,7 @@ Measured on a 970 MB MKV with 14 fonts and about 5 Mbit/s of video and audio, ov
 
 **Where the header arrives (AetherEngine#48).**
 
-- Embedded tracks carry it on `TrackInfo.assHeader`.
+- Embedded tracks carry it on `TrackInfo.assHeader`. `Dialogue:` lines a muxer left in it are taken out and arrive as cues instead ([ASS events stored in the track header](#ass-events-stored-in-the-track-header-ae1127)).
 - External `.ass` / `.ssa` sidecars loaded through `selectSidecarSubtitle(url:)` under the same `preserveASSMarkup` flag carry it on `engine.sidecarASSHeader` (extracted from the file's subtitle-stream extradata; nil for SRT / VTT and when preservation is off).
 
 Both pair with the raw event-line cues the same way.

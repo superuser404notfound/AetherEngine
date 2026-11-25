@@ -160,10 +160,21 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
         }
     }
 
+    /// AE#1127: true for the first caller only, so a route rebuild does not decode a track's header
+    /// events into the same store again.
+    private var headerEventsClaimed = false
+    func claimHeaderEventFill() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if headerEventsClaimed { return false }
+        headerEventsClaimed = true
+        return true
+    }
+
     func clear() {
         lock.lock()
         cues.removeAll(keepingCapacity: false)
         seenKeys.removeAll(keepingCapacity: false)
+        headerEventsClaimed = false
         maxCueEndSeconds = 0
         finished = false
         lock.unlock()
