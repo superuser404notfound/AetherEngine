@@ -906,6 +906,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private var _marchTracker = MarchRateTracker()
     /// Completions recorded so far, so a waiting fetch can tell a new measurement arrived. Guarded by stateLock.
     private var _marchStoreCount = 0
+    /// Decisions a forward wait made again on a new completion (AE#1128). Guarded by stateLock.
+    private var _marchRevisitDecisions = 0
     /// Seconds from the last provider-fired restart to its target's first bytes. Guarded by stateLock.
     private var _lastRestartCostSeconds: Double?
     /// The declared target the current one replaced. Recorded where the target changes, because the
@@ -2044,6 +2046,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 // nor a march-rate decision, and rode the march (Apple TV, 70 Mbps link: 20.5 s in a remote burst).
                 let front = activeMarchFront
                 if !isLive, decidesForwardWaitByMarchRate {
+                    let storesAtDecision = marchStoreCount
                     let decision = index <= front + waitWindow
                         ? marchRateDecision(index: index, front: front, branch: "b")
                         : settleRestartPastWindow(index: index, branch: "b")
@@ -2051,6 +2054,20 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                         return logServed(index: index, source: served, totalStart: totalStart, restarted: false)
                     }
                     marchTooSlow = decision.restart
+                    // The restart loop below would ride the march with the restart vetoed, so a
+                    // measurement arriving meanwhile is read here first, for one reposition slice.
+                    // After that the loop and its orphan backstop take over as before.
+                    if decision.revisit {
+                        switch waitRevisitingMarchRate(index: index, storesAtDecision: storesAtDecision,
+                                                       budget: repositionWaitSlice, branch: "b-revisit") {
+                        case .served(let source):
+                            return logServed(index: index, source: source, totalStart: totalStart, restarted: false)
+                        case .restart:
+                            marchTooSlow = true
+                        case .timedOut, .closed:
+                            break
+                        }
+                    }
                 }
             } else if index >= r.0 && index <= r.1 {
                 // min...max is not proof of residency: retained scrub bands leave interior holes.
@@ -2110,7 +2127,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                     marchTooSlow = decision.restart
                     if decision.revisit {
                         switch waitRevisitingMarchRate(index: index, storesAtDecision: storesAtDecision,
-                                                       branch: "c-revisit") {
+                                                       budget: forwardBackpressureWaitSeconds, branch: "c-revisit") {
                         case .served(let source):
                             clearForwardWaitMiss()
                             return logServed(index: index, source: source, totalStart: totalStart, restarted: false)
@@ -2118,6 +2135,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                             marchTooSlow = true
                         case .timedOut:
                             recordForwardWaitMiss(index: index, front: activeMarchFront)
+                            return logServed(index: index, source: nil, totalStart: totalStart, restarted: false)
+                        case .closed:
+                            // Teardown, not a wait that saw no progress: no #169 miss.
                             return logServed(index: index, source: nil, totalStart: totalStart, restarted: false)
                         }
                     }
@@ -2270,6 +2290,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return _marchStoreCount
     }
 
+    var marchRevisitDecisionsForTesting: Int {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _marchRevisitDecisions
+    }
+
     /// Pure decision: seconds until the march starts writing `index` (it is writing `writingIndex`
     /// now, `secondsSinceLastStore` into it) against what a restart costs. Waiting wins only when the
     /// march gets there first; a restart lands on any distance for about the same price.
@@ -2285,12 +2310,15 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// a burst of presses fires once, for the press that stayed the newest.
     /// `revisit`: the wait was decided on no measurement, or on a march that was fast enough at the time,
     /// so a later completion may still turn it into a restart (`waitRevisitingMarchRate`).
-    private func marchRateDecision(index: Int, front: Int, branch: String)
+    /// A revisit (`isRevisit`) is not a press: it neither settles as part of a burst nor stamps
+    /// `_lastJump`, and it logs only a verdict that ends the wait.
+    private func marchRateDecision(index: Int, front: Int, branch: String, isRevisit: Bool = false)
         -> (restart: Bool, served: SegmentSource?, revisit: Bool) {
-        switch marchVerdict(index: index, front: front, branch: branch) {
+        switch marchVerdict(index: index, front: front, branch: branch, logsWait: !isRevisit) {
         case .stock: return (false, nil, false)
         case .unmeasured, .wait: return (false, nil, true)
         case .restart:
+            if isRevisit { return (true, nil, false) }
             let settled = settleRestart(index: index, branch: branch)
             return (settled.restart, settled.served, false)
         }
@@ -2300,6 +2328,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         case served(SegmentSource)
         case restart
         case timedOut
+        case closed
     }
 
     /// How often a forward wait looks for a new march completion to decide again on.
@@ -2309,9 +2338,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// seek in the first seconds of playback comes before the march has two completions, so it waited
     /// on no measurement, and the one that arrived a moment later (0.35 segments per second against a
     /// target 6 ahead) was never read: the fetch held until AVPlayer timed it out and asked again,
-    /// which was 5 of a 14.5 s landing in the report and 8 of 13 s in the repro.
-    private func waitRevisitingMarchRate(index: Int, storesAtDecision: Int, branch: String) -> RevisitedWait {
-        let deadline = DispatchTime.now() + forwardBackpressureWaitSeconds
+    /// which was 5 s of a 14.5 s landing in the report. In the repro the seek landed in 18.7 s instead of 26 s.
+    private func waitRevisitingMarchRate(index: Int, storesAtDecision: Int, budget: TimeInterval,
+                                         branch: String) -> RevisitedWait {
+        let deadline = DispatchTime.now() + budget
         var seen = storesAtDecision
         var revisits = true
         while true {
@@ -2322,11 +2352,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             if let source = cache.fetchSource(index: index, timeout: slice, progressive: fetchesProgressively) {
                 return .served(source)
             }
-            if cache.isClosed { return .timedOut }
+            if cache.isClosed { return .closed }
             let stores = marchStoreCount
             guard revisits, stores != seen else { continue }
             seen = stores
-            let decision = marchRateDecision(index: index, front: activeMarchFront, branch: branch)
+            stateLock.lock(); _marchRevisitDecisions += 1; stateLock.unlock()
+            let decision = marchRateDecision(index: index, front: activeMarchFront, branch: branch, isRevisit: true)
             if let served = decision.served { return .served(served) }
             if decision.restart { return .restart }
             revisits = decision.revisit
@@ -2385,7 +2416,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         case restart
     }
 
-    private func marchVerdict(index: Int, front: Int, branch: String) -> MarchVerdict {
+    private func marchVerdict(index: Int, front: Int, branch: String, logsWait: Bool = true) -> MarchVerdict {
         // Guards: the newest declared target, and a forward jump rather than the next segment of
         // sequential playback (anything past the next one: a remote burst steps 2 to 3 segments at a
         // time, which a wider guard read as playback). Anything else keeps the 7.50.0 wait.
@@ -2414,6 +2445,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let budget = _lastRestartCostSeconds ?? Self.marchRateDefaultBudgetSeconds
         stateLock.unlock()
         guard let estimate else {
+            guard logsWait else { return .unmeasured }
             EngineLog.emit(
                 "[HLSVideoEngine] seg\(index): march-rate wait reason=no-measurement (front=\(front)) branch=\(branch)",
                 category: .session)
@@ -2427,6 +2459,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let decision = Self.marchRateRestarts(
             distance: index - writing, rate: estimate.rate,
             secondsSinceLastStore: sinceStore, budgetSeconds: budget)
+        guard decision.restart || logsWait else { return .wait }
         EngineLog.emit(
             "[HLSVideoEngine] seg\(index): march-rate \(decision.restart ? "restart" : "wait") "
             + "(front=\(front) writing=\(writing) d=\(index - front) "
