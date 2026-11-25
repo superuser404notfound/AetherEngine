@@ -1742,6 +1742,7 @@ final class SoftwarePlaybackHost {
         // #112: split-PES PGS streams (MPEG-TS) need display-set reassembly in the packet
         // store; the tap sink consults this per packet.
         self.splitDisplaySetSubtitleStreamIndices = dem.splitDisplaySetSubtitleStreamIndices()
+        subtitleHeaderEventSink?(dem.subtitleTrackInfos())
 
         // AudioOutput owns the AVSampleBufferRenderSynchronizer (master clock). Created unconditionally: video-only previously got no clock (frozen frame, currentTime=0). Layer attached in play() after the engine hangs it in the view hierarchy (attaching free-floating fails FigVideoQueueRemote -12080 on tvOS 26+).
         let audioOutput = AudioOutput()
@@ -1982,6 +1983,9 @@ final class SoftwarePlaybackHost {
     /// the packet pointer never escapes the demux thread. The trailing Bool marks packets of
     /// split-PES PGS streams (MPEG-TS) that need display-set reassembly in the store.
     nonisolated(unsafe) var subtitleTapSink: (@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?
+    /// AE#1127: handed the subtitle tracks once at load, before the demux loop starts, so the events a
+    /// muxer left in a track's header reach the session's packet store.
+    nonisolated(unsafe) var subtitleHeaderEventSink: (@Sendable ([TrackInfo]) -> Void)?
 
     /// #112 rework: embedded subtitle stream indices + time bases, captured at load before the
     /// demux loop starts (the SW host applies no stream discard, so these packets already flow).

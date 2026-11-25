@@ -1783,6 +1783,7 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     public internal(set) var isDTSX: Bool
 
     /// ASS / SSA tracks only: `[Script Info]` + `[V4+ Styles]` + `[Events]` format line from codec extradata. Hosts rendering ASS styling themselves (see `LoadOptions.preserveASSMarkup`) need it to resolve style references. nil for all other track kinds.
+    /// `Dialogue:` lines a muxer left in the extradata are not part of it; they reach the host as cues (AE#1127).
     public let assHeader: String?
 
     /// True for host-registered external subtitle tracks (AetherEngine#88); their `id` is synthetic
@@ -1815,6 +1816,8 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// AE#1050: the title the container or the host gave the track, nil when `name` is the engine's own
     /// fallback ("ENG (subrip)", "Track 3 (subrip)"). Native subtitle renditions name themselves from it.
     var sourceTitle: String? = nil
+    /// AE#1127: the events this track's muxer wrote into the header instead of into blocks.
+    var headerEvents: [ASSHeaderEvent] = []
 
     public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isVisualImpaired: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil, isDTSX: Bool = false) {
         self.sampleRate = sampleRate

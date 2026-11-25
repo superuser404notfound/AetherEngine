@@ -2575,6 +2575,7 @@ public final class Demuxer: @unchecked Sendable {
         // ASS/SSA codec extradata = script header ([Script Info] + [V4+ Styles] +
         // [Events] format line). Surfaced for LoadOptions.preserveASSMarkup hosts.
         var assHeader: String? = nil
+        var headerEvents: [ASSHeaderEvent] = []
         let codecID = codecpar.pointee.codec_id
         let isAudio = codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO
         if codecID == AV_CODEC_ID_ASS || codecID == AV_CODEC_ID_SSA,
@@ -2583,8 +2584,9 @@ public final class Demuxer: @unchecked Sendable {
             let bytes = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
             // MKV CodecPrivate is frequently NUL-terminated; strip NULs so libass
             // (C-string-style parser) doesn't silently stop before host-appended content.
-            assHeader = String(data: bytes, encoding: .utf8)?
-                .replacingOccurrences(of: "\0", with: "")
+            if let text = String(data: bytes, encoding: .utf8)?.replacingOccurrences(of: "\0", with: "") {
+                (assHeader, headerEvents) = ASSHeaderEvents.split(text)
+            }
         }
 
         var info = TrackInfo(
@@ -2608,6 +2610,7 @@ public final class Demuxer: @unchecked Sendable {
             profile: VideoStreamFormat.profileName(codecID: codecID, profile: codecpar.pointee.profile)
         )
         if let title, !title.isEmpty { info.sourceTitle = title }
+        info.headerEvents = headerEvents
         return info
     }
 

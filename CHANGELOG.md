@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **ASS tracks whose events sit in the track header now show their subtitles (AE#1127).** Some
+  Matroska muxers write every `Dialogue:` line of an ASS track into its CodecPrivate and no subtitle
+  blocks. libass reads them from there, so mpv showed the lines, but the engine only sees blocks and
+  delivered no cue at all (`packets=0`). The engine now lifts those lines out of the header at open
+  and feeds them to the session as packets, on the native and the software route, into the native
+  WebVTT rendition, and for sidecar containers. They are also removed from `TrackInfo.assHeader`, so
+  a host that renders the header with libass does not draw them twice.
+
 - **`.rebuffering` no longer shows up while the software clock is still running.** The software
   host published `isRebuffering` before it paused the synchronizer, and the flag travels to the main
   actor on its own hop, so a reader there could see the hold a moment before the clock stopped. The

@@ -543,6 +543,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let w = savedVideoConfig.map { Int32($0.codecpar.pointee.width) } ?? 1920
         let h = savedVideoConfig.map { Int32($0.codecpar.pointee.height) } ?? 1080
         let pq = savedVideoConfig?.codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
+        let headerEvents = Dictionary(
+            dem.subtitleTrackInfos().filter { !$0.headerEvents.isEmpty }.map { (Int32($0.id), $0.headerEvents) },
+            uniquingKeysWith: { first, _ in first })
         for (ordinal, sidx) in nativeSubtitleSourceStreamIndicesForSession.enumerated() {
             guard let sidx, ordinal < nativeSubtitleCueStoresForSession.count else { continue }
             // Audit DMX-108: see `makeOverlayDecoder`.
@@ -555,7 +558,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
                                         teletextPage: teletextPageForSubtitleTap)
             }
             guard let decoder = made ?? nil else { continue }
-            subtitleTapRoutes[sidx] = (decoder, nativeSubtitleCueStoresForSession[ordinal])
+            let store = nativeSubtitleCueStoresForSession[ordinal]
+            subtitleTapRoutes[sidx] = (decoder, store)
+            // AE#1127: the pump never sees these events, so the rendition gets them here. The store
+            // drops a cue it already holds, so a rebuild adds nothing twice.
+            for event in headerEvents[sidx] ?? [] {
+                let packet = StoredSubtitlePacket(ptsSeconds: event.startSeconds,
+                                                  durationSeconds: event.durationSeconds,
+                                                  flags: 0, payload: event.payload)
+                if let decoded = AetherEngine.decodeStoredSubtitlePacket(packet, with: decoder),
+                   !decoded.cues.isEmpty {
+                    store.appendCues(decoded.cues)
+                }
+            }
         }
         if !subtitleTapRoutes.isEmpty {
             EngineLog.emit(
@@ -2342,6 +2357,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
         }
         adoptParkedSegmentsIfPlanMatches(plan: plan, cache: segmentCache)
+        // AE#1127: after the adoption, which replaces the store's contents wholesale.
+        subtitlePacketStore.seedHeaderEvents(from: dem.subtitleTrackInfos())
 
         // Fallback duration from avg_frame_rate for MKVs that drop TrackEntry DefaultDuration
         // (HandBrake/web-rip pipelines). Without it, trun.last.duration=0 and AVPlayer parks on

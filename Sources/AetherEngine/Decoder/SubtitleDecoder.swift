@@ -175,6 +175,8 @@ enum SubtitleDecoder {
         let keepMarkup: Bool
         let assPlayRes: CGSize
         let assHeader: String?
+        /// AE#1127: events the muxer left in the header; decoded like packets after the read loop.
+        let headerEvents: [ASSHeaderEvent]
         let codedWidth: Int
         let codedHeight: Int
 
@@ -203,12 +205,16 @@ enum SubtitleDecoder {
             let isASS = codecID == AV_CODEC_ID_ASS || codecID == AV_CODEC_ID_SSA
             let keepMarkup = preserveASSMarkup && isASS
             var assHeader: String? = nil
+            var headerEvents: [ASSHeaderEvent] = []
             var assPlayRes = SubtitleRectText.defaultASSPlayRes
             if let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
                 let bytes = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
                 // Strip NUL bytes: extradata is often NUL-terminated; libass parses C-string-style and a NUL hides everything after it.
-                let header = String(data: bytes, encoding: .utf8)?
+                var header = String(data: bytes, encoding: .utf8)?
                     .replacingOccurrences(of: "\0", with: "")
+                if isASS, let text = header {
+                    (header, headerEvents) = ASSHeaderEvents.split(text)
+                }
                 if keepMarkup { assHeader = header }
                 // #233: a real ASS script declares the space its \pos coordinates live in; without one
                 // the line came from libavcodec's own conversion and uses the 384x288 default.
@@ -239,6 +245,7 @@ enum SubtitleDecoder {
             self.keepMarkup = keepMarkup
             self.assPlayRes = assPlayRes
             self.assHeader = assHeader
+            self.headerEvents = headerEvents
             self.codedWidth = Int(codecpar.pointee.width)
             self.codedHeight = Int(codecpar.pointee.height)
         }
@@ -251,6 +258,30 @@ enum SubtitleDecoder {
         // Under preserveASSMarkup: keep raw ASS event line (ASSScriptBuilder re-stamps timing); otherwise plain text.
         private func line(for rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {
             keepMarkup ? SubtitleRectText.rawASSLine(for: rect) : SubtitleRectText.plainText(for: rect)
+        }
+
+        /// AE#1127: the header's events as packets on the stream's own time base.
+        func decodeHeaderEvents() {
+            guard !headerEvents.isEmpty, tbSec > 0, let pkt = av_packet_alloc() else { return }
+            defer {
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                av_packet_free(&p)
+            }
+            for event in headerEvents {
+                guard !limitExceeded, !decodeFailed,
+                      let pts = SourceTimestampBounds.roundedTicks(event.startSeconds / tbSec),
+                      av_new_packet(pkt, Int32(event.payload.count)) >= 0 else { continue }
+                event.payload.withUnsafeBytes { raw in
+                    if let base = raw.baseAddress, let dst = pkt.pointee.data {
+                        memcpy(dst, base, event.payload.count)
+                    }
+                }
+                pkt.pointee.pts = pts
+                pkt.pointee.dts = pts
+                pkt.pointee.duration = max(0, SourceTimestampBounds.roundedTicks(event.durationSeconds / tbSec) ?? 0)
+                decode(packet: pkt)
+                av_packet_unref(pkt)
+            }
         }
 
         func decode(packet pkt: UnsafeMutablePointer<AVPacket>) {
@@ -563,6 +594,7 @@ enum SubtitleDecoder {
         }
 
         for decoder in decodersByStream.values {
+            decoder.decodeHeaderEvents()
             decoder.flush(cancel: cancel)
             if decoder.limitExceeded { throw SubtitleDecoderError.textLimitExceeded }
             if preparationPolicy != nil && decoder.decodeFailed { throw SubtitleDecoderError.openFailed(code: -1) }

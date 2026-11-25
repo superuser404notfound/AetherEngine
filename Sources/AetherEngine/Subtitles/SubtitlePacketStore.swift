@@ -114,6 +114,9 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// this store gives is only as good as the reading behind it. See `SubtitleHarvestCoverage`.
     private var coverage = SubtitleHarvestCoverage()
     private var protectedStreams: Set<Int32> = []
+    /// AE#1127: streams holding events lifted from their header. No reader ever harvests those
+    /// again, so aggregate pressure must not evict them; `ASSHeaderEvents` bounds their size.
+    private var seededStreams: Set<Int32> = []
     private var lastTouchByStream: [Int32: UInt64] = [:]
     private var touchCounter: UInt64 = 0
 
@@ -136,6 +139,20 @@ final class SubtitlePacketStore: @unchecked Sendable {
     func setProtectedStreams(_ indices: Set<Int32>) {
         lock.lock(); defer { lock.unlock() }
         protectedStreams = indices
+    }
+
+    /// AE#1127: store the events a muxer left in each track's header, as packets of their stream.
+    /// Idempotent: a repeat collapses on the byte-identical payload like any re-harvest.
+    func seedHeaderEvents(from tracks: [TrackInfo]) {
+        lock.lock(); defer { lock.unlock() }
+        for track in tracks where !track.headerEvents.isEmpty {
+            let streamIndex = Int32(track.id)
+            seededStreams.insert(streamIndex)
+            for event in track.headerEvents {
+                appendLocked(streamIndex: streamIndex, ptsSeconds: event.startSeconds,
+                             durationSeconds: event.durationSeconds, flags: 0, payload: event.payload)
+            }
+        }
     }
 
     // MARK: - #416: harvest coverage
@@ -325,7 +342,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         var streams = Set(bytesByStream.keys)
         for key in pendingSetByStream.keys { streams.insert(key.streamIndex) }
         let candidates = streams
-            .filter { !protectedStreams.contains($0) && $0 != justTouched }
+            .filter { !protectedStreams.contains($0) && !seededStreams.contains($0) && $0 != justTouched }
             .sorted { (lastTouchByStream[$0] ?? 0) < (lastTouchByStream[$1] ?? 0) }
         for idx in candidates {
             guard totalBytes > lowWater else { break }
@@ -571,6 +588,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         let touchCount = other.touchCounter
         let appendCount = other.appendCounter
         let harvested = other.coverage
+        let seeded = other.seededStreams
         other.lock.unlock()
         lock.lock(); defer { lock.unlock() }
         entriesByStream = entries
@@ -581,6 +599,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         touchCounter = touchCount
         appendCounter = appendCount
         coverage = harvested
+        seededStreams = seeded
         totalBytes = bytes.values.reduce(0, +)
     }
 
@@ -592,6 +611,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         payloadHashesByRun.removeAll()
         lastTouchByStream.removeAll()
         protectedStreams.removeAll()
+        seededStreams.removeAll()
         totalBytes = 0
         touchCounter = 0
         appendCounter = 0
