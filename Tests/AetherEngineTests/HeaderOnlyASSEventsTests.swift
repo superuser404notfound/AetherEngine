@@ -44,15 +44,27 @@ struct HeaderOnlyASSEventsTests {
         #expect(ASSHeaderEvents.split(elsewhere) == (elsewhere, []))
     }
 
-    @Test("the Format line decides where Start and End sit, and CRLF headers split per line",
+    @Test("any Format line order becomes the fixed Matroska block layout, and CRLF headers split per line",
           .timeLimit(.minutes(3)))
     func followsTheFormatLine() throws {
         let header = "[Events]\r\nFormat: Start, End, Style, Text\r\nDialogue: 0:01:00.50,0:01:02.00,Default,a,b\r\n"
         let (stripped, events) = ASSHeaderEvents.split(header)
         try #require(events.count == 1)
         #expect(events[0].startSeconds == 60.5 && events[0].durationSeconds == 1.5)
-        #expect(String(decoding: events[0].payload, as: UTF8.self) == "0,Default,a,b")
+        #expect(String(decoding: events[0].payload, as: UTF8.self) == "0,0,Default,,0,0,0,,a,b")
         #expect(stripped == "[Events]\nFormat: Start, End, Style, Text\n")
+
+        let ssa = "[Events]\nFormat: Marked, Start, End, Actor, Style, MarginL, MarginR, MarginV, Effect, Text\n"
+            + "Dialogue: Marked=0,0:00:01.00,0:00:02.00,Bob,Main,1,2,3,,Hi, there\n"
+        let lifted = try #require(ASSHeaderEvents.split(ssa).events.first)
+        #expect(String(decoding: lifted.payload, as: UTF8.self) == "0,0,Main,Bob,1,2,3,,Hi, there")
+    }
+
+    @Test("only CR and LF end a line, as in libass", .timeLimit(.minutes(3)))
+    func splitsOnlyOnCarriageReturnAndLineFeed() throws {
+        let header = "[Events]\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,one\u{2028}two\u{85}three\n"
+        let event = try #require(ASSHeaderEvents.split(header).events.first)
+        #expect(String(decoding: event.payload, as: UTF8.self) == "0,0,Default,,0,0,0,,one\u{2028}two\u{85}three")
     }
 
     @Test("an unreadable or empty line is dropped from the header and lifts nothing",
@@ -71,14 +83,18 @@ struct HeaderOnlyASSEventsTests {
         #expect(!stripped.contains("Dialogue:"))
     }
 
-    @Test("lifted payload stops at the per-track ceiling", .timeLimit(.minutes(3)))
+    @Test("lifted payload stops at the per-track ceiling and the rest stays in the header",
+          .timeLimit(.minutes(3)))
     func boundsThePayload() {
-        let text = String(repeating: "x", count: 1000)
+        let text = String(repeating: "x", count: 4096)
+        let total = 1100
         var lines = ["[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
-        for i in 0..<1000 { lines.append("Dialogue: 0,0:00:\(String(format: "%02d", i % 60)).00,0:59:00.00,D,,0,0,0,,\(text)") }
-        let events = ASSHeaderEvents.split(lines.joined(separator: "\n")).events
-        #expect(!events.isEmpty)
+        for i in 0..<total { lines.append("Dialogue: 0,0:00:\(String(format: "%02d", i % 60)).00,0:59:00.00,D,,0,0,0,,\(text)") }
+        let (header, events) = ASSHeaderEvents.split(lines.joined(separator: "\n"))
+        #expect(!events.isEmpty && events.count < total)
         #expect(events.reduce(0) { $0 + $1.payload.count } <= ASSHeaderEvents.maxPayloadBytesPerTrack)
+        #expect(header.components(separatedBy: "Dialogue:").count - 1 == total - events.count,
+                "a line past the ceiling must stay where a libass host can still draw it")
     }
 
     @Test("the demuxer hands the events to the track, and the packet store decodes them",
@@ -122,6 +138,23 @@ struct HeaderOnlyASSEventsTests {
             store.append(streamIndex: 5, ptsSeconds: Double(i), durationSeconds: 1, payload: Data(repeating: 2, count: 256))
         }
         #expect(store.entries(streamIndex: 3, from: 0, through: 100).count == 2)
+    }
+
+    @Test("a seeded stream that also harvests blocks past its seed competes for room again",
+          .timeLimit(.minutes(3)))
+    func seededStreamThatGrowsIsEvictable() {
+        var seeded = TrackInfo(id: 3, name: "ass", codec: "ass", language: nil, isDefault: false)
+        seeded.headerEvents = ASSHeaderEvents.split(Self.header).events
+        let store = SubtitlePacketStore(perStreamByteCap: 1 << 20, aggregateByteCap: 4096)
+        store.seedHeaderEvents(from: [seeded])
+        for i in 0..<16 {
+            store.append(streamIndex: 3, ptsSeconds: 100 + Double(i), durationSeconds: 1,
+                         payload: Data(repeating: 3, count: 256))
+        }
+        for i in 0..<64 {
+            store.append(streamIndex: 4, ptsSeconds: Double(i), durationSeconds: 1, payload: Data(repeating: 1, count: 256))
+        }
+        #expect(store.entries(streamIndex: 3, from: 0, through: 200).count < 18)
     }
 
     @Test("a sidecar container whose events live in the header decodes to cues", .timeLimit(.minutes(3)))

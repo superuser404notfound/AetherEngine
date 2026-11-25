@@ -1218,7 +1218,9 @@ The engine now lifts those lines out of the header when the track is opened:
 - Each line becomes a packet in Matroska block form and joins the session's packet store, so the overlay drains it like any harvested packet. On the native route the same events also fill the WebVTT rendition.
 - A sidecar container with such a track (an `.mks`, or a container URL with `sourceStreamIndex`) decodes them the same way.
 - The lines are removed from `TrackInfo.assHeader` and `sidecarASSHeader`, so a host rendering the header with libass does not draw each one twice.
-- Only lines inside `[Events]` are lifted, with Start and End found through its `Format:` line. At most 512 KB of event text per track is lifted; a full film is around 150 KB.
+- Only lines inside `[Events]` are lifted. Their fields are found through the section's `Format:` line and rewritten into the fixed Matroska block order.
+- At most 4 MB of event text per track is lifted. A full film is around 150 KB, a heavily typeset episode a few MB. Lines past the ceiling stay in the header, so a libass host still draws them.
+- A track that carries the same events as blocks too does not show them twice. The lifted packets are numbered like mkvmerge numbers its blocks, so the two copies are byte-identical and the packet store keeps one.
 
 `aetherctl play --subs ass <file>` shows the `CUE` lines arriving.
 

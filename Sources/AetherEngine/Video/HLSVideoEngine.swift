@@ -517,6 +517,40 @@ public final class HLSVideoEngine: @unchecked Sendable {
         armSubtitleTap(on: prod)
     }
 
+    /// AE#1127: the pump never sees the events a muxer left in a track's header, so the rendition
+    /// gets them here, once per store. Own decoders and no tap lock: the pump keeps tapping while
+    /// a long script decodes.
+    private func fillNativeStoresWithHeaderEvents() {
+        guard let dem = demuxer else { return }
+        let tracks = dem.subtitleTrackInfos().filter { !$0.headerEvents.isEmpty }
+        guard !tracks.isEmpty else { return }
+        // Read under the tap lock like the route rebuild, never restartLock: a producer build calls
+        // this and may hold it.
+        subtitleTapLock.lock()
+        let stores = nativeSubtitleCueStoresForSession
+        let sourceStreamIndices = nativeSubtitleSourceStreamIndicesForSession
+        subtitleTapLock.unlock()
+        for (store, sidx) in zip(stores, sourceStreamIndices) {
+            guard let sidx, let track = tracks.first(where: { Int32($0.id) == sidx }),
+                  store.claimHeaderEventFill(),
+                  let made = dem.withStream(at: sidx, { stream in
+                      // Same shape as the tap route's decoder, so both write the same cue to the store.
+                      EmbeddedSubtitleDecoder(stream: stream, sourceVideoWidth: 1920, sourceVideoHeight: 1080,
+                                              preserveASSMarkup: preserveASSMarkupForSubtitleTap)
+                  }), let decoder = made else { continue }
+            var cues: [SubtitleCue] = []
+            for event in track.headerEvents {
+                let packet = StoredSubtitlePacket(ptsSeconds: event.startSeconds,
+                                                  durationSeconds: event.durationSeconds,
+                                                  flags: 0, payload: event.payload)
+                if let decoded = AetherEngine.decodeStoredSubtitlePacket(packet, with: decoder) {
+                    cues.append(contentsOf: decoded.cues)
+                }
+            }
+            store.appendCues(cues)
+        }
+    }
+
     /// Attach one store per non-bitmap subtitle track from the engine's demuxer (#55, all-tracks).
     /// Call after `start()`. Returns per-track languages for logging.
     @discardableResult
@@ -536,6 +570,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// EmbeddedSubtitleDecoder per demuxable text track, plain text (the native rendition carries no
     /// markup). Decoders live for the session, not the producer, so a restart's re-read dedups.
     private func rebuildSubtitleTapRoutes() {
+        rebuildSubtitleTapRoutesLocked()
+        fillNativeStoresWithHeaderEvents()
+    }
+
+    private func rebuildSubtitleTapRoutesLocked() {
         subtitleTapLock.lock()
         defer { subtitleTapLock.unlock() }
         subtitleTapRoutes.removeAll()
@@ -543,9 +582,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let w = savedVideoConfig.map { Int32($0.codecpar.pointee.width) } ?? 1920
         let h = savedVideoConfig.map { Int32($0.codecpar.pointee.height) } ?? 1080
         let pq = savedVideoConfig?.codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
-        let headerEvents = Dictionary(
-            dem.subtitleTrackInfos().filter { !$0.headerEvents.isEmpty }.map { (Int32($0.id), $0.headerEvents) },
-            uniquingKeysWith: { first, _ in first })
         for (ordinal, sidx) in nativeSubtitleSourceStreamIndicesForSession.enumerated() {
             guard let sidx, ordinal < nativeSubtitleCueStoresForSession.count else { continue }
             // Audit DMX-108: see `makeOverlayDecoder`.
@@ -558,19 +594,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                                         teletextPage: teletextPageForSubtitleTap)
             }
             guard let decoder = made ?? nil else { continue }
-            let store = nativeSubtitleCueStoresForSession[ordinal]
-            subtitleTapRoutes[sidx] = (decoder, store)
-            // AE#1127: the pump never sees these events, so the rendition gets them here. The store
-            // drops a cue it already holds, so a rebuild adds nothing twice.
-            for event in headerEvents[sidx] ?? [] {
-                let packet = StoredSubtitlePacket(ptsSeconds: event.startSeconds,
-                                                  durationSeconds: event.durationSeconds,
-                                                  flags: 0, payload: event.payload)
-                if let decoded = AetherEngine.decodeStoredSubtitlePacket(packet, with: decoder),
-                   !decoded.cues.isEmpty {
-                    store.appendCues(decoded.cues)
-                }
-            }
+            subtitleTapRoutes[sidx] = (decoder, nativeSubtitleCueStoresForSession[ordinal])
         }
         if !subtitleTapRoutes.isEmpty {
             EngineLog.emit(

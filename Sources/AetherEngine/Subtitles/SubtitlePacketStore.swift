@@ -114,9 +114,10 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// this store gives is only as good as the reading behind it. See `SubtitleHarvestCoverage`.
     private var coverage = SubtitleHarvestCoverage()
     private var protectedStreams: Set<Int32> = []
-    /// AE#1127: streams holding events lifted from their header. No reader ever harvests those
-    /// again, so aggregate pressure must not evict them; `ASSHeaderEvents` bounds their size.
-    private var seededStreams: Set<Int32> = []
+    /// AE#1127: lifted header bytes per stream. No reader ever harvests those events again, so
+    /// aggregate pressure spares such a stream while it holds no more than them; one that also
+    /// harvests blocks past that is evictable like any other.
+    private var seededBytesByStream: [Int32: Int] = [:]
     private var lastTouchByStream: [Int32: UInt64] = [:]
     private var touchCounter: UInt64 = 0
 
@@ -142,12 +143,18 @@ final class SubtitlePacketStore: @unchecked Sendable {
     }
 
     /// AE#1127: store the events a muxer left in each track's header, as packets of their stream.
-    /// Idempotent: a repeat collapses on the byte-identical payload like any re-harvest.
+    /// Idempotent: a repeat collapses on the byte-identical payload like any re-harvest. Spared from
+    /// aggregate eviction up to a third of the aggregate budget across all streams; a stream past
+    /// that still gets its events, it just competes for room like a harvested one.
     func seedHeaderEvents(from tracks: [TrackInfo]) {
         lock.lock(); defer { lock.unlock() }
         for track in tracks where !track.headerEvents.isEmpty {
             let streamIndex = Int32(track.id)
-            seededStreams.insert(streamIndex)
+            let bytes = track.headerEvents.reduce(0) { $0 + $1.payload.count }
+            let sparedElsewhere = seededBytesByStream.filter { $0.key != streamIndex }.values.reduce(0, +)
+            if sparedElsewhere + bytes <= aggregateCap / 3 {
+                seededBytesByStream[streamIndex] = bytes
+            }
             for event in track.headerEvents {
                 appendLocked(streamIndex: streamIndex, ptsSeconds: event.startSeconds,
                              durationSeconds: event.durationSeconds, flags: 0, payload: event.payload)
@@ -334,6 +341,11 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// is back under `aggregateCap` or only protected streams remain. Protected streams (the active
     /// drain targets) and the stream just written keep their per-stream window; a fully drained
     /// cold stream is dropped and re-harvested from the pump/prefetcher if it is selected later.
+    private func isSparedSeedLocked(_ streamIndex: Int32) -> Bool {
+        guard let seeded = seededBytesByStream[streamIndex] else { return false }
+        return (bytesByStream[streamIndex] ?? 0) <= seeded
+    }
+
     private func enforceAggregateCapLocked(justTouched: Int32) {
         guard totalBytes > aggregateCap else { return }
         // Audit SUB-103: down to a low-water mark, so the pass does not rerun on the next append, and
@@ -342,7 +354,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         var streams = Set(bytesByStream.keys)
         for key in pendingSetByStream.keys { streams.insert(key.streamIndex) }
         let candidates = streams
-            .filter { !protectedStreams.contains($0) && !seededStreams.contains($0) && $0 != justTouched }
+            .filter { !protectedStreams.contains($0) && !isSparedSeedLocked($0) && $0 != justTouched }
             .sorted { (lastTouchByStream[$0] ?? 0) < (lastTouchByStream[$1] ?? 0) }
         for idx in candidates {
             guard totalBytes > lowWater else { break }
@@ -588,7 +600,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         let touchCount = other.touchCounter
         let appendCount = other.appendCounter
         let harvested = other.coverage
-        let seeded = other.seededStreams
+        let seeded = other.seededBytesByStream
         other.lock.unlock()
         lock.lock(); defer { lock.unlock() }
         entriesByStream = entries
@@ -599,7 +611,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         touchCounter = touchCount
         appendCounter = appendCount
         coverage = harvested
-        seededStreams = seeded
+        seededBytesByStream = seeded
         totalBytes = bytes.values.reduce(0, +)
     }
 
@@ -611,7 +623,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         payloadHashesByRun.removeAll()
         lastTouchByStream.removeAll()
         protectedStreams.removeAll()
-        seededStreams.removeAll()
+        seededBytesByStream.removeAll()
         totalBytes = 0
         touchCounter = 0
         appendCounter = 0

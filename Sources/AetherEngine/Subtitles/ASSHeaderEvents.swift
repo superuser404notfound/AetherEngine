@@ -4,8 +4,8 @@ import Foundation
 struct ASSHeaderEvent: Sendable, Equatable {
     let startSeconds: Double
     let durationSeconds: Double
-    /// The event in Matroska block form (ReadOrder, then the `Format:` fields without Start and
-    /// End), the payload libavcodec's ASS decoder expects from a demuxed packet.
+    /// The event as a Matroska ASS block: `ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text`,
+    /// the payload libavcodec's ASS decoder expects from a demuxed packet.
     let payload: Data
 }
 
@@ -15,11 +15,12 @@ struct ASSHeaderEvent: Sendable, Equatable {
 /// the engine saw a track with nothing in it. These events are lifted out of the header once at
 /// open and fed to the session as if the muxer had written them as blocks.
 ///
-/// This splits lines and reads two timestamps; the events themselves still go through libavcodec.
+/// This only cuts lines into packets, the job libavformat's ASS demuxer does for a `.ass` file; the
+/// events themselves still decode through libavcodec.
 enum ASSHeaderEvents {
-    /// Ceiling on lifted payload per track. A full feature film is around 150 KB of events, and a
-    /// header is attacker-sized, so anything past this stays out of the session.
-    static let maxPayloadBytesPerTrack = 512 * 1024
+    /// Ceiling on lifted payload per track. A full film is around 150 KB of events and a heavily
+    /// typeset episode a few MB; a header is attacker-sized, so lines past this stay in the header.
+    static let maxPayloadBytesPerTrack = 4 * 1024 * 1024
 
     private static let defaultFormat = ["Layer", "Start", "End", "Style", "Name",
                                         "MarginL", "MarginR", "MarginV", "Effect", "Text"]
@@ -33,10 +34,13 @@ enum ASSHeaderEvents {
         var inEvents = false
         var format = defaultFormat
         var payloadBytes = 0
-        var lifted = 0
+        var dialogueLines = 0
         var strippedAny = false
-        // A CRLF pair is one Character in Swift, so this splits it as one line break.
-        for line in header.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+        // CR and LF only, as libass and libavformat split. A CRLF pair is one Character in Swift.
+        let lines = header.split(omittingEmptySubsequences: false) {
+            $0 == "\n" || $0 == "\r" || $0 == "\r\n"
+        }
+        for line in lines {
             let trimmed = line.drop { $0 == " " || $0 == "\t" }
             if trimmed.hasPrefix("[") {
                 inEvents = trimmed.lowercased().hasPrefix("[events]")
@@ -45,15 +49,24 @@ enum ASSHeaderEvents {
                     .split(separator: ",", omittingEmptySubsequences: false)
                     .map { $0.trimmingCharacters(in: .whitespaces) }
             } else if inEvents, trimmed.hasPrefix("Dialogue:") {
-                // Removed from the header whether or not it parses: a host that renders the header
-                // with libass would otherwise draw every lifted line twice.
-                strippedAny = true
-                if let event = event(trimmed.dropFirst("Dialogue:".count), format: format, readOrder: lifted),
-                   payloadBytes + event.payload.count <= maxPayloadBytesPerTrack {
-                    payloadBytes += event.payload.count
-                    events.append(event)
-                    lifted += 1
+                // ReadOrder counts every Dialogue line, as mkvmerge numbers its blocks, so a track that
+                // also carries the same events as blocks stores byte-identical packets that collapse.
+                let readOrder = dialogueLines
+                dialogueLines += 1
+                guard let event = event(trimmed.dropFirst("Dialogue:".count), format: format, readOrder: readOrder)
+                else {
+                    // Unreadable: no libass would draw it either, so it goes with the others.
+                    strippedAny = true
+                    continue
                 }
+                guard payloadBytes + event.payload.count <= maxPayloadBytesPerTrack else {
+                    // Past the ceiling the line stays where it was, so a libass host still draws it.
+                    kept.append(line)
+                    continue
+                }
+                payloadBytes += event.payload.count
+                events.append(event)
+                strippedAny = true
                 continue
             }
             kept.append(line)
@@ -67,21 +80,36 @@ enum ASSHeaderEvents {
     }
 
     private static func event(_ body: Substring, format: [String], readOrder: Int) -> ASSHeaderEvent? {
-        guard format.count >= 3,
-              let startIndex = format.firstIndex(where: { $0.caseInsensitiveCompare("Start") == .orderedSame }),
-              let endIndex = format.firstIndex(where: { $0.caseInsensitiveCompare("End") == .orderedSame })
-        else { return nil }
+        func index(_ names: String...) -> Int? {
+            format.firstIndex { field in names.contains { field.caseInsensitiveCompare($0) == .orderedSame } }
+        }
         // Text is the last field and may itself contain commas.
+        guard let startIndex = index("Start"), let endIndex = index("End"),
+              let textIndex = index("Text"), textIndex == format.count - 1 else { return nil }
         let fields = body.drop { $0 == " " }
             .split(separator: ",", maxSplits: format.count - 1, omittingEmptySubsequences: false)
         guard fields.count == format.count,
               let start = timestamp(fields[startIndex]),
               let end = timestamp(fields[endIndex]),
               end > start else { return nil }
-        var block = [String(readOrder)]
-        for (i, field) in fields.enumerated() where i != startIndex && i != endIndex {
-            block.append(String(field))
+        func field(_ i: Int?, default value: String) -> String {
+            i.map { String(fields[$0]) } ?? value
         }
+        // The block layout is fixed whatever order the script's Format line uses. SSA v4 has
+        // `Marked=0` where v4+ has Layer, and some scripts say Actor for Name.
+        var layer = field(index("Layer", "Marked"), default: "0")
+        if layer.hasPrefix("Marked=") { layer.removeFirst("Marked=".count) }
+        let block = [
+            String(readOrder),
+            layer,
+            field(index("Style"), default: ""),
+            field(index("Name", "Actor"), default: ""),
+            field(index("MarginL"), default: "0"),
+            field(index("MarginR"), default: "0"),
+            field(index("MarginV"), default: "0"),
+            field(index("Effect"), default: ""),
+            String(fields[textIndex]),
+        ]
         return ASSHeaderEvent(startSeconds: start, durationSeconds: end - start,
                               payload: Data(block.joined(separator: ",").utf8))
     }

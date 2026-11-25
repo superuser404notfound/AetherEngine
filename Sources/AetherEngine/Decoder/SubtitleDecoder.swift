@@ -261,15 +261,15 @@ enum SubtitleDecoder {
         }
 
         /// AE#1127: the header's events as packets on the stream's own time base.
-        func decodeHeaderEvents() {
+        func decodeHeaderEvents(cancel: CancelFlag) {
             guard !headerEvents.isEmpty, tbSec > 0, let pkt = av_packet_alloc() else { return }
             defer {
                 var p: UnsafeMutablePointer<AVPacket>? = pkt
                 av_packet_free(&p)
             }
             for event in headerEvents {
-                guard !limitExceeded, !decodeFailed,
-                      let pts = SourceTimestampBounds.roundedTicks(event.startSeconds / tbSec),
+                if limitExceeded || decodeFailed || cancel.isCancelled { return }
+                guard let pts = SourceTimestampBounds.roundedTicks(event.startSeconds / tbSec),
                       av_new_packet(pkt, Int32(event.payload.count)) >= 0 else { continue }
                 event.payload.withUnsafeBytes { raw in
                     if let base = raw.baseAddress, let dst = pkt.pointee.data {
@@ -594,7 +594,7 @@ enum SubtitleDecoder {
         }
 
         for decoder in decodersByStream.values {
-            decoder.decodeHeaderEvents()
+            decoder.decodeHeaderEvents(cancel: cancel)
             decoder.flush(cancel: cancel)
             if decoder.limitExceeded { throw SubtitleDecoderError.textLimitExceeded }
             if preparationPolicy != nil && decoder.decodeFailed { throw SubtitleDecoderError.openFailed(code: -1) }
