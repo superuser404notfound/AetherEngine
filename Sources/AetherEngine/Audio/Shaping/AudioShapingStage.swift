@@ -13,6 +13,11 @@ import AetherLibswresample
 /// tail out through the caller's `emit` before the new graph takes over, so a programme boundary
 /// neither restarts the AE#1036 gain at 0 dB nor drops the last milliseconds before it.
 ///
+/// Binaural (`AudioShaping.binaural`) sits between the two halves. The resampler then writes the
+/// source's own speaker layout (`resamplerLayout`), the matrix only lifts the centre in it, and
+/// `BinauralRenderer` turns it into the stereo the graph and the output carry. It needs the graph,
+/// whose float input it feeds: without one the resampler folds to stereo as it always did.
+///
 /// Not thread safe: the owner serialises every call under its own lock, as for the graph.
 final class AudioShapingStage {
 
@@ -23,15 +28,79 @@ final class AudioShapingStage {
     private var sampleRate: Int32 = 0
     private var outputLayout = AVChannelLayout()
     private(set) var graph: AudioShapingGraph?
+    private(set) var renderer: BinauralRenderer?
+    /// The layout `renderer` was built for; empty without one.
+    private var rendererLayout = AVChannelLayout()
+    private var rendered: [Float] = []
+    private var mismatchLogged = false
 
     init(shaping: AudioShaping, outputFormat: AVSampleFormat) {
         self.shaping = shaping.clamped
         self.outputFormat = outputFormat
     }
 
-    deinit { av_channel_layout_uninit(&outputLayout) }
+    deinit {
+        av_channel_layout_uninit(&outputLayout)
+        av_channel_layout_uninit(&rendererLayout)
+    }
 
     var hasGraph: Bool { graph != nil }
+
+    /// The layout the owner's resampler writes for a source of `source` shaped into `output`: the
+    /// source's own speakers when they go binaural, otherwise `output`. A source whose channels name
+    /// no speaker the mixer knows is folded to 7.1 first. Only binaural with a graph in place gives
+    /// anything but `output`, so an owner may call this whether or not it shapes.
+    func resamplerLayout(source: UnsafePointer<AVChannelLayout>, output: UnsafePointer<AVChannelLayout>,
+                         into layout: inout AVChannelLayout) {
+        av_channel_layout_uninit(&layout)
+        guard graph != nil, Self.rendersBinaural(shaping: shaping, source: source, output: output) else {
+            av_channel_layout_copy(&layout, output)
+            return
+        }
+        Self.binauralBed(for: source, into: &layout)
+    }
+
+    static func rendersBinaural(shaping: AudioShaping, source: UnsafePointer<AVChannelLayout>,
+                                output: UnsafePointer<AVChannelLayout>) -> Bool {
+        BinauralRenderer.isAvailable && output.pointee.nb_channels == 2
+            && shaping.rendersBinaural(sourceChannels: source.pointee.nb_channels)
+    }
+
+    /// The bed a binaural source is rendered from: its own layout when the mixer can place every
+    /// channel (an unspecified order read in the default order for its count), else 7.1.
+    static func binauralBed(for source: UnsafePointer<AVChannelLayout>, into layout: inout AVChannelLayout) {
+        av_channel_layout_uninit(&layout)
+        if BinauralRenderer.labels(for: source) != nil {
+            if source.pointee.order == AV_CHANNEL_ORDER_UNSPEC {
+                av_channel_layout_default(&layout, source.pointee.nb_channels)
+            } else {
+                av_channel_layout_copy(&layout, source)
+            }
+        } else {
+            av_channel_layout_default(&layout, 8)
+        }
+    }
+
+    /// Builds, keeps or drops the renderer so it matches the bed `resamplerLayout` now asks for.
+    private func syncRenderer(sampleRate rate: Int32, source: UnsafePointer<AVChannelLayout>,
+                              output: UnsafePointer<AVChannelLayout>) {
+        var bed = AVChannelLayout()
+        defer { av_channel_layout_uninit(&bed) }
+        resamplerLayout(source: source, output: output, into: &bed)
+        guard av_channel_layout_compare(&bed, output) != 0 else {
+            renderer = nil
+            av_channel_layout_uninit(&rendererLayout)
+            return
+        }
+        if let current = renderer, current.sampleRate == rate,
+           av_channel_layout_compare(&rendererLayout, &bed) == 0 { return }
+        let next = BinauralRenderer.labels(for: &bed).flatMap { BinauralRenderer(labels: $0, sampleRate: rate) }
+        renderer = next
+        av_channel_layout_uninit(&rendererLayout)
+        if next != nil { av_channel_layout_copy(&rendererLayout, &bed) }
+        EngineLog.emit("[AudioShaping] binaural: " + (next.map { "\($0.inputChannels)ch bed -> 2ch at \(rate) Hz" }
+                       ?? "the spatial mixer refused the bed, folding to stereo instead"), category: .session)
+    }
 
     /// The loudness target's gain in force, in dB; nil without a target or a graph.
     var loudnessGainDB: Double? { graph?.loudnessGainDB }
@@ -74,6 +143,7 @@ final class AudioShapingStage {
     @discardableResult
     func configure(sampleRate newRate: Int32, outputLayout newLayout: UnsafePointer<AVChannelLayout>,
                    sourceLayout: UnsafePointer<AVChannelLayout>, emit: Emit?) -> Bool {
+        defer { syncRenderer(sampleRate: sampleRate, source: sourceLayout, output: &outputLayout) }
         if let old = graph {
             guard rebuildNeeded(sampleRate: newRate, outputLayout: newLayout, sourceLayout: sourceLayout) else { return true }
             old.normalizer?.rebind(sampleRate: newRate, layout: newLayout)
@@ -100,11 +170,32 @@ final class AudioShapingStage {
         return graph != nil
     }
 
-    func process(_ samples: UnsafePointer<Float>, frames: Int, pts: Int64?, emit: Emit) {
-        graph?.process(samples, frames: frames, pts: pts, emit: emit)
+    /// `channels` is the width of `samples`: the bed `resamplerLayout` asked for, or the output's.
+    func process(_ samples: UnsafePointer<Float>, frames: Int, channels: Int, pts: Int64?, emit: Emit) {
+        guard let graph else { return }
+        guard let renderer, channels == renderer.inputChannels, channels != Int(outputLayout.nb_channels) else {
+            if channels != Int(outputLayout.nb_channels) {
+                if !mismatchLogged {
+                    mismatchLogged = true
+                    EngineLog.emit("[AudioShaping] \(channels)ch input with no renderer for it; dropped",
+                                   category: .session)
+                }
+                return
+            }
+            graph.process(samples, frames: frames, pts: pts, emit: emit)
+            return
+        }
+        if rendered.count < frames * 2 { rendered = [Float](repeating: 0, count: frames * 2) }
+        rendered.withUnsafeMutableBufferPointer { out in
+            renderer.render(.interleaved(samples), frames: frames, into: out.baseAddress!)
+            graph.process(UnsafePointer(out.baseAddress!), frames: frames, pts: pts, emit: emit)
+        }
     }
 
     func drain(emit: Emit) { graph?.drain(emit: emit) }
 
-    func reset() { graph?.reset() }
+    func reset() {
+        graph?.reset()
+        renderer?.reset()
+    }
 }

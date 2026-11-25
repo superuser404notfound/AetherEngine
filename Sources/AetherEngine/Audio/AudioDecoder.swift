@@ -52,6 +52,8 @@ final class AudioDecoder: @unchecked Sendable {
     private(set) var sampleRate: Int32 = 0
     /// The channels the decoder OUTPUTS: the source's, or fewer under an `AudioShaping` cap.
     private(set) var channels: Int32 = 0
+    /// Width the resampler writes: `channels`, or the source's bed while it goes binaural.
+    private var mixChannels: Int32 = 0
 
     /// AE#923. Set before `open`; a change mid-session arrives as a new decoder or a re-anchor.
     var shaping = AudioShaping()
@@ -92,7 +94,7 @@ final class AudioDecoder: @unchecked Sendable {
     /// when the format changes. Decode thread only.
     private func normalizationProcessor() -> NormalizationGainProcessor? {
         let rate = Double(sampleRate)
-        let width = Int(channels)
+        let width = Int(mixChannels > 0 ? mixChannels : channels)
         return normalization.withLock { state in
             if let processor = state.processor, processor.sampleRate == rate, processor.channels == width {
                 return processor
@@ -250,9 +252,32 @@ final class AudioDecoder: @unchecked Sendable {
         let inFmt = AVSampleFormat(rawValue: frame.pointee.format)
         let inRate = frame.pointee.sample_rate > 0 ? frame.pointee.sample_rate : sampleRate
 
+        // The stage first: whether it has a graph decides what the resampler writes (a binaural bed
+        // goes in at the source's width and leaves the stage as stereo).
+        var swrOutLayout = AVChannelLayout()
+        defer { av_channel_layout_uninit(&swrOutLayout) }
+        if shaping.isActive {
+            let stage = shapingStage ?? AudioShapingStage(shaping: shaping, outputFormat: AV_SAMPLE_FMT_FLT)
+            shapingStage = stage
+            let hadGraph = stage.hasGraph
+            let hasGraph = stage.configure(sampleRate: sampleRate, outputLayout: &outLayout, sourceLayout: &inLayout) {
+                planes, count, pts in self.appendShaped(planes, count: count, pts: pts)
+            }
+            stage.resamplerLayout(source: &inLayout, output: &outLayout, into: &swrOutLayout)
+            if !hadGraph || !hasGraph {
+                EngineLog.emit("[AudioDecoder] AE#923 shaping \(shaping.summary): "
+                               + "\(frameChannels)ch -> \(channels)ch"
+                               + (hasGraph ? "" : ", filter graph unavailable, dynamics off"),
+                               category: .swPlayback)
+            }
+        } else {
+            av_channel_layout_copy(&swrOutLayout, &outLayout)
+        }
+        mixChannels = swrOutLayout.nb_channels
+
         let ret = swr_alloc_set_opts2(
             &swrContext,
-            &outLayout,
+            &swrOutLayout,
             AV_SAMPLE_FMT_FLT,
             sampleRate,
             &inLayout,
@@ -262,21 +287,7 @@ final class AudioDecoder: @unchecked Sendable {
             nil
         )
         guard ret >= 0, let swr = swrContext else { return false }
-        if shaping.isActive {
-            let stage = shapingStage ?? AudioShapingStage(shaping: shaping, outputFormat: AV_SAMPLE_FMT_FLT)
-            shapingStage = stage
-            stage.applyMatrix(to: swr, input: &inLayout, output: &outLayout)
-            let hadGraph = stage.hasGraph
-            let hasGraph = stage.configure(sampleRate: sampleRate, outputLayout: &outLayout, sourceLayout: &inLayout) {
-                planes, count, pts in self.appendShaped(planes, count: count, pts: pts)
-            }
-            if !hadGraph || !hasGraph {
-                EngineLog.emit("[AudioDecoder] AE#923 shaping \(shaping.summary): "
-                               + "\(frameChannels)ch -> \(channels)ch"
-                               + (hasGraph ? "" : ", filter graph unavailable, dynamics off"),
-                               category: .swPlayback)
-            }
-        }
+        shapingStage?.applyMatrix(to: swr, input: &inLayout, output: &swrOutLayout)
         guard swr_init(swr) >= 0 else {
             swr_free(&swrContext)
             return false
@@ -349,12 +360,12 @@ final class AudioDecoder: @unchecked Sendable {
         // Sodalite#242: the limiter's delay line holds the last few ms; silence pushes them out.
         if let processor = normalization.withLock({ $0.processor }), swrContext != nil {
             let frames = processor.lookaheadFrames
-            var tail = [Float](repeating: 0, count: frames * Int(channels))
+            var tail = [Float](repeating: 0, count: frames * Int(mixChannels))
             tail.withUnsafeMutableBufferPointer { buffer in
                 guard let base = buffer.baseAddress else { return }
                 processor.process(interleaved: base, frames: frames)
                 if let stage = shapingStage, stage.hasGraph {
-                    stage.process(base, frames: frames, pts: nil) { planes, count, pts in
+                    stage.process(base, frames: frames, channels: Int(mixChannels), pts: nil) { planes, count, pts in
                         appendShaped(planes, count: count, pts: pts)
                     }
                 } else {
@@ -451,7 +462,7 @@ final class AudioDecoder: @unchecked Sendable {
         let maxOutputSamples = Int(swr_get_out_samples(swr, frame.pointee.nb_samples))
         guard maxOutputSamples > 0 else { return }
 
-        let bytesPerSample = Int(channels) * 4
+        let bytesPerSample = Int(mixChannels) * 4
         let bufferSize = maxOutputSamples * bytesPerSample
         let tempBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { tempBuffer.deallocate() }
@@ -477,7 +488,7 @@ final class AudioDecoder: @unchecked Sendable {
         #endif
         guard convertedSamples > 0 else { return }
         if let processor = normalizationProcessor() {
-            tempBuffer.withMemoryRebound(to: Float.self, capacity: Int(convertedSamples) * Int(channels)) {
+            tempBuffer.withMemoryRebound(to: Float.self, capacity: Int(convertedSamples) * Int(mixChannels)) {
                 processor.process(interleaved: $0, frames: Int(convertedSamples))
             }
         }
@@ -486,8 +497,8 @@ final class AudioDecoder: @unchecked Sendable {
             // with the output sample it belongs to (see AudioShapingGraph, Timing).
             let pts: Int64? = frame.pointee.pts == Self.noPTS ? nil
                 : av_rescale_q(frame.pointee.pts, timeBase, AVRational(num: 1, den: sampleRate))
-            tempBuffer.withMemoryRebound(to: Float.self, capacity: Int(convertedSamples) * Int(channels)) {
-                stage.process($0, frames: Int(convertedSamples), pts: pts) { planes, count, pts in
+            tempBuffer.withMemoryRebound(to: Float.self, capacity: Int(convertedSamples) * Int(mixChannels)) {
+                stage.process($0, frames: Int(convertedSamples), channels: Int(mixChannels), pts: pts) { planes, count, pts in
                     appendShaped(planes, count: count, pts: pts)
                 }
             }
