@@ -21,6 +21,13 @@ the public-API contract.
 
 ### Fixed
 
+- **GPU deinterlaced frames no longer keep an earlier frame's color tags (FFmpegBuild 3.19.2).** The
+  VideoToolbox deinterlacers and the GPU inverse telecine reuse output buffers, and a reused buffer kept
+  the tags of the frame it last held, so an HLG transfer function could stay on later untagged frames.
+  The deinterlaced output also no longer claims to be interlaced (field count and field detail), and
+  full-range NV12 comes out in a full-range buffer instead of a video-range one. Both deinterlacer
+  patches are now at their reviewed upstream state (FFmpeg PR 26276 and 26244).
+
 - **Exact seeks on a media-playlist session no longer fetch 1 to 3 segments before the target
   (AE#1128).** The engine opens AVPlayer on the media playlist whenever it needs no master, which is
   most SDR H.264 films, and that playlist did not declare `EXT-X-INDEPENDENT-SEGMENTS` (only the
