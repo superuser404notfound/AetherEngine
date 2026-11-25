@@ -321,8 +321,9 @@ extension HLSVideoEngine {
         }
 
         // #731: TrueHD Atmos or DTS:X with object rendering requested. Tried before the channel bridges,
-        // which it falls back to on any failure (see buildSpatialAudioProducerIfEligible).
-        if !forcedDrop, !shapes, let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0,
+        // which it falls back to on any failure (see buildSpatialAudioProducerIfEligible). Binaural on
+        // its own keeps this route: the rendered bed, heights included, is what goes binaural.
+        if !forcedDrop, !shapes || audioShaping.isBinauralOnly, let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0,
            let prod = buildSpatialAudioProducerIfEligible(
                audioStream: audioStream,
                audioDemuxer: audioDemuxer,

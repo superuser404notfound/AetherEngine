@@ -15,7 +15,7 @@ import AetherLibavutil
 /// The mixer is driven offline: `render` pulls it once per slice on the caller's thread, with the
 /// input fed from the caller's buffer through the render callback. Measured on macOS 27 with noise
 /// bursts per channel of a 7.1.4 bed: the side surrounds reach the far ear 28 samples (0.58 ms)
-/// late and 16 dB down, the fronts 11 samples late and 10 dB down, centre arrives on both ears at
+/// late and 17 dB down, the fronts 11 samples late and 11 dB down, centre arrives on both ears at
 /// once, and the whole render adds 5 samples (0.1 ms) of delay, far below anything lip sync can
 /// show, so nothing compensates it.
 ///
@@ -26,10 +26,12 @@ final class BinauralRenderer {
     static let maxFramesPerSlice = 4096
 
     /// Gain on the mixer's output. The mixer renders each virtual speaker at about the level that
-    /// speaker had, so a full bed lands several dB above a plain fold of the same content; this
-    /// brings decorrelated 5.1 to the loudness of libswresample's stereo fold of it (within 1 dB,
-    /// `BinauralRendererTests`). The shaping limiter catches what is left.
-    static let outputGainDB: Float = -2
+    /// speaker had, so a full bed lands above a plain fold of the same content. Measured against the
+    /// shaping fold (unnormalized, centre and surrounds at -3 dB): at -2 dB decorrelated 5.1 noise
+    /// matched it within 0.1 dB, Dolby's "Unfold" Atmos demo came out 2.7 LU louder (-11.8 against
+    /// -14.5 LUFS). -3 dB splits the two, about 1 dB under on noise and 1.7 LU over on the film. The
+    /// limiter behind it catches the peaks.
+    static let outputGainDB: Float = -3
 
     /// Whether this platform has the mixer at all; false makes binaural fall back to the fold.
     static let isAvailable: Bool = {

@@ -59,7 +59,7 @@ struct AudioShapingSwitchRequest {
 
 /// `off`, or a comma list of `ch=N`, `dialogue=DB`, `night` (the engine's night preset),
 /// `gain=DB` (a plain gain: a 1:1 compressor with that makeup), `loudness=LUFS` (AE#1036) and
-/// `lfe=DB` (the LFE level in a fold that drops it, AE#1044).
+/// `lfe=DB` (the LFE level in a fold that drops it, AE#1044) and `binaural` (headphone render).
 func parseAudioShapingSpec(_ spec: String) -> AudioShaping? {
     var shaping = AudioShaping()
     guard spec != "off" else { return shaping }
@@ -74,6 +74,7 @@ func parseAudioShapingSpec(_ spec: String) -> AudioShaping? {
             shaping.compressor = .init(thresholdDB: 0, ratio: 1, makeupGainDB: db)
         case ("loudness", let v?): guard let lufs = Double(v) else { return nil }; shaping.loudnessTargetLUFS = lufs
         case ("lfe", let v?): guard let db = Double(v) else { return nil }; shaping.lfeMixDB = db
+        case ("binaural", nil): shaping.binaural = true
         default: return nil
         }
     }

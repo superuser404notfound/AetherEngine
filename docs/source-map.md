@@ -110,7 +110,7 @@ Notes:
 | `AudioOutput.swift` | Software path: `AVSampleBufferAudioRenderer` + synchronizer (master clock). |
 | `AudioPlaybackHost.swift` | Audio-only path: FFmpeg demux and decode into `AVSampleBufferAudioRenderer` for codecs off the whitelist. |
 | `AudioTailPadding.swift` | Native path: writes silence in the delivered codec from where a title's audio ends to where its video ends, into the final segment at end of file, because AVPlayer ends an item when its audio runs out (AE#847). |
-| `SoftwareAtmosRoute.swift` | Software path: the pure choice of how a track's audio reaches the renderer (PCM decode, compressed E-AC-3 JOC, or TrueHD Atmos / DTS:X rendered into a bed as APAC or PCM), from codec, stream shape, live and `objectAudioRendering`. |
+| `SoftwareAtmosRoute.swift` | Software path: the pure choice of how a track's audio reaches the renderer (PCM decode, compressed E-AC-3 JOC, or TrueHD Atmos / DTS:X rendered into a bed as APAC, PCM or binaural stereo), from codec, stream shape, live and `objectAudioRendering`. |
 | `SoftwareAudioProducing.swift` | Software path: what the host asks of whatever turns an audio packet into renderer input. Implemented by `AudioDecoder`, `SoftwareEAC3Passthrough` and `SoftwareAPACProducer`. |
 | `LazyTapDecoder.swift` | The PCM decoder the audio tap reads on a producer that does not decode itself, opened on the first tap. Shared by the three software producers. |
 | `AudioSampleBuffers.swift` | The CMSampleBuffer builder (compressed packet or PCM) the software producers share. |
@@ -133,11 +133,12 @@ Notes:
 
 | File | What it does |
 | --- | --- |
-| `AudioShaping.swift` | `AudioShaping` (channel cap, dialogue lift, compressor, loudness target, LFE level in the fold) and `AudioShapingState`: the host's request and the published answer (AE#923). |
+| `AudioShaping.swift` | `AudioShaping` (channel cap, dialogue lift, compressor, loudness target, LFE level in the fold, binaural) and `AudioShapingState`: the host's request and the published answer (AE#923). |
 | `AudioShapingMatrix.swift` | The cap, the centre lift and the LFE level as one libswresample remix matrix. |
 | `AudioShapingStage.swift` | The matrix, graph and loudness normalizer as one object for `AudioBridge` and `AudioDecoder`: rebuilds the graph when the source layout, the rate or the dialogue route changes, and carries the loudness measurement and the held tail across (AUD-203, AUD-207). |
 | `AudioShapingGraph.swift` | The libavfilter graph after the remix: dialoguenhance + pan on stereo, acompressor, alimiter, aformat. Runs on its own sample counter so its latency never reaches the timeline. |
 | `LoudnessNormalizer.swift` | The loudness target (AE#1036): BS.1770 integrated loudness over what has played, and the bounded, latency-free gain toward the target, applied in front of the graph. |
+| `BinauralRenderer.swift` | The headphone render: an offline `AUSpatialMixer` (ambience bed, headphone output type, no head tracking) that turns a labelled multichannel bed into binaural stereo, and the FFmpeg-to-CoreAudio channel label map it places the bed by. |
 
 ### `Audio/Normalization/`
 
@@ -156,7 +157,7 @@ Notes:
 | `AllocentricPanner.swift` | Constant-power point-source gains in the allocentric room model, TS 103 448 speaker targets. |
 | `TrueHDObjectAudioDecoder.swift` | LibTrueHD: the channel presentation plus the object presentation, without matrix interpolation. |
 | `DTSXObjectAudioDecoder.swift` | FFmpeg `dca` with `x_heights`: the 7.1 bed as coded plus the four heights and their folds. |
-| `SpatialBedOutput.swift` | `SpatialBedFormat` (PCM or APAC, and the route rule `.render` uses), the bed buffers and packets, and `PCMBedPacker`, the 24-bit PCM sink next to `APACEncodePipeline`. |
+| `SpatialBedOutput.swift` | `SpatialBedFormat` (PCM or APAC, and the route rule `.render` uses), the bed buffers and packets, `PCMBedPacker`, the 24-bit PCM sink next to `APACEncodePipeline`, and `BinauralBedSink`, which renders the bed binaurally before packing it as stereo. |
 | `SoftwareAPACProducer.swift` | Software path: TrueHD Atmos / DTS:X rendered into a speaker bed through `SpatialAudioBridge` as APAC or PCM, handed to the audio renderer as sample buffers. |
 | `SpatialSpeakerLayout.swift` | `SpatialSpeakerLayout` / `SpatialSpeaker`: the public speaker beds object audio is rendered into. |
 | `ObjectAudioRendering.swift` | `ObjectAudioRendering`: the public choice of how TrueHD Atmos and DTS:X are delivered (decode, render, layout). |

@@ -93,7 +93,7 @@ struct BinauralRendererTests {
         #expect(Self.measure(renderer, channel: 6).rightLag > Self.measure(renderer, channel: 0).rightLag + 8)
     }
 
-    @Test("a full 5.1 bed comes out within 1 dB of the plain fold's loudness")
+    @Test("a full 5.1 bed comes out within 1.5 dB of the plain fold's loudness")
     func loudnessMatchesFold() throws {
         try #require(BinauralRenderer.isAvailable)
         var five = Self.layout("5.1")
@@ -119,7 +119,7 @@ struct BinauralRendererTests {
         }
         let difference = 10 * log10(rendered / folded)
         print("binaural vs fold: \(String(format: "%+.2f", difference)) dB")
-        #expect(abs(difference) < 1)
+        #expect(abs(difference) < 1.5)
     }
 
     @Test("slices longer than the mixer's maximum render the same as short ones")

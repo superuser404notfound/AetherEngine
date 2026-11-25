@@ -193,7 +193,17 @@ final class PCMBedPacker: SpatialBedSink, @unchecked Sendable {
 
     /// The packets' format for a sample-buffer renderer: packed signed 24-bit PCM in the bed's layout.
     static func formatDescription(layout: SpatialSpeakerLayout, sampleRate: Int) -> CMAudioFormatDescription? {
-        let channels = UInt32(layout.channelCount)
+        formatDescription(channels: layout.channelCount, tag: layout.channelLayoutTag, sampleRate: sampleRate)
+    }
+
+    /// The same for a binaural bed's two channels.
+    static func stereoFormatDescription(sampleRate: Int) -> CMAudioFormatDescription? {
+        formatDescription(channels: 2, tag: kAudioChannelLayoutTag_Stereo, sampleRate: sampleRate)
+    }
+
+    private static func formatDescription(channels count: Int, tag: AudioChannelLayoutTag,
+                                          sampleRate: Int) -> CMAudioFormatDescription? {
+        let channels = UInt32(count)
         var asbd = AudioStreamBasicDescription(
             mSampleRate: Double(sampleRate), mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
@@ -201,7 +211,7 @@ final class PCMBedPacker: SpatialBedSink, @unchecked Sendable {
             mBytesPerFrame: channels * UInt32(bytesPerSample), mChannelsPerFrame: channels,
             mBitsPerChannel: UInt32(bytesPerSample * 8), mReserved: 0)
         var acl = AudioChannelLayout()
-        acl.mChannelLayoutTag = layout.channelLayoutTag
+        acl.mChannelLayoutTag = tag
         var description: CMAudioFormatDescription?
         let status = CMAudioFormatDescriptionCreate(
             allocator: kCFAllocatorDefault, asbd: &asbd,
@@ -215,6 +225,12 @@ final class PCMBedPacker: SpatialBedSink, @unchecked Sendable {
     /// `Atmos_7_1_4` / `Atmos_9_1_6` (measured on macOS 27 with FFmpeg 8.1), wides and top-middles
     /// included, so no reordering happens anywhere.
     static func makeCodecpar(layout: SpatialSpeakerLayout, sampleRate: Int) -> UnsafeMutablePointer<AVCodecParameters>? {
+        makeCodecpar(speakers: layout.speakers, sampleRate: sampleRate)
+    }
+
+    /// `speakers` in sample order; `[.left, .right]` for a binaural bed.
+    static func makeCodecpar(speakers: [SpatialSpeaker], sampleRate: Int) -> UnsafeMutablePointer<AVCodecParameters>? {
+        let channelCount = speakers.count
         guard let cp = avcodec_parameters_alloc() else { return nil }
         cp.pointee.codec_type = AVMEDIA_TYPE_AUDIO
         cp.pointee.codec_id = AV_CODEC_ID_PCM_S24LE
@@ -222,14 +238,19 @@ final class PCMBedPacker: SpatialBedSink, @unchecked Sendable {
         cp.pointee.frame_size = Int32(framesPerPacket)
         cp.pointee.bits_per_raw_sample = 24
         cp.pointee.bits_per_coded_sample = 24
-        cp.pointee.block_align = Int32(layout.channelCount * bytesPerSample)
-        cp.pointee.bit_rate = Int64(layout.channelCount * bytesPerSample * 8 * sampleRate)
-        guard av_channel_layout_custom_init(&cp.pointee.ch_layout, Int32(layout.channelCount)) >= 0 else {
+        cp.pointee.block_align = Int32(channelCount * bytesPerSample)
+        cp.pointee.bit_rate = Int64(channelCount * bytesPerSample * 8 * sampleRate)
+        if speakers == [.left, .right] {
+            // Plain stereo, the layout the bridge's own PCM writes for two channels.
+            av_channel_layout_default(&cp.pointee.ch_layout, 2)
+            return cp
+        }
+        guard av_channel_layout_custom_init(&cp.pointee.ch_layout, Int32(channelCount)) >= 0 else {
             var p: UnsafeMutablePointer<AVCodecParameters>? = cp
             avcodec_parameters_free(&p)
             return nil
         }
-        for (i, speaker) in layout.speakers.enumerated() {
+        for (i, speaker) in speakers.enumerated() {
             cp.pointee.ch_layout.u.map[i].id = speaker.avChannel
         }
         return cp
@@ -259,4 +280,62 @@ extension SpatialSpeaker {
         case .topRearRight: return AV_CHAN_TOP_BACK_RIGHT
         }
     }
+}
+
+/// The rendered bed as binaural stereo for headphones (`AudioShaping.binaural`): the bridge renders
+/// into a buffer of the bed's own width as always, and on `submit` every bed channel, heights
+/// included, goes through `BinauralRenderer` as a virtual speaker. What reaches the packer is two
+/// channels of 24-bit PCM, which any output plays, and which no output treats as Atmos.
+///
+/// Its own `PeakLimiter` sits after the render: the bridge's keeps the bed under full scale, but
+/// twelve channels summed onto two ears can still pass it.
+final class BinauralBedSink: SpatialBedSink, @unchecked Sendable {
+    let bedChannels: Int
+    var leadingFrames: Int { 0 }
+
+    private let renderer: BinauralRenderer
+    private let packer: PCMBedPacker
+    private let bed: SpatialBedBuffer
+    private let stereo: SpatialBedBuffer
+    private var interleaved: [Float] = []
+    private var limiter: PeakLimiter
+
+    /// nil when the spatial mixer is missing or refuses the bed.
+    init?(layout: SpatialSpeakerLayout, sampleRate: Int, bufferFrames: Int) {
+        guard let renderer = BinauralRenderer(labels: layout.speakers.map(\.channelLabel),
+                                              sampleRate: Int32(sampleRate)) else { return nil }
+        self.renderer = renderer
+        bedChannels = layout.channelCount
+        packer = PCMBedPacker(channels: 2, bufferFrames: bufferFrames)
+        bed = SpatialBedBuffer(channels: layout.channelCount, capacity: bufferFrames)
+        stereo = SpatialBedBuffer(channels: 2, capacity: bufferFrames)
+        limiter = PeakLimiter(sampleRate: sampleRate)
+    }
+
+    func takeInitialBuffer() -> SpatialBedBuffer { bed }
+
+    func submit(_ buffer: SpatialBedBuffer, frames: Int, position: Int64) -> SpatialBedBuffer {
+        guard frames > 0 else { return buffer }
+        if interleaved.count < frames * 2 { interleaved = [Float](repeating: 0, count: frames * 2) }
+        stereo.ensureCapacity(frames, keeping: 0)
+        interleaved.withUnsafeMutableBufferPointer { out in
+            renderer.render(.planar(buffer.planes.map { UnsafePointer($0) }), frames: frames, into: out.baseAddress!)
+            let l = stereo.planes[0], r = stereo.planes[1]
+            for f in 0..<frames {
+                l[f] = out[2 * f]
+                r[f] = out[2 * f + 1]
+            }
+        }
+        limiter.process(stereo.planes, frameCount: frames)
+        _ = packer.submit(stereo, frames: frames, position: position)
+        return buffer
+    }
+
+    func restart() { renderer.reset(); limiter.reset() }
+    func shift(by frames: Int64) {}
+    func reset() { renderer.reset(); limiter.reset(); packer.reset() }
+    func close() {}
+    func finish() -> (packets: [SpatialBedPacket], errors: [Error]) { packer.finish() }
+    func settle() -> (packets: [SpatialBedPacket], errors: [Error]) { packer.settle() }
+    func collect() -> (packets: [SpatialBedPacket], errors: [Error]) { packer.collect() }
 }

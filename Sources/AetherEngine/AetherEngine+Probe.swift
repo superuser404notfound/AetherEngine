@@ -1030,6 +1030,8 @@ extension AetherEngine {
             return isDTS ? "DTS:X → APAC \(layout.rawValue)" : "\(codec) Atmos → APAC \(layout.rawValue)"
         case .pcmBed(let layout):
             return isDTS ? "DTS:X → PCM \(layout.rawValue)" : "\(codec) Atmos → PCM \(layout.rawValue)"
+        case .binauralBed(let layout):
+            return isDTS ? "DTS:X → binaural (\(layout.rawValue))" : "\(codec) Atmos → binaural (\(layout.rawValue))"
         }
     }
 

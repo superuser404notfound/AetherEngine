@@ -605,7 +605,7 @@ final class SoftwarePlaybackHost {
         audioTimeBaseSeconds = timeBaseSeconds
         audioRoute = made.route
         audioRouteTakesAtmosActivator = made.route.takesAtmosOutputActivator
-        audioShapingApplied = audioShaping.isActive && made.route == .pcm
+        audioShapingApplied = audioShaping.isActive && made.route.carriesShaping
         selection.replace(streamIndex: index, decoder: made.producer, timeBaseSeconds: timeBaseSeconds)
         outgoing?.close()
         let clock = audioOutput?.currentTimeSeconds ?? .nan
@@ -1147,7 +1147,7 @@ final class SoftwarePlaybackHost {
         switch route {
         case .pcm: return .decoded
         case .compressedEAC3JOC: return .streamCopy
-        case .apac, .pcmBed, .decodedEAC3JOC: return .bridged
+        case .apac, .pcmBed, .binauralBed, .decodedEAC3JOC: return .bridged
         }
     }
 
@@ -1703,7 +1703,7 @@ final class SoftwarePlaybackHost {
                 // A stop() can land on the suspension above, as on the ones below.
                 guard !stopRequested else { made.producer.close(); return }
                 self.audioDecoder = made.producer
-                self.audioShapingApplied = audioShaping.isActive && made.route == .pcm
+                self.audioShapingApplied = audioShaping.isActive && made.route.carriesShaping
                 self.audioRoute = made.route
                 self.audioRouteTakesAtmosActivator = made.route.takesAtmosOutputActivator
                 self.audioStreamIndex = resolvedAudioIdx

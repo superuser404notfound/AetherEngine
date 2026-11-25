@@ -807,7 +807,7 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 
 ### Audio shaping
 
-`LoadOptions.audioShaping` / `setAudioShaping(_:)` (AE#923) shape the decoded PCM before it is re-encoded (loopback) or rendered (software host, FFmpeg audio-only host). Five settings, in any combination:
+`LoadOptions.audioShaping` / `setAudioShaping(_:)` (AE#923) shape the decoded PCM before it is re-encoded (loopback) or rendered (software host, FFmpeg audio-only host). Six settings, in any combination:
 
 | Setting | Field | What it does |
 | --- | --- | --- |
@@ -816,6 +816,7 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 | Night mode | `compressor` | Compresses dynamics |
 | Loudness target | `loudnessTargetLUFS` | Raises a quiet source to a programme loudness (AE#1036) |
 | LFE in the fold | `lfeMixDB` | Keeps the LFE when the cap folds it away (AE#1044) |
+| Binaural | `binaural` | Renders surround and heights to stereo for headphones |
 
 **Channel cap (`maxChannels`).** The source is folded to at most that many channels with libswresample's own downmix (centre and surrounds at -3 dB, LFE dropped), the same fold the route would otherwise make. A cap decides the bridge encoder as a source with that many channels would, so a 5.1 source capped to stereo is FLAC, not stereo E-AC-3. A source is never upmixed.
 
@@ -864,9 +865,42 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 **What it costs.** Shaping needs PCM.
 
 - While it is active, a stream-copied track is decoded and bridged, so Atmos (E-AC-3 JOC) and every bitstream that would otherwise pass through arrive as their channel bed.
-- On the software host the compressed E-AC-3 JOC route and the object render are skipped.
+- On the software host the compressed E-AC-3 JOC route and the object render are skipped (binaural on its own keeps the object render, see below).
 - Turning shaping off goes back to stream copy.
 - Where AVPlayer owns the audio (`.remoteBypass`, the native audio-only host) there is no PCM to shape, and `$audioShapingState` reads `.unavailable`.
+
+### Binaural for headphones
+
+`AudioShaping(binaural: true)` turns a surround source into stereo you hear around you on headphones. A plain fold puts the surrounds and heights inside your head between left and right. The binaural render puts them beside, behind and above you. The output is ordinary two-channel PCM, so it plays on any headphones, wired or Bluetooth, and needs nothing from the output device.
+
+**How it works.** Every channel of the source becomes a virtual speaker at the direction its channel label names. Apple's `AUSpatialMixer` (the renderer behind Spatial Audio) then renders all of them to two ears with a head-related transfer function (HRTF): the filters that model how a sound from one direction reaches each ear. The mixer runs in its headphone mode, without head tracking. Where the system has the listener's personalized HRTF (the Spatial Audio ear scan) and lets the process use it, the mixer takes it; otherwise it uses a generic one. The engine drives the mixer offline on its own audio thread (`BinauralRenderer`), so no audio device is involved.
+
+**Which sources.**
+
+- Above two channels: 5.1, 7.1 and any other layout whose channels name speakers (FFmpeg's 5.1 with a back pair counts its back pair as the surrounds). A layout the mixer cannot place (ambisonics, unlabelled discrete channels) is folded to 7.1 first.
+- Mono and stereo stay as they are.
+- TrueHD Atmos and DTS:X with `objectAudioRendering` on: the rendered bed, heights included, goes binaural (see [TrueHD Atmos with heights](#truehd-atmos-with-heights)). It leaves as 24-bit stereo PCM on every route, AirPlay included. Nothing treats it as Atmos: the master playlist says `CHANNELS="2"`, and the tvOS Atmos activator stays off.
+- With `objectAudioRendering` off, or with any other shaping field active next to it, TrueHD and DTS-HD play their 7.1 presentation binaurally, without heights.
+- E-AC-3 JOC (streaming Atmos) is decoded to its 5.1 core and rendered from that. The objects are not carried.
+
+**Measured** (macOS 27, noise bursts per channel of a 7.1.4 bed):
+
+| Speaker | Far ear | Far ear later by |
+| --- | --- | --- |
+| Front left / right | 11 dB down | 11 samples (0.23 ms) |
+| Side surround | 17 dB down | 28 samples (0.58 ms) |
+| Rear surround | 10 dB down | 12 samples |
+| Top front | 12 dB down | 12 samples |
+| Top rear | 8 dB down | 14 samples |
+| Centre | even | 0 |
+
+The render delays the audio by 5 samples (0.1 ms), far below anything lip sync shows, so nothing compensates it. At low frequencies the head shadows little: a 500 Hz tone on the left surround reaches the right ear only 5 dB down.
+
+**Level.** The mixer renders each virtual speaker at about the level that speaker had, so a full bed comes out louder than a fold of it. A fixed -3 dB brings it near the shaping fold: about 1 dB under on decorrelated 5.1 noise, 1.7 LU over on Dolby's "Unfold" Atmos demo. The shaping limiter (-1 dBFS) runs behind it on the PCM paths, and the object bed has a peak limiter of its own after the render.
+
+**Together with the other settings.** Binaural takes the channel cap's place: the source is not folded, it is rendered. The dialogue lift raises the centre in the bed before the render, night mode and the loudness target act on the stereo result. A `maxChannels` of 1 wins and gives mono.
+
+**Bluetooth.** Apple platforms send Bluetooth audio as AAC (or SBC), whatever the headphones support. Binaural is stereo, so that costs it nothing a plain fold would not lose too.
 
 ### Audio a build has no decoder for
 
