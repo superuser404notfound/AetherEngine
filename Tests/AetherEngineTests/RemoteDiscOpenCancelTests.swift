@@ -28,10 +28,14 @@ struct RemoteDiscOpenCancelTests {
             do { try demuxer.open(url: url); outcome.done(failed: false) } catch { outcome.done(failed: true) }
         }
         try await waitFor { origin.connectionCount >= 1 }
+        // Counted at the close, not assumed to be 1: the probe retries after its 30 s request timeout,
+        // and on the one-thread pool this task once got its turn only after that (ci-extended,
+        // 2026-11-25). A retry before the close is the probe working; one after it is the defect.
+        let attemptsAtClose = origin.connectionCount
         demuxer.markClosed()
         try await waitFor { outcome.isFinished }
         #expect(outcome.didFail)
-        #expect(origin.connectionCount == 1, "a cancelled probe must not start another attempt")
+        #expect(origin.connectionCount == attemptsAtClose, "a cancelled probe must not start another attempt")
     }
 
     @Test("an open that was already closed never contacts the origin", .timeLimit(.minutes(3)))

@@ -273,7 +273,14 @@ struct TrickleWatchdogTests {
 
         try await waitFor { reader.trickleEndCountForTesting > 0 || progress.done }
         try #require(reader.trickleEndCountForTesting > 0, "the read finished without a trickle end")
-        let detectedAfter = Date().timeIntervalSince(dripStartedAt)
+        // Timed by the origin, which stamps the replacement on its own thread as it arrives. Reading
+        // the clock here measured this task's wait for a turn instead: on the one-thread pool it saw
+        // the end 31 s late against a 25.7 s bound (ci-extended, 2026-11-25).
+        let isReplacement: (Int64) -> Bool = { $0 > dripOffset && $0 < dripOffset + 1024 * 1024 }
+        try await waitFor { origin.requests.contains { isReplacement($0.start) } || progress.done }
+        let replacedAt = try #require(origin.requests.first { isReplacement($0.start) }?.at,
+                                      "no replacement request after the trickle end")
+        let detectedAfter = replacedAt.timeIntervalSince(dripStartedAt)
         // Nominally two thresholds (one starved period, then the next tick). The bound is what the
         // drip would need to finish the read on its own, halved: a multiple of the threshold was
         // a wall-clock budget, and a runner that froze every test for a second spent it (10.97 s
