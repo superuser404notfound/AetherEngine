@@ -13,10 +13,12 @@ import Testing
 private final class StubProvider: HLSSegmentProvider, @unchecked Sendable {
     let type: HLSPlaylistType
     let outage: Bool
+    let keyframeAligned: Bool
 
-    init(type: HLSPlaylistType, outage: Bool = false) {
+    init(type: HLSPlaylistType, outage: Bool = false, keyframeAligned: Bool = true) {
         self.type = type
         self.outage = outage
+        self.keyframeAligned = keyframeAligned
     }
 
     func initSegment() -> Data? { Data([0x00]) }
@@ -26,6 +28,7 @@ private final class StubProvider: HLSSegmentProvider, @unchecked Sendable {
     var playlistType: HLSPlaylistType { type }
     var liveTargetSegmentDuration: Double? { 4.0 }
     var liveOutageEndlist: Bool { outage }
+    var segmentsStartOnRandomAccess: Bool { keyframeAligned }
     func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int,
                                  endlistAdded: Bool, discontinuitySequence: Int) {
         (10, 0, 0, type == .vod, 0)
@@ -40,7 +43,7 @@ struct MediaPlaylistIndependentSegmentsTests {
             .split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
     }
 
-    @Test("a VOD media playlist declares independent segments before its first segment")
+    @Test("AE#1128: a keyframe-aligned VOD media playlist declares independent segments before its first segment")
     func vodDeclaresIndependentSegments() throws {
         let ls = lines(StubProvider(type: .vod))
         let tag = try #require(ls.firstIndex(of: "#EXT-X-INDEPENDENT-SEGMENTS"))
@@ -48,8 +51,15 @@ struct MediaPlaylistIndependentSegmentsTests {
         #expect(tag < firstSegment)
     }
 
+    /// A uniform stride (no usable index, a sequential archive) opens a segment at the first keyframe
+    /// past its boundary, up to a GOP late: the frames before it sit in the segment before.
+    @Test("AE#1128: a VOD playlist on a uniform-stride plan makes no such claim")
+    func uniformPlanStaysUnclaimed() {
+        #expect(!lines(StubProvider(type: .vod, keyframeAligned: false)).contains("#EXT-X-INDEPENDENT-SEGMENTS"))
+    }
+
     /// Live cuts can be forced (an ad seam) and a join starts mid-GOP, so the claim would not hold there.
-    @Test("live, event and an outage window make no such claim", arguments: [
+    @Test("AE#1128: live, event and an outage window make no such claim", arguments: [
         (HLSPlaylistType.live, false), (.event, false), (.live, true),
     ])
     func othersStayUnclaimed(type: HLSPlaylistType, outage: Bool) {

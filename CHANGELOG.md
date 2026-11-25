@@ -16,8 +16,9 @@ the public-API contract.
   (AE#1128).** The engine opens AVPlayer on the media playlist whenever it needs no master, which is
   most SDR H.264 films, and that playlist did not declare `EXT-X-INDEPENDENT-SEGMENTS` (only the
   master did). AVPlayer then began every exact seek early to find a decodable start, more the longer
-  the GOP. VOD media playlists now carry the tag; every VOD segment already opens on its own
-  keyframe. On a 6 Mbit/s link with a 4 Mbit/s, 4 s GOP file, a seek to 60 s landed in 7.7 s instead
+  the GOP. A VOD media playlist on a keyframe-aligned plan now carries the tag, since every segment
+  of such a plan opens on its own keyframe. A plan without a usable index (MPEG-TS, a remote MKV
+  whose Cues could not be read) keeps the old playlist. On a 6 Mbit/s link with a 4 Mbit/s, 4 s GOP file, a seek to 60 s landed in 7.7 s instead
   of 17 s (3 runs each). Live playlists are unchanged.
 
 - **A seek in the first seconds of a slow remote session no longer waits on a march it already
