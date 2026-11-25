@@ -2249,6 +2249,10 @@ final class HLSLocalServer: @unchecked Sendable {
         } else {
             // EXT-X-PLAYLIST-TYPE:VOD lets AVPlayer prune fetched segments past the buffer-behind window; without it RSS grows linearly with segment count for the whole playback.
             lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
+            // Every VOD segment opens on its own IRAP (VODSegmentCutter), and the master already says so.
+            // A media playlist loaded directly did not, and AVPlayer began each exact seek 1 to 3 segments
+            // early to find a decodable start (2 segments at a 2 s GOP, 3 at 4 s).
+            lines.append("#EXT-X-INDEPENDENT-SEGMENTS")
         }
         // Absolute custom-scheme URIs route sub-resources through AVAssetResourceLoader; relative URIs go through CFNetwork (aetherctl workflow).
         let initURI: (Int) -> String
