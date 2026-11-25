@@ -1137,7 +1137,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         servedAudioTrackID: Int = -1,
         videoLayout: String? = nil,
         isLive: Bool = false,
-        servesSegmentsProgressively: Bool = false,
+        servesSegmentsProgressively: Bool = true,
         sequentialAppendPlaylist: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         nativeLiveDVRPolicy: LiveDVRRetentionPolicy? = nil,

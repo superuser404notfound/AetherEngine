@@ -1054,7 +1054,9 @@ if first == "play" {
     // LoadOptions.progressiveSegmentDelivery, on by default since AE#1129. --no-progressive-segments
     // is the other arm of an A/B against a throttled origin; --progressive-segments stays accepted
     // so older recipes still parse.
-    _ = takeFlag("--progressive-segments", from: &rest)
+    if takeFlag("--progressive-segments", from: &rest) {
+        print("NOTE: --progressive-segments is the default now; --no-progressive-segments is the other arm")
+    }
     let progressiveSegments = !takeFlag("--no-progressive-segments", from: &rest)
     // AE#1109: the opt-in whole-source prefetch, which is what leaves a resident band behind a
     // resume for a backward seek to restart under.

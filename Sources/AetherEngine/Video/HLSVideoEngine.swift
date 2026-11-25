@@ -1010,7 +1010,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// `LoadOptions.progressiveSegmentDelivery`, handed to the provider and to every producer this
     /// session builds. Set before `start()`.
-    var servesSegmentsProgressively = false
+    var servesSegmentsProgressively = true
 
     /// AE#1095: the host's load options when it asked for `retainsSessionCacheAfterStop`, already
     /// stripped of what only labels a load. nil leaves parking out of this session entirely. Set

@@ -88,6 +88,34 @@ struct ProgressiveSegmentDeliveryTests {
         #expect(reader.next(pollInterval: 0.01, idleTimeout: 0.5) == .finished)
     }
 
+    @Test("a reader that falls behind more seals than the cache remembers still finishes its segment")
+    func readerBehindForgottenSealFinishes() throws {
+        let cache = makeCache()
+        defer { cache.close() }
+        let head = bytes(400, seed: 5), tail = bytes(600, seed: 8)
+        let (staging, handle) = try makeStaging(cache, index: 4)
+        handle.write(head)
+        cache.beginInProgress(index: 4, stagingPath: staging)
+        let reader = try #require(ProgressiveSegmentReader(cache: cache, index: 4, stagingPath: staging))
+        #expect(reader.next() == .bytes(head))
+        handle.write(tail)
+        try handle.close()
+        cache.adopt(index: 4, stagingPath: staging, byteCount: head.count + tail.count)
+        // AVPlayer stops reading while its buffer is full, and the prefetch seals past the memory.
+        let payload = bytes(50, seed: 1)
+        for index in 5...(5 + SegmentCache.sealedStagingMemory) {
+            let (other, otherHandle) = try makeStaging(cache, index: index)
+            otherHandle.write(payload)
+            try otherHandle.close()
+            cache.beginInProgress(index: index, stagingPath: other)
+            cache.adopt(index: index, stagingPath: other, byteCount: payload.count)
+        }
+        #expect(cache.inProgressState(index: 4, stagingPath: staging) == .abandoned,
+                "precondition: the cache no longer remembers this seal")
+        #expect(reader.next() == .bytes(tail))
+        #expect(reader.next(pollInterval: 0.01, idleTimeout: 0.5) == .finished)
+    }
+
     @Test("a producer that stops writing does not hold a reader forever")
     func idleReaderGivesUp() throws {
         let cache = makeCache()

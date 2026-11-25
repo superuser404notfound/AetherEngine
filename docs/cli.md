@@ -656,7 +656,7 @@ Other lines `play` prints:
 | `--sequential-origin` | `LoadOptions.sequentialOrigin` (#346, AE#958). | off |
 | `--declared-duration S` | `LoadOptions.declaredDurationSeconds`. Needed with `--sequential-origin` on VOD. | none |
 | `--held-connection` | `LoadOptions.heldSourceConnection` (#377). | off |
-| `--no-progressive-segments` | Sets `LoadOptions.progressiveSegmentDelivery` to false. `--progressive-segments` is still accepted and changes nothing. | on |
+| `--no-progressive-segments` | Sets `LoadOptions.progressiveSegmentDelivery` to false. `--progressive-segments` is still accepted, changes nothing and prints a note saying so. | on |
 | `--forward-buffer-segments N` | `LoadOptions.forwardBufferSegments`. `2700` is the opt-in whole-source prefetch. | engine default |
 | `--session-cache-mb N` | `LoadOptions.sessionCacheByteBudget`, in MiB. | engine default |
 | `--max-concurrent-requests N` | `LoadOptions.maxConcurrentSourceRequests` (#377). See [Shared flags](#shared-flags). | engine default |

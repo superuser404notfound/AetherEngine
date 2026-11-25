@@ -1217,7 +1217,7 @@ public struct LoadOptions: Sendable, Equatable {
     ///
     /// One stopped session is kept per process, as long as the process lives, in the same disk budget
     /// it had while playing. It is reused only when the next `load()` names the exact same URL with
-    /// options that are equal apart from `sourceDiagnosticsContext`, the engine derives the same
+    /// options that are equal apart from `sourceDiagnosticsContext` and `progressiveSegmentDelivery`, the engine derives the same
     /// output (display, audio stream, Dolby Vision handling) and the source yields the same segment
     /// plan. Any other load deletes it, so does the end of the process, and so does a crash or kill
     /// after the next session's stale sweep (one hour). `AetherEngine.discardRetainedSessionCache()`
@@ -1230,10 +1230,12 @@ public struct LoadOptions: Sendable, Equatable {
     public var retainsSessionCacheAfterStop: Bool = false
 
     /// The options a parked session is matched on: everything but the diagnostics label, which every
-    /// load carries a fresh one of.
+    /// load carries a fresh one of, and the fragment cadence (`progressiveSegmentDelivery`), which
+    /// changes how a segment reaches AVPlayer but not which bytes it holds.
     var normalizedForSessionParking: LoadOptions {
         var copy = self
         copy.sourceDiagnosticsContext = nil
+        copy.progressiveSegmentDelivery = true
         return copy
     }
 
@@ -1243,8 +1245,9 @@ public struct LoadOptions: Sendable, Equatable {
     /// waiting for all of it. On a fast or local source a segment is cut long before AVPlayer asks
     /// for it and nothing changes; on a slow link it is the difference between waiting for a whole
     /// segment (seconds of a long GOP at the link's rate) and waiting for its first fragment.
-    /// Default true since AE#1129: a source whose first keyframe interval is 10 s made every start
-    /// wait for that whole first segment (5.8 s to the first frame at 25 Mbit/s, 1.9 s with this on).
+    /// Default true since AE#1129: a source whose first keyframe interval is 10.7 s made every start
+    /// wait for that whole first segment. At 25 Mbit/s playback began after 5.8 s, and after 2.8 s
+    /// with this on.
     /// Set false to serve each segment only once it is cut. VOD only: live keeps its own window and
     /// blocking-reload contracts. Ignored for `nativeRemoteHLS` and on the software path, which
     /// serve no loopback segments.

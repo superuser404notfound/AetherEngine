@@ -2494,7 +2494,7 @@ Measured with `aetherctl play --host-calls stopreopen@25` on a 1080p MKV from an
 
 **When it is reused.** Only when all of these hold. Anything else deletes the kept session, and the load runs as it does today.
 
-- The URL is the same, and the `LoadOptions` are equal apart from `sourceDiagnosticsContext`. A different signature in a signed URL is a different source.
+- The URL is the same, and the `LoadOptions` are equal apart from `sourceDiagnosticsContext` and `progressiveSegmentDelivery`. A different signature in a signed URL is a different source.
 - What the engine derives on top (display capabilities, the audio stream, the Dolby Vision handling, the audio delay and shaping) is the same.
 - The source gives the same segment plan.
 
