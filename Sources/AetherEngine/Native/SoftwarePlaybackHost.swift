@@ -3758,6 +3758,9 @@ final class SoftwarePlaybackHost {
                 ) {
                 case .pauseForRebuffer:
                     rebuffering = true
+                    // Clock first, flag second: `isRebuffering` reaches the main actor on its own hop,
+                    // and a reader there must never see the flag over a clock that still runs.
+                    aOut.pause()
                     noteRebuffering(true)
                     resumePlacement = nil
                     let resumesAt = cushion.map { ", resumes at \(String(format: "%.1f", $0))s ahead" } ?? ""
@@ -3766,16 +3769,15 @@ final class SoftwarePlaybackHost {
                         + "(lead=\(String(format: "%.2f", lead))s\(resumesAt))",
                         category: .swPlayback
                     )
-                    aOut.pause()
                 case .resume:
                     rebuffering = false
+                    aOut.setRate(currentRate())
                     noteRebuffering(false)
                     EngineLog.emit(
                         "[SWHost] rebuffered: resuming clock (lead=\(String(format: "%.2f", lead))s "
                         + "ahead=\(String(format: "%.2f", ahead))s)",
                         category: .swPlayback
                     )
-                    aOut.setRate(currentRate())
                     // A source that paused comes back one of two ways: it skips what it missed and
                     // continues near real time, or it hands the whole backlog over at once. The
                     // second leaves the picture the length of the pause behind the newest media,
@@ -4326,9 +4328,9 @@ final class SoftwarePlaybackHost {
         func releaseRebufferHold(_ why: String) {
             guard rebuffering else { return }
             rebuffering = false
+            audioOutput?.setRate(currentRate())
             noteRebuffering(false)
             EngineLog.emit("[SWHost] releasing rebuffer hold: \(why)", category: .swPlayback)
-            audioOutput?.setRate(currentRate())
         }
 
         // #337 on the decoupled path. The lockstep gate arms the clock off the packet it is
@@ -4456,22 +4458,23 @@ final class SoftwarePlaybackHost {
             switch action {
             case .pauseForRebuffer:
                 rebuffering = true
+                // Clock first, flag second, as in the DVR feeder: the flag hops to the main actor.
+                aOut.pause()
                 noteRebuffering(true)
                 EngineLog.emit(
                     "[SWHost] audio lead exhausted (\(String(format: "%.2f", lead))s); "
                     + "pausing clock for rebuffer",
                     category: .swPlayback
                 )
-                aOut.pause()
             case .resume:
                 rebuffering = false
+                aOut.setRate(currentRate())
                 noteRebuffering(false)
                 EngineLog.emit(
                     "[SWHost] rebuffered to \(String(format: "%.2f", lead))s audio lead; "
                     + "resuming clock",
                     category: .swPlayback
                 )
-                aOut.setRate(currentRate())
             case .none:
                 break
             }

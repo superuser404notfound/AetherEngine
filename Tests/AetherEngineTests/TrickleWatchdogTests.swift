@@ -338,11 +338,16 @@ struct TrickleWatchdogTests {
         #expect(drawn == 64 * 1024)
         try await waitFor { origin.requests.contains { $0.start == dripOffset } }
 
-        let ended = try await waitFor(upTo: .seconds(8 * Self.stallTimeout)) {
-            reader.trickleEndCountForTesting > 0 || !reader.hasLiveConnectionForTesting
+        // The trickle verdict is under test. A drip a starved runner delivers more than the 0.5 s
+        // threshold late ends the connection through the gap watchdog instead, so that path gets a
+        // tolerance rather than a zero (same reasoning as the live case below).
+        let judged = try await waitFor(upTo: .seconds(8 * Self.stallTimeout)) {
+            reader.trickleEndCountForTesting > 0
         }
-        #expect(!ended, "a drip nobody was waiting on was ended")
+        #expect(!judged, "a drip nobody was waiting on was ended as a trickle")
         #expect(reader.trickleEndCountForTesting == 0)
+        #expect(reader.deliveryGapEndCountForTesting <= 2,
+                "the drip was ended \(reader.deliveryGapEndCountForTesting) times by the gap watchdog")
     }
 
     /// A raw live source arrives at its own bitrate, so a read waits on forward data almost all the
@@ -366,11 +371,21 @@ struct TrickleWatchdogTests {
         // (live reads return short since AE#1076), so a read waits on forward data for the whole
         // observation, which is the state the verdict is evaluated in.
         _ = Self.startReading(reader, bytes: 256 * 1024)
-        let ended = try await waitFor(upTo: .seconds(8 * Self.stallTimeout)) {
-            reader.trickleEndCountForTesting > 0 || origin.requests.count > 1
+        // The trickle verdict is under test. A drip that lands more than the 0.5 s stall threshold
+        // late (a starved runner) ends the connection through the gap watchdog, which is that
+        // watchdog doing its job, so one replacement proves nothing (CI, 2026-11-24: requests
+        // [0, 4096] after 0.8 s, no trickle verdict). A gap path that ended a healthy drip as a
+        // rule would do it about eight times in this window, which the bound below still catches.
+        let judged = try await waitFor(upTo: .seconds(8 * Self.stallTimeout)) {
+            reader.trickleEndCountForTesting > 0
         }
-        #expect(!ended, "a low-bitrate live connection was replaced: \(origin.requests.map(\.start))")
+        #expect(!judged, """
+            a low-bitrate live connection was ended as a trickle: requests \
+            \(origin.requests.map(\.start)), gap ends \(reader.deliveryGapEndCountForTesting)
+            """)
         #expect(reader.trickleEndCountForTesting == 0)
+        #expect(reader.deliveryGapEndCountForTesting <= 2,
+                "the live drip was ended \(reader.deliveryGapEndCountForTesting) times by the gap watchdog")
     }
 
     @Test("a held connection parked on a full window with zero delivery is not judged",
