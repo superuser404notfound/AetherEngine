@@ -27,10 +27,12 @@ enum AudioDelayPolicy {
     /// Largest offset the engine carries, either direction, in seconds.
     ///
     /// The correction this exists for is tens to a couple hundred milliseconds; the bound is a
-    /// generous ceiling rather than a target. It is well inside the muxer's 8 s interleave window
-    /// (`MP4SegmentMuxer.maxBufferedFragmentSeconds`), which a constant A/V offset consumes at
-    /// `|delay|`, so an out-of-range value cannot turn into a stalled interleaver or a live session
-    /// that has spent its edge on a typo.
+    /// generous ceiling rather than a target. A constant A/V offset holds `|delay|` of one track in
+    /// the muxer's interleaver, so the bound keeps an out-of-range value from turning into a stalled
+    /// interleaver or a live session that has spent its edge on a typo. Live muxes with an 8 s
+    /// interleave window (`MP4SegmentMuxer.maxBufferedFragmentSeconds`), well above it. VOD flushes a
+    /// fragment every 0.5 s since AE#1129, and each flush drains the interleaver, so the delayed
+    /// track's samples land in a later fragment of the same segment instead of piling up.
     static let maxAbsSeconds: Double = 2.0
 
     /// Bring a host value into range. A non-finite value (NaN from an unset stepper, an infinity out

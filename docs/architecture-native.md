@@ -333,6 +333,20 @@ Restart latency explains itself in the log (#93):
 
 A slow read with all-zero counters means the wait happened before the read loop.
 
+### Serving a segment while it is written
+
+AVPlayer gets each VOD segment while the producer is still writing it, not after the cut (`LoadOptions.progressiveSegmentDelivery`, on by default since AE#1129).
+
+- The muxer flushes a fragment (a `moof` plus its `mdat`) about every 0.5 s (`HLSSegmentProducer.progressiveFragmentSeconds`). Without the option it holds up to 8 s.
+- The producer registers the segment's staging file with the cache as it opens it. The file is only appended to, then renamed as it stands when it is adopted, so a reader always sees a growing prefix of the final segment.
+- The loopback server answers with a chunked response and sends each fragment as it lands (`ProgressiveSegmentReader`). It ends at the seal.
+- A segment the producer abandons (restart, failed cut, teardown) ends its connection without the final chunk. AVPlayer then asks again instead of taking the partial bytes for a whole segment.
+- Each chunk sent counts as fetch activity for the #65 wedge watchdog. Otherwise one long transfer would read as AVPlayer having stopped fetching.
+
+Why it matters: a segment is cut at a keyframe, so its length follows the source's GOP. A file whose first keyframe interval is 10.7 s has a 10.7 s first segment, 11 MB at 8 Mbit/s, and without this AVPlayer showed nothing until all of it had crossed the link. On a fast source the segment is cut before AVPlayer asks and nothing changes.
+
+Cut points do not move, so every segment still opens on its own keyframe and the playlists still declare `EXT-X-INDEPENDENT-SEGMENTS`. Live, the remote HLS bypass and the software path do not use it.
+
 ### Keeping AVPlayer from timing out
 
 A request during a restart must never leave AVPlayer waiting in silence (#93). AVPlayer's media watchdog logs `-12889 "No response for media file"` after ~3.5 s without response headers. Holding the connection open does not help, and three strikes fail the item.

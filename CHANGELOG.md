@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Changed
+
+- **VOD segments are served while they are written, by default (AE#1129).**
+  `LoadOptions.progressiveSegmentDelivery` is now `true`. AVPlayer starts on the first half-second
+  fragments of a segment instead of waiting for its cut, which matters when the first keyframe interval
+  is long: a file with keyframes at 0 and 10.7 s started after 5.8 s over a 25 Mbit/s link, and now after
+  2.8 s. Nothing changes on a source fast enough to cut segments before AVPlayer asks. Set the option to
+  false for the old behaviour; `aetherctl play --no-progressive-segments` does the same.
+
 ### Fixed
 
 - **Exact seeks on a media-playlist session no longer fetch 1 to 3 segments before the target
