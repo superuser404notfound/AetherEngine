@@ -155,6 +155,14 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
             || c.binaural
     }
 
+    /// Whether this value changes anything for a source of `sourceChannels` channels (0 when not
+    /// known yet). Binaural alone renders nothing for mono or stereo, so such a track keeps its
+    /// stream copy instead of a decode, a limiter and a FLAC encode that would change nothing.
+    func isActive(forSourceChannels sourceChannels: Int32) -> Bool {
+        guard isActive else { return false }
+        return !(isBinauralOnly && sourceChannels > 0 && sourceChannels <= 2)
+    }
+
     /// Whether binaural is the only thing asked for, so the object render may stay and render its
     /// bed binaurally instead of giving way to the channel bridge.
     var isBinauralOnly: Bool {

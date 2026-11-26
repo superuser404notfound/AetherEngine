@@ -292,7 +292,9 @@ final class AudioBridge: @unchecked Sendable {
     ) throws {
         self.srcTimeBase = srcTimeBase
         self.mode = mode
-        self.shaping = shaping.clamped
+        // Binaural alone leaves a mono or stereo source as it is (no stage, no limiter).
+        self.shaping = shaping.isActive(forSourceChannels: srcCodecpar.pointee.ch_layout.nb_channels)
+            ? shaping.clamped : AudioShaping()
 
         // 1. Source decoder
         let srcCodecID = srcCodecpar.pointee.codec_id
@@ -1127,10 +1129,19 @@ final class AudioBridge: @unchecked Sendable {
         guard swrInput.differ(from: sf) else { return true }
 
         let frameFmt = AVSampleFormat(rawValue: frameFmtRaw)
-        // The binaural bed follows the source, so a source layout change can change the width too.
+        // AUD-203: the matrix below lifts a source's front centre and the graph lifts a stereo source
+        // without one, so the graph follows the layout the matrix now follows. Its tail goes into
+        // the FIFO first. It runs before the resampler is chosen: the binaural bed follows the source,
+        // and only a stage that still has its graph and a renderer for the new bed may ask swr for it.
+        if let stage = shapingStage, stage.hasGraph, let fifoPtr = fifo {
+            stage.configure(sampleRate: enc.pointee.sample_rate, outputLayout: &enc.pointee.ch_layout,
+                            sourceLayout: &sf.pointee.ch_layout) { planes, count, _ in
+                self.writeShaped(planes, count: count, fifo: fifoPtr)
+            }
+        }
         var outLayout = AVChannelLayout()
         defer { av_channel_layout_uninit(&outLayout) }
-        if let stage = shapingStage, swrOutFmt == AV_SAMPLE_FMT_FLT {
+        if let stage = shapingStage, stage.hasGraph, swrOutFmt == AV_SAMPLE_FMT_FLT {
             stage.resamplerLayout(source: &sf.pointee.ch_layout, output: &enc.pointee.ch_layout, into: &outLayout)
         } else {
             av_channel_layout_copy(&outLayout, &enc.pointee.ch_layout)
@@ -1167,16 +1178,6 @@ final class AudioBridge: @unchecked Sendable {
         swr_free(&swrCtx)
         swrCtx = scratch
         swrOutChannels = outLayout.nb_channels
-
-        // AUD-203: the matrix above lifts a source's front centre and the graph lifts a stereo source
-        // without one, so the graph follows the layout the matrix now follows. Its tail goes into
-        // the FIFO first.
-        if let stage = shapingStage, stage.hasGraph, let fifoPtr = fifo {
-            stage.configure(sampleRate: enc.pointee.sample_rate, outputLayout: &enc.pointee.ch_layout,
-                            sourceLayout: &sf.pointee.ch_layout) { planes, count, _ in
-                self.writeShaped(planes, count: count, fifo: fifoPtr)
-            }
-        }
         swrInput.adopt(layout: &sf.pointee.ch_layout, format: frameFmt, rate: frameRate)
 
         // .lossless pins the encoder + swr OUTPUT to the codecpar rate/layout at init (the muxer header is

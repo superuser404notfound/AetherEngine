@@ -48,10 +48,23 @@ final class AudioShapingStage {
 
     /// The layout the owner's resampler writes for a source of `source` shaped into `output`: the
     /// source's own speakers when they go binaural, otherwise `output`. A source whose channels name
-    /// no speaker the mixer knows is folded to 7.1 first. Only binaural with a graph in place gives
-    /// anything but `output`, so an owner may call this whether or not it shapes.
+    /// no speaker the mixer knows is folded to 7.1 first. Only a renderer built for that bed gives
+    /// anything but `output`, so an owner may call this whether or not it shapes, and a mixer that
+    /// refused the bed means a plain fold. Call it after `configure`, which builds the renderer.
     func resamplerLayout(source: UnsafePointer<AVChannelLayout>, output: UnsafePointer<AVChannelLayout>,
                          into layout: inout AVChannelLayout) {
+        wantedBed(source: source, output: output, into: &layout)
+        guard renderer != nil, av_channel_layout_compare(&layout, &rendererLayout) == 0 else {
+            av_channel_layout_uninit(&layout)
+            av_channel_layout_copy(&layout, output)
+            return
+        }
+    }
+
+    /// The bed binaural asks for before the mixer had its say: `output` unless there is a graph and
+    /// the source goes binaural.
+    private func wantedBed(source: UnsafePointer<AVChannelLayout>, output: UnsafePointer<AVChannelLayout>,
+                           into layout: inout AVChannelLayout) {
         av_channel_layout_uninit(&layout)
         guard graph != nil, Self.rendersBinaural(shaping: shaping, source: source, output: output) else {
             av_channel_layout_copy(&layout, output)
@@ -86,7 +99,7 @@ final class AudioShapingStage {
                               output: UnsafePointer<AVChannelLayout>) {
         var bed = AVChannelLayout()
         defer { av_channel_layout_uninit(&bed) }
-        resamplerLayout(source: source, output: output, into: &bed)
+        wantedBed(source: source, output: output, into: &bed)
         guard av_channel_layout_compare(&bed, output) != 0 else {
             renderer = nil
             av_channel_layout_uninit(&rendererLayout)

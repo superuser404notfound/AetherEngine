@@ -134,11 +134,8 @@ final class BinauralRenderer {
         left = .allocate(capacity: Self.maxFramesPerSlice)
         right = .allocate(capacity: Self.maxFramesPerSlice)
         outputList = AudioBufferList.allocate(maximumBuffers: 2)
-        guard configure(labels: labels) else {
-            AudioComponentInstanceDispose(unit)
-            left.deallocate(); right.deallocate(); free(outputList.unsafeMutablePointer)
-            return nil
-        }
+        // Every stored property is set by now, so a nil here still runs deinit, which frees all of it.
+        guard configure(labels: labels) else { return nil }
     }
 
     deinit {
@@ -179,11 +176,16 @@ final class BinauralRenderer {
                                  &stereo, UInt32(MemoryLayout<AudioChannelLayout>.size))
         // No head tracking: the listener's head is the screen's direction, which is what a film wants
         // and what a fixed-output binaural render can promise on any headphones.
+        // visionOS has no such property, and nothing there tracks a head for this unit either.
+        #if !os(visionOS)
         _ = set(kAudioUnitProperty_SpatialMixerEnableHeadTracking, kAudioUnitScope_Global, UInt32(0))
+        #endif
         // The listener's own HRTF where the system has one (the Spatial Audio ear scan) and lets this
         // process use it; the generic set otherwise.
-        _ = set(kAudioUnitProperty_SpatialMixerPersonalizedHRTFMode, kAudioUnitScope_Global,
-                AUSpatialMixerPersonalizedHRTFMode.auto.rawValue)
+        if #available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, *) {
+            _ = set(kAudioUnitProperty_SpatialMixerPersonalizedHRTFMode, kAudioUnitScope_Global,
+                    AUSpatialMixerPersonalizedHRTFMode.auto.rawValue)
+        }
 
         var callback = AURenderCallbackStruct(inputProc: { refCon, _, _, _, frames, ioData in
             Unmanaged<BinauralRenderer>.fromOpaque(refCon).takeUnretainedValue().supply(frames: Int(frames), into: ioData)

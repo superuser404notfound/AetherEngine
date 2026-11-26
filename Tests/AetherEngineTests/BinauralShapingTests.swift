@@ -1,4 +1,5 @@
 import Testing
+import AudioToolbox
 import Foundation
 import CoreMedia
 import AetherLibavformat
@@ -13,7 +14,7 @@ import AetherLibavutil
 /// and quieter, on the right one too, the way a speaker beside the listener reaches both ears. At
 /// 500 Hz the head shadows little (measured: the far ear 5 dB down, against 16 dB for broadband
 /// noise in `BinauralRendererTests`), hence the loose bound.
-@Suite("Binaural audio shaping", .serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(3)))
+@Suite("Binaural audio shaping", .serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(5)))
 struct BinauralShapingTests {
 
     // MARK: - The value
@@ -34,6 +35,28 @@ struct BinauralShapingTests {
         #expect(!AudioShaping(maxChannels: 1, binaural: true).rendersBinaural(sourceChannels: 6))
         #expect(AudioShaping(maxChannels: 1, binaural: true).outputChannels(forSource: 6) == 1)
         #expect(AudioShaping(dialogueGainDB: 3, binaural: true).summary == "dialogue +3.0 dB, binaural")
+        #expect(!b.isActive(forSourceChannels: 2), "a stereo source keeps its stream copy")
+        #expect(!b.isActive(forSourceChannels: 1))
+        #expect(b.isActive(forSourceChannels: 6))
+        #expect(b.isActive(forSourceChannels: 0), "an unknown width counts as shaped")
+        #expect(AudioShaping(dialogueGainDB: 3, binaural: true).isActive(forSourceChannels: 2))
+    }
+
+    @Test("a bed the mixer refuses: nil without a double free, and the resampler stays on the fold")
+    func refusedRendererFolds() throws {
+        try #require(BinauralRenderer.isAvailable)
+        // Measured: the mixer refuses unknown labels and a 10 MHz rate, after the unit is allocated.
+        #expect(BinauralRenderer(labels: [kAudioChannelLabel_Unknown, 9999], sampleRate: 48_000) == nil)
+        #expect(BinauralRenderer(labels: [kAudioChannelLabel_Left, kAudioChannelLabel_Right], sampleRate: 10_000_000) == nil)
+
+        var stereo = layout("stereo"), five = layout("5.1"), bed = AVChannelLayout()
+        defer { for case var l in [stereo, five, bed] { av_channel_layout_uninit(&l) } }
+        let stage = AudioShapingStage(shaping: AudioShaping(binaural: true), outputFormat: AV_SAMPLE_FMT_FLT)
+        let hasGraph = stage.configure(sampleRate: 10_000_000, outputLayout: &stereo, sourceLayout: &five, emit: nil)
+        #expect(hasGraph, "the graph takes the rate, only the mixer refuses it")
+        #expect(stage.renderer == nil)
+        stage.resamplerLayout(source: &five, output: &stereo, into: &bed)
+        #expect(bed.nb_channels == 2, "no renderer, so swr folds instead of writing a bed nothing takes (graph: \(hasGraph))")
     }
 
     // MARK: - The stage

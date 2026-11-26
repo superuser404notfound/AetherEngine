@@ -873,13 +873,13 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 
 `AudioShaping(binaural: true)` turns a surround source into stereo you hear around you on headphones. A plain fold puts the surrounds and heights inside your head between left and right. The binaural render puts them beside, behind and above you. The output is ordinary two-channel PCM, so it plays on any headphones, wired or Bluetooth, and needs nothing from the output device.
 
-**How it works.** Every channel of the source becomes a virtual speaker at the direction its channel label names. Apple's `AUSpatialMixer` (the renderer behind Spatial Audio) then renders all of them to two ears with a head-related transfer function (HRTF): the filters that model how a sound from one direction reaches each ear. The mixer runs in its headphone mode, without head tracking. Where the system has the listener's personalized HRTF (the Spatial Audio ear scan) and lets the process use it, the mixer takes it; otherwise it uses a generic one. The engine drives the mixer offline on its own audio thread (`BinauralRenderer`), so no audio device is involved.
+**How it works.** Every channel of the source becomes a virtual speaker at the direction its channel label names. Apple's `AUSpatialMixer` (the renderer behind Spatial Audio) then renders all of them to two ears with a head-related transfer function (HRTF), the filters that model how a sound from one direction reaches each ear. The mixer runs in its headphone mode, without head tracking. Where the system has the listener's personalized HRTF (the Spatial Audio ear scan) and lets the process use it, the mixer takes it; otherwise it uses a generic one. The engine drives the mixer offline on its own audio thread (`BinauralRenderer`), so no audio device is involved.
 
 **Which sources.**
 
 - Above two channels: 5.1, 7.1 and any other layout whose channels name speakers (FFmpeg's 5.1 with a back pair counts its back pair as the surrounds). A layout the mixer cannot place (ambisonics, unlabelled discrete channels) is folded to 7.1 first.
-- Mono and stereo stay as they are.
-- TrueHD Atmos and DTS:X with `objectAudioRendering` on: the rendered bed, heights included, goes binaural (see [TrueHD Atmos with heights](#truehd-atmos-with-heights)). It leaves as 24-bit stereo PCM on every route, AirPlay included. Nothing treats it as Atmos: the master playlist says `CHANNELS="2"`, and the tvOS Atmos activator stays off.
+- Mono and stereo stay as they are. Binaural on its own does not count as shaping for them, so a stereo track keeps its stream copy.
+- TrueHD Atmos and DTS:X with `objectAudioRendering` on. The rendered bed, heights included, goes binaural (see [TrueHD Atmos with heights](#truehd-atmos-with-heights)). It leaves as 24-bit stereo PCM on every route, AirPlay included. Nothing treats it as Atmos. The master playlist says `CHANNELS="2"`, and the tvOS Atmos activator stays off.
 - With `objectAudioRendering` off, or with any other shaping field active next to it, TrueHD and DTS-HD play their 7.1 presentation binaurally, without heights.
 - E-AC-3 JOC (streaming Atmos) is decoded to its 5.1 core and rendered from that. The objects are not carried.
 
@@ -896,11 +896,11 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 
 **The LFE is kept.** The plain fold drops it unless `lfeMixDB` asks for it. The mixer keeps it, low-passed and even on both ears, the way a subwoofer would play it. Broadband noise on the LFE lands about 10 dB under the same noise on the centre. On Dolby's "Unfold" demo that gives about 5 dB more below 120 Hz than the fold, and within 1.5 dB of it above.
 
-The render delays the audio by 5 samples (0.1 ms), far below anything lip sync shows, so nothing compensates it. At low frequencies the head shadows little: a 500 Hz tone on the left surround reaches the right ear only 5 dB down.
+The render delays the audio by 5 samples (0.1 ms), far below anything lip sync shows, so nothing compensates it. At low frequencies the head shadows little. A 500 Hz tone on the left surround reaches the right ear only 5 dB down.
 
-**Level.** The mixer renders each virtual speaker at about the level that speaker had, so a full bed comes out louder than a fold of it. A fixed -3 dB brings it near the shaping fold: about 1 dB under on decorrelated 5.1 noise, 2.4 LU over on Dolby's "Unfold" Atmos demo (-12.1 against -14.5 LUFS), part of that the LFE the fold drops. Unfold is a loud demo mix, and its peaks reach the limiter. The shaping limiter (-1 dBFS) runs behind it on the PCM paths, and the object bed has a peak limiter of its own after the render.
+**Level.** The mixer renders each virtual speaker at about the level that speaker had, so a full bed comes out louder than a fold of it. A fixed -3 dB brings it near the shaping fold, about 1 dB under on decorrelated 5.1 noise and 2.4 LU over on Dolby's "Unfold" Atmos demo (-12.1 against -14.5 LUFS), part of that the LFE the fold drops. Unfold is a loud demo mix, and its peaks reach the limiter. The shaping limiter (-1 dBFS) runs behind it on the PCM paths, and the object bed has a peak limiter of its own after the render.
 
-**Together with the other settings.** Binaural takes the channel cap's place: the source is not folded, it is rendered. The dialogue lift raises the centre in the bed before the render, night mode and the loudness target act on the stereo result. A `maxChannels` of 1 wins and gives mono.
+**Together with the other settings.** Binaural takes the channel cap's place. The source is not folded, it is rendered. The dialogue lift raises the centre in the bed before the render, night mode and the loudness target act on the stereo result. A `maxChannels` of 1 wins and gives mono.
 
 **Bluetooth.** Apple platforms send Bluetooth audio as AAC (or SBC), whatever the headphones support. Binaural is stereo, so that costs it nothing a plain fold would not lose too.
 

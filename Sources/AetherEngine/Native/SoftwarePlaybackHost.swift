@@ -605,7 +605,8 @@ final class SoftwarePlaybackHost {
         audioTimeBaseSeconds = timeBaseSeconds
         audioRoute = made.route
         audioRouteTakesAtmosActivator = made.route.takesAtmosOutputActivator
-        audioShapingApplied = audioShaping.isActive && made.route.carriesShaping
+        audioShapingApplied = audioShaping.isActive(forSourceChannels: stream.pointee.codecpar.pointee.ch_layout.nb_channels)
+            && made.route.carriesShaping
         selection.replace(streamIndex: index, decoder: made.producer, timeBaseSeconds: timeBaseSeconds)
         outgoing?.close()
         let clock = audioOutput?.currentTimeSeconds ?? .nan
@@ -1703,7 +1704,8 @@ final class SoftwarePlaybackHost {
                 // A stop() can land on the suspension above, as on the ones below.
                 guard !stopRequested else { made.producer.close(); return }
                 self.audioDecoder = made.producer
-                self.audioShapingApplied = audioShaping.isActive && made.route.carriesShaping
+                self.audioShapingApplied = audioShaping.isActive(forSourceChannels: acp.pointee.ch_layout.nb_channels)
+                    && made.route.carriesShaping
                 self.audioRoute = made.route
                 self.audioRouteTakesAtmosActivator = made.route.takesAtmosOutputActivator
                 self.audioStreamIndex = resolvedAudioIdx

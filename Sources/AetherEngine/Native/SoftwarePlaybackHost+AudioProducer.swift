@@ -23,6 +23,7 @@ extension SoftwarePlaybackHost {
             EngineLog.emit("[SWHost] audio: DTS:X rendering is off for this load (rendersDTSXObjectAudio false)",
                            category: .swPlayback)
         }
+        let shapes = audioShaping.isActive(forSourceChannels: par.pointee.ch_layout.nb_channels)
         func pcm() throws -> (producer: any SoftwareAudioProducing, route: SoftwareAtmosRoute) {
             let decoder = AudioDecoder()
             decoder.shaping = audioShaping
@@ -33,7 +34,7 @@ extension SoftwarePlaybackHost {
         // binaural with its heights. Every other codec, and any other shaping, takes the PCM decode.
         let binauralObjects = audioShaping.isBinauralOnly && rendering != .off && !isLive
             && (par.pointee.codec_id == AV_CODEC_ID_TRUEHD || par.pointee.codec_id == AV_CODEC_ID_DTS)
-        if audioShaping.isActive, !binauralObjects {
+        if shapes, !binauralObjects {
             EngineLog.emit("[SWHost] audio: AE#923 shaping (\(audioShaping.summary)) keeps the track on the PCM decode",
                            category: .swPlayback)
             return try pcm()

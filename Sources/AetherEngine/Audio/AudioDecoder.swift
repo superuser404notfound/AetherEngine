@@ -256,7 +256,9 @@ final class AudioDecoder: @unchecked Sendable {
         // goes in at the source's width and leaves the stage as stereo).
         var swrOutLayout = AVChannelLayout()
         defer { av_channel_layout_uninit(&swrOutLayout) }
-        if shaping.isActive {
+        // Binaural alone does nothing for a stereo source, so it gets no stage; one that already has
+        // one keeps it across a layout change.
+        if shaping.isActive(forSourceChannels: frameChannels) || shapingStage != nil {
             let stage = shapingStage ?? AudioShapingStage(shaping: shaping, outputFormat: AV_SAMPLE_FMT_FLT)
             shapingStage = stage
             let hadGraph = stage.hasGraph
