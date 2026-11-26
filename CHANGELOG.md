@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.76.0] - 2026-11-26
+
 ### Added
 
 - **Binaural for headphones (`AudioShaping.binaural`).** A 5.1 or 7.1 source, or a rendered TrueHD
