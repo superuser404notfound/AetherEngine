@@ -4360,12 +4360,30 @@ final class SoftwarePlaybackHost {
             armFromVideoPacket(head, aOut)
         }
 
+        /// The newest timestamp among the parked packets, in source seconds; B-frames park out of
+        /// presentation order, so the FIFO's last packet is not necessarily it. nil when none has one.
+        func newestParkedVideoSeconds() -> Double? {
+            guard videoTimeBaseSeconds > 0 else { return nil }
+            var newest: Int64?
+            for p in parkedVideo where p.pointee.pts != Int64.min {
+                newest = max(newest ?? p.pointee.pts, p.pointee.pts)
+            }
+            return newest.map { Double($0) * videoTimeBaseSeconds }
+        }
+
+        func parkedTailIsBehindClock() -> Bool {
+            guard clockArmed(), let newest = newestParkedVideoSeconds() else { return false }
+            return SoftwareEndOfMediaClock.parkedTailIsBehindClock(
+                newestParkedSeconds: newest, clockSeconds: audioOutput?.currentTimeSeconds ?? .nan)
+        }
+
         enum ParkWait {
             /// Hold the read until audio is back under its lead target / the FIFO under its cap.
             case readGate
             /// Retain the already-read packet until its allocation fits, without dropping it.
             case packetCapacity(Int)
-            /// Feed the whole parked tail out (seam flush, end of media).
+            /// Feed the parked tail out at end of media, until it is empty or all of it is behind the
+            /// clock (`SoftwareEndOfMediaClock.parkedTailIsBehindClock`).
             case drainAll
         }
 
@@ -4392,7 +4410,7 @@ final class SoftwarePlaybackHost {
                         )
                     } ?? false
                 case .drainAll:
-                    return !parkedVideo.isEmpty
+                    return !parkedVideo.isEmpty && !parkedTailIsBehindClock()
                 }
             }
             while stillWaiting(), !stopRequested(), !backgroundAudioOnly() {
@@ -4665,6 +4683,14 @@ final class SoftwarePlaybackHost {
                 releaseRebufferHold("end of media, nothing left to rebuffer from")
                 waitForRenderer(.drainAll)
                 guard admitsRead(genBeforeRead) else { return !stopRequested() }
+                if !parkedVideo.isEmpty, parkedTailIsBehindClock() {
+                    EngineLog.emit(
+                        "[SWHost] end of media: \(parkedVideo.count) parked video packets lie behind the clock "
+                        + "(newest \(String(format: "%.3f", newestParkedVideoSeconds() ?? .nan))s, clock "
+                        + "\(String(format: "%.3f", audioOutput?.currentTimeSeconds ?? .nan))s); freeing them "
+                        + "instead of waiting for the renderer",
+                        category: .swPlayback)
+                }
                 freeParkedVideo()
                 // The dual-layer decoder's flush drops what its sessions and the GPU still hold,
                 // which here is the last frames of the stream: hand those over first.

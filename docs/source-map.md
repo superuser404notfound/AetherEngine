@@ -451,7 +451,7 @@ On-demand MPEG-DASH (AE#859): one static Period, each representation a single `S
 | `SoftwareAudioPacketCoverage.swift` | Audio coverage from exact decoded sample geometry where the codec allows it. |
 | `SoftwarePacketCacheTiming.swift` | A separate presentation axis for packets whose PTS the AVI MPEG-4 repair withholds, qualified against the decoder's own frames. |
 | `SoftwareReadAdmission.swift` | Read generations: packets, EOF and errors of a superseded seek or stop are rejected. |
-| `SoftwareEndOfMediaClock.swift` | AE#374: stops the software master clock at end of media so `currentTime` does not walk past `duration`. |
+| `SoftwareEndOfMediaClock.swift` | AE#374: stops the software master clock at end of media so `currentTime` does not walk past `duration`. Also decides when the end stops waiting for a parked video tail that lies behind the clock. |
 | `LiveAudioSelection.swift` | AE#1100: the audio track the software live feeder plays, swapped in place by an audio pick; also which other tracks the reader stores in the ring. |
 | `SoftwareLiveJoinPolicy.swift` | Where a software live session starts playing once the connect burst has landed, and the holdback behind the edge. |
 | `DirectLiveAudioReadAhead.swift` | Software live without a DVR feeder: a forward-only read-ahead on the one existing source connection. |

@@ -33,4 +33,15 @@ enum SoftwareEndOfMediaClock {
         guard clockSeconds.isFinite, latest.isFinite, clockSeconds > latest else { return nil }
         return latest
     }
+
+    /// Whether the end-of-media drain may stop waiting for the parked video: every packet still
+    /// parked is timed before the clock, so none of it can be shown on time. A stopped timebase never
+    /// takes a late frame, and on a CI runner the synchronizer stayed stopped at rate 2.0 after the
+    /// rebuffer hold was lifted at the end (36.8 s, 255 packets parked up to 33 s), so waiting for the
+    /// renderer to take them never ended. False while any of it is still ahead of the clock, or when
+    /// either side has no usable time.
+    static func parkedTailIsBehindClock(newestParkedSeconds: Double, clockSeconds: Double) -> Bool {
+        guard newestParkedSeconds.isFinite, clockSeconds.isFinite else { return false }
+        return newestParkedSeconds < clockSeconds
+    }
 }

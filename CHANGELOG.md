@@ -30,6 +30,12 @@ the public-API contract.
 
 ### Fixed
 
+- **A finite software Live source ends even when its clock stopped behind the video tail.** Since the
+  dry-source rebuffer (AE#1121), the clock can be paused right at the end of a source. When it then did
+  not start again, the parked video stayed in a full renderer and the session kept reporting
+  `.playing`. The end now frees a parked tail that lies wholly behind the clock instead of waiting for
+  it.
+
 - **Upscaled and tone-mapped frames keep their colour on the right spot.** The frame chain (line art,
   tone map), the MetalFX conversion and the Lanczos scaler treated every frame's chroma as centred.
   Most video has it on the left luma column (the H.264 and HEVC default), so at 2x a colour edge came out

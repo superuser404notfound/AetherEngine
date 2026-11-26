@@ -37,4 +37,14 @@ struct SoftwareEndOfMediaClockTests {
         let tail = SoftwareEndOfMediaClock.tailPlayoutSeconds(clockSeconds: 10, lastAudioPts: 90_000)
         #expect(tail == SoftwareEndOfMediaClock.maxTailPlayoutSeconds)
     }
+
+    @Test("The end stops waiting for a parked tail only once all of it is behind the clock")
+    func parkedTailBehindClock() {
+        // The CI state: newest parked packet at 33.4 s, clock stopped at 36.8 s.
+        #expect(SoftwareEndOfMediaClock.parkedTailIsBehindClock(newestParkedSeconds: 33.4, clockSeconds: 36.8))
+        #expect(!SoftwareEndOfMediaClock.parkedTailIsBehindClock(newestParkedSeconds: 36.9, clockSeconds: 36.8))
+        #expect(!SoftwareEndOfMediaClock.parkedTailIsBehindClock(newestParkedSeconds: 36.8, clockSeconds: 36.8))
+        #expect(!SoftwareEndOfMediaClock.parkedTailIsBehindClock(newestParkedSeconds: .nan, clockSeconds: 36.8))
+        #expect(!SoftwareEndOfMediaClock.parkedTailIsBehindClock(newestParkedSeconds: 33.4, clockSeconds: .nan))
+    }
 }
