@@ -435,10 +435,9 @@ struct LiveAudioProgressTests {
 
     /// The end of a finite source does not wait for a parked tail that lies wholly behind the clock.
     ///
-    /// On CI the clock stood at 36.8 s with rate 2.0 after the rebuffer hold was lifted at the end, the
-    /// layer full of frames up to 23 s, and 255 packets parked: a stopped timebase never takes a late frame,
-    /// so the end waited without limit. Here the renderer stops taking frames for good once the clock runs,
-    /// which leaves the same parked tail behind a clock that reaches the end.
+    /// This pins the exit, not the cause: on CI a clock that did not start again left the layer full and
+    /// the end waiting without limit, which this machine does not reproduce. A renderer that stops taking
+    /// frames leaves the same parked tail, here behind a clock that runs past it.
     @Test
     func test_finiteLive_rendererStopsTakingFrames_endsPastTheParkedTail() async throws {
         // Arrange - the 32 s source, with a renderer that can be closed for good.
@@ -465,16 +464,9 @@ struct LiveAudioProgressTests {
         engine.play()
         try await waitFor { host.videoRendererForTesting.takeCadence().handedOver >= 560 }
         closed.update { $0 = true }
-        let finished = try await waitFor(upTo: .seconds(120)) {
-            engine.state == .ended || engine.errorInfo != nil
-        }
+        try await waitFor { engine.state == .ended || engine.errorInfo != nil }
 
         // Assert - the end came, with the clock past the content, and freed what it could not hand over.
-        #expect(finished, """
-            no end: state=\(engine.state) time=\(engine.currentTime) parked=\(host.parkedVideoCountForTesting) \
-            queued=\(String(describing: host.directLiveReadAheadForTesting?.packets.queuedPacketCount))
-            \((log.matching("[SWHost]").suffix(12) + log.matching("[AudioOutput]").suffix(6)).joined(separator: "\n"))
-            """)
         #expect(engine.errorInfo == nil)
         #expect(engine.currentTime > 30)
         #expect(!log.matching("parked video packets lie behind the clock").isEmpty)

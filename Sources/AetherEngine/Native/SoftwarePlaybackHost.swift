@@ -4361,20 +4361,31 @@ final class SoftwarePlaybackHost {
         }
 
         /// The newest timestamp among the parked packets, in source seconds; B-frames park out of
-        /// presentation order, so the FIFO's last packet is not necessarily it. nil when none has one.
+        /// presentation order, so the FIFO's last packet is not necessarily it. nil when any packet has
+        /// none, since that one could be the newest.
         func newestParkedVideoSeconds() -> Double? {
-            guard videoTimeBaseSeconds > 0 else { return nil }
-            var newest: Int64?
-            for p in parkedVideo where p.pointee.pts != Int64.min {
-                newest = max(newest ?? p.pointee.pts, p.pointee.pts)
+            guard videoTimeBaseSeconds > 0, !parkedVideo.isEmpty else { return nil }
+            var newest = Int64.min
+            for p in parkedVideo {
+                guard p.pointee.pts != Int64.min else { return nil }
+                newest = max(newest, p.pointee.pts)
             }
-            return newest.map { Double($0) * videoTimeBaseSeconds }
+            return Double(newest) * videoTimeBaseSeconds
         }
 
-        func parkedTailIsBehindClock() -> Bool {
-            guard clockArmed(), let newest = newestParkedVideoSeconds() else { return false }
-            return SoftwareEndOfMediaClock.parkedTailIsBehindClock(
-                newestParkedSeconds: newest, clockSeconds: audioOutput?.currentTimeSeconds ?? .nan)
+        /// What made the end-of-media drain stop on a late tail, for the log line at the end.
+        var lateParkedTail: (count: Int, newest: Double, clock: Double)?
+
+        /// Direct Live only: its AE#1121 rebuffer can leave the clock stopped at the end, and only a running
+        /// timebase drains the layer. Not while paused, which waits for play as before, and not for VOD,
+        /// whose slow decoder still hands its late tail over.
+        func endMayFreeLateParkedTail() -> Bool {
+            guard directLiveSource != nil, isPlaying(), clockArmed(),
+                  let newest = newestParkedVideoSeconds(), let clock = audioOutput?.currentTimeSeconds,
+                  SoftwareEndOfMediaClock.parkedTailIsBehindClock(newestParkedSeconds: newest, clockSeconds: clock)
+            else { return false }
+            lateParkedTail = (parkedVideo.count, newest, clock)
+            return true
         }
 
         enum ParkWait {
@@ -4382,8 +4393,8 @@ final class SoftwarePlaybackHost {
             case readGate
             /// Retain the already-read packet until its allocation fits, without dropping it.
             case packetCapacity(Int)
-            /// Feed the parked tail out at end of media, until it is empty or all of it is behind the
-            /// clock (`SoftwareEndOfMediaClock.parkedTailIsBehindClock`).
+            /// Feed the parked tail out at end of media, until it is empty or, on direct Live while
+            /// playing, all of it is behind the clock (`endMayFreeLateParkedTail`).
             case drainAll
         }
 
@@ -4410,7 +4421,7 @@ final class SoftwarePlaybackHost {
                         )
                     } ?? false
                 case .drainAll:
-                    return !parkedVideo.isEmpty && !parkedTailIsBehindClock()
+                    return !parkedVideo.isEmpty && !endMayFreeLateParkedTail()
                 }
             }
             while stillWaiting(), !stopRequested(), !backgroundAudioOnly() {
@@ -4681,14 +4692,14 @@ final class SoftwarePlaybackHost {
                     }
                 }
                 releaseRebufferHold("end of media, nothing left to rebuffer from")
+                lateParkedTail = nil
                 waitForRenderer(.drainAll)
                 guard admitsRead(genBeforeRead) else { return !stopRequested() }
-                if !parkedVideo.isEmpty, parkedTailIsBehindClock() {
+                if let late = lateParkedTail {
                     EngineLog.emit(
-                        "[SWHost] end of media: \(parkedVideo.count) parked video packets lie behind the clock "
-                        + "(newest \(String(format: "%.3f", newestParkedVideoSeconds() ?? .nan))s, clock "
-                        + "\(String(format: "%.3f", audioOutput?.currentTimeSeconds ?? .nan))s); freeing them "
-                        + "instead of waiting for the renderer",
+                        "[SWHost] end of media: \(late.count) parked video packets lie behind the clock "
+                        + "(newest \(String(format: "%.3f", late.newest))s, clock \(String(format: "%.3f", late.clock))s); "
+                        + "freeing them instead of waiting for the renderer",
                         category: .swPlayback)
                 }
                 freeParkedVideo()
