@@ -1190,7 +1190,7 @@ private final class Stage {
                        times: inout FrameUpscaler.StageTimes) throws -> (output: CVPixelBuffer, work: EncodedGPUWork?) {
         let format = CVPixelBufferGetPixelFormatType(original)
         let color = UpscaleColorParams(videoRange: format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                                       matrix: UpscaleMatrix.of(original))
+                                       matrix: UpscaleMatrix.of(original), siting: ChromaSiting.of(original))
         if #available(tvOS 27.1, *), let scaler = scaler as? any MTLFXSpatialScaler, let rgba, let scaled {
             let t0 = DispatchTime.now().uptimeNanoseconds
             // On the encoding thread only; a texture an earlier frame still uses stays alive in its work.

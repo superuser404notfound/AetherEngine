@@ -134,6 +134,8 @@ The producer follows the plan with `VODSegmentCutter`, a cut in decode order tha
 
 Background: [measurements.md, Segment cutting by decode time](measurements.md#segment-cutting-by-decode-time).
 
+**Both playlists say so.** A VOD media playlist on a keyframe-aligned plan carries `EXT-X-INDEPENDENT-SEGMENTS`, as the master always did. The engine hands AVPlayer the media playlist directly whenever it needs no master (most SDR H.264 films: no HDR, no subtitle or audio rendition). Without the tag there, AVPlayer assumed a segment could depend on the one before it and began every exact seek 1 to 3 segments early, more for a longer GOP. A seek to 60 s on 4 s segments asked seg13 instead of seg15 at a 2 s GOP, and on a 6 Mbit/s link a 4 s GOP file landed in 17 s instead of 7.7 s (AE#1128). A plan without a usable keyframe index (MPEG-TS, a remote MKV whose Cues could not be read, a sequential archive) does not carry it either. Its uniform grid opens a segment at the first keyframe past the boundary, up to a GOP late, so the frames before that keyframe sit in the segment before. Live playlists do not carry it, because a live cut can be forced (an ad seam) and a join starts mid-GOP.
+
 **Which timestamp "reaches" a boundary depends on the container.** The plan's boundaries are the container's own index entries, and containers disagree on what an entry means:
 
 - a mov/mp4 sample table holds decode times,
@@ -276,6 +278,10 @@ The reader's open window still drains after the pump parks, a few MB in the meas
 
 **Holes in the cache.** Scrubbing leaves retained bands of segments with gaps between them, inside the cache's stored min/max index range. So an index inside that range is no proof the segment exists. A fetch inside the range waits (2 s) only when the active producer's forward march actually covers the requested index. Otherwise it restarts at once (#129).
 
+**A short forward jump waits only while the march is faster than a restart (#932, AE#1128).** A request 1 to 8 segments past the producer's front (`forwardWaitWindow`) can either wait for the running producer to get there or restart it at the target. `MarchRateTracker` measures how fast the producer seals segments, and the provider waits only while the march would arrive sooner than a restart costs (3 s until one has been measured in the session).
+
+A seek in the first seconds of playback comes before the march has two completions, so there is nothing to decide on and the request waits. That wait is decided again at every completion that lands while it lasts, so the first measurement can still turn it into a restart. Before AE#1128 the request held until AVPlayer timed it out and asked again: 5 s of a 14.5 s landing in the report, and 26 s against 18.7 s to land in the repro (`aetherctl play --seek-after`, see the CLI docs).
+
 ### Seek deadline and recovery
 
 The public `seek(to:)` on the native path waits for AVPlayer's real landing (the first frame shown at the target), so `isSeeking` covers it (#37/#38). The wait is capped at 8 s (#65, #129).
@@ -326,6 +332,20 @@ Restart latency explains itself in the log (#93):
 - Any single `AVIOReader` read over 2 s emits one `slow read` summary that names where the time went: detour fetches with network time, `connStallTimeout` waits, reconnects, backoff sleeps, bytes dropped by the stale-generation guard, and the generation span.
 
 A slow read with all-zero counters means the wait happened before the read loop.
+
+### Serving a segment while it is written
+
+AVPlayer gets each VOD segment while the producer is still writing it, not after the cut (`LoadOptions.progressiveSegmentDelivery`, on by default since AE#1129).
+
+- The muxer flushes a fragment (a `moof` plus its `mdat`) about every 0.5 s (`HLSSegmentProducer.progressiveFragmentSeconds`). Without the option it holds up to 8 s.
+- The producer registers the segment's staging file with the cache as it opens it. The file is only appended to, then renamed as it stands when it is adopted, so a reader always sees a growing prefix of the final segment.
+- The loopback server answers with a chunked response and sends each fragment as it lands (`ProgressiveSegmentReader`). It ends at the seal.
+- A segment the producer abandons (restart, failed cut, teardown) ends its connection without the final chunk. AVPlayer then asks again instead of taking the partial bytes for a whole segment.
+- Each chunk sent counts as fetch activity for the #65 wedge watchdog. Otherwise one long transfer would read as AVPlayer having stopped fetching.
+
+Why it matters: a segment is cut at a keyframe, so its length follows the source's GOP. A file whose first keyframe interval is 10.7 s has a 10.7 s first segment, 11 MB at 8 Mbit/s, and without this AVPlayer showed nothing until all of it had crossed the link. On a fast source the segment is cut before AVPlayer asks and nothing changes.
+
+Cut points do not move, so every segment still opens on its own keyframe and the playlists still declare `EXT-X-INDEPENDENT-SEGMENTS`. Live, the remote HLS bypass and the software path do not use it.
 
 ### Keeping AVPlayer from timing out
 

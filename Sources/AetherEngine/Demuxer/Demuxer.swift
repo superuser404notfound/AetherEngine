@@ -2531,6 +2531,31 @@ public final class Demuxer: @unchecked Sendable {
         return nil
     }
 
+    /// AE#1127: the track list is rebuilt on many reads and the extradata never changes under a
+    /// stream, so each header is split once.
+    private let assHeaderSplitLock = NSLock()
+    private var assHeaderSplits: [Int: (extradata: Data, header: String?, events: [ASSHeaderEvent])] = [:]
+
+    private func splitASSHeader(_ extradata: Data, streamIndex: Int) -> (String?, [ASSHeaderEvent]) {
+        assHeaderSplitLock.lock()
+        if let cached = assHeaderSplits[streamIndex], cached.extradata == extradata {
+            assHeaderSplitLock.unlock()
+            return (cached.header, cached.events)
+        }
+        assHeaderSplitLock.unlock()
+        // MKV CodecPrivate is frequently NUL-terminated; strip NULs so libass
+        // (C-string-style parser) doesn't silently stop before host-appended content.
+        var header: String? = nil
+        var events: [ASSHeaderEvent] = []
+        if let text = String(data: extradata, encoding: .utf8)?.replacingOccurrences(of: "\0", with: "") {
+            (header, events) = ASSHeaderEvents.split(text)
+        }
+        assHeaderSplitLock.lock()
+        assHeaderSplits[streamIndex] = (extradata, header, events)
+        assHeaderSplitLock.unlock()
+        return (header, events)
+    }
+
     private func trackInfo(from stream: UnsafeMutablePointer<AVStream>, index: Int) -> TrackInfo {
         let codecpar = stream.pointee.codecpar!
         let codecName: String
@@ -2575,16 +2600,14 @@ public final class Demuxer: @unchecked Sendable {
         // ASS/SSA codec extradata = script header ([Script Info] + [V4+ Styles] +
         // [Events] format line). Surfaced for LoadOptions.preserveASSMarkup hosts.
         var assHeader: String? = nil
+        var headerEvents: [ASSHeaderEvent] = []
         let codecID = codecpar.pointee.codec_id
         let isAudio = codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO
         if codecID == AV_CODEC_ID_ASS || codecID == AV_CODEC_ID_SSA,
            let extradata = codecpar.pointee.extradata,
            codecpar.pointee.extradata_size > 0 {
             let bytes = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
-            // MKV CodecPrivate is frequently NUL-terminated; strip NULs so libass
-            // (C-string-style parser) doesn't silently stop before host-appended content.
-            assHeader = String(data: bytes, encoding: .utf8)?
-                .replacingOccurrences(of: "\0", with: "")
+            (assHeader, headerEvents) = splitASSHeader(bytes, streamIndex: index)
         }
 
         var info = TrackInfo(
@@ -2608,6 +2631,7 @@ public final class Demuxer: @unchecked Sendable {
             profile: VideoStreamFormat.profileName(codecID: codecID, profile: codecpar.pointee.profile)
         )
         if let title, !title.isEmpty { info.sourceTitle = title }
+        info.headerEvents = headerEvents
         return info
     }
 

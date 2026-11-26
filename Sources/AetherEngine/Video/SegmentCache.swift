@@ -1732,11 +1732,29 @@ final class ProgressiveSegmentReader: @unchecked Sendable {
                 if fstat(fd, &sealedStat) == 0, sealedStat.st_size > offset { continue }
                 return .abandoned
             case .abandoned:
+                // The cache remembers only the last `sealedStagingMemory` seals, so a reader that sat
+                // behind a full AVPlayer buffer while the prefetch adopted that many more reads a
+                // finished segment as abandoned. The stored file being the one this descriptor holds
+                // says it was sealed, and adoption renames it as it stands, so its size is final.
+                if let sealedBytes = sealedSizeOfStoredFile() {
+                    if offset >= sealedBytes { return .finished }
+                    continue
+                }
                 return .abandoned
             }
             if Date() >= deadline { return .abandoned }
             Thread.sleep(forTimeInterval: pollInterval)
         }
+    }
+
+    /// The size of the segment stored at `index` when it is the very file this reader holds open,
+    /// nil when nothing is stored there or a later producer wrote a different file.
+    private func sealedSizeOfStoredFile() -> Int64? {
+        guard let url = cache?.peekURL(index: index) else { return nil }
+        var held = stat(), stored = stat()
+        guard fstat(fd, &held) == 0, stat(url.path, &stored) == 0,
+              held.st_dev == stored.st_dev, held.st_ino == stored.st_ino else { return nil }
+        return Int64(stored.st_size)
     }
 
     /// Reads to the seal, for a caller that needs the whole segment. nil when it was abandoned.

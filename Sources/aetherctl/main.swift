@@ -907,6 +907,9 @@ if first == "play" {
     // shape needs both halves: the burst leaves the store in the state under test, and only the
     // playing half shows what the overlay carries through it.
     let seekCount = takeIntFlag("--seek-count", from: &rest)
+    // AE#1128: the first seek may come before the producer has a measured march rate, which only a
+    // seek in the first seconds of playback reaches. Seeks fire past this tick (default 10).
+    let seekAfter = takeIntFlag("--seek-after", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
     let playForceSW = takeFlag("--sw", from: &rest)
     let playSoftwareEscalation = !takeFlag("--no-sw-escalation", from: &rest)
@@ -1048,9 +1051,13 @@ if first == "play" {
     // drain cycle. This is the knob for an origin that refuses new requests in windows: run it
     // against one and count the ranges in its own log, or read `conn start ... held` here.
     let heldConnection = takeFlag("--held-connection", from: &rest)
-    // LoadOptions.progressiveSegmentDelivery: serve each VOD segment while it is written. Pair it
-    // with a throttled origin to see the startup difference; on a fast source nothing changes.
-    let progressiveSegments = takeFlag("--progressive-segments", from: &rest)
+    // LoadOptions.progressiveSegmentDelivery, on by default since AE#1129. --no-progressive-segments
+    // is the other arm of an A/B against a throttled origin; --progressive-segments stays accepted
+    // so older recipes still parse.
+    if takeFlag("--progressive-segments", from: &rest) {
+        print("NOTE: --progressive-segments is the default now; --no-progressive-segments is the other arm")
+    }
+    let progressiveSegments = !takeFlag("--no-progressive-segments", from: &rest)
     // AE#1109: the opt-in whole-source prefetch, which is what leaves a resident band behind a
     // resume for a backward seek to restart under.
     PlayCacheOverrides.forwardBufferSegments = takeIntFlag("--forward-buffer-segments", from: &rest)
@@ -1300,7 +1307,7 @@ if first == "play" {
         }
         done.wait()
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, liveCushion: liveCushion, liveJoinAtStart: liveJoinAtStart, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, liveReopenParameter: liveReopenParameter, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, liveCushion: liveCushion, liveJoinAtStart: liveJoinAtStart, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, liveReopenParameter: liveReopenParameter, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, seekAfter: seekAfter, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, servedURL: servedURL, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, nativeVideoFrameDiagnostics: nativeVideoFrameDiagnostics, nativeVideoFrameRecovery: nativeVideoFrameRecovery, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,

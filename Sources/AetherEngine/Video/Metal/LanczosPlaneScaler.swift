@@ -32,10 +32,11 @@ final class LanczosPlaneScaler {
     private let queue: MTLCommandQueue
     private let kernels: LanczosKernels
     private let io: MetalFrameIO
+    private let device: MTLDevice
     private let lumaColumns: MTLBuffer
     private let lumaRows: MTLBuffer
-    private let chromaColumns: MTLBuffer
-    private let chromaRows: MTLBuffer
+    /// The chroma taps per siting (`ChromaSiting`), built the first time a frame carries it.
+    private var chromaTaps: [ChromaSiting: (rows: MTLBuffer, columns: MTLBuffer)] = [:]
     /// The row pass's output per plane: target width, source height, 32-bit float so a 10-bit plane loses
     /// nothing between the passes.
     private let lumaTemp: MTLTexture
@@ -47,11 +48,9 @@ final class LanczosPlaneScaler {
     init(device: MTLDevice, queue: MTLCommandQueue, sourceWidth: Int, sourceHeight: Int,
          targetWidth: Int, targetHeight: Int, io: MetalFrameIO? = nil) throws {
         guard targetWidth % 2 == 0, targetHeight % 2 == 0 else { throw Failure("odd target size") }
-        let chromaW = (sourceWidth + 1) / 2, chromaH = (sourceHeight + 1) / 2
+        let chromaH = (sourceHeight + 1) / 2
         guard let lumaX = LanczosTaps(inputCount: sourceWidth, outputCount: targetWidth),
-              let lumaY = LanczosTaps(inputCount: sourceHeight, outputCount: targetHeight),
-              let chromaX = LanczosTaps(inputCount: chromaW, outputCount: targetWidth / 2),
-              let chromaY = LanczosTaps(inputCount: chromaH, outputCount: targetHeight / 2)
+              let lumaY = LanczosTaps(inputCount: sourceHeight, outputCount: targetHeight)
         else { throw Failure("Lanczos \(sourceWidth)x\(sourceHeight) -> \(targetWidth)x\(targetHeight) is not an upscale") }
         do {
             kernels = try LanczosKernels.shared(for: device)
@@ -59,12 +58,6 @@ final class LanczosPlaneScaler {
             throw Failure("Lanczos kernels not built", underlying: error)
         }
         guard let io = io ?? MetalFrameIO(device: device) else { throw Failure("no Metal texture cache") }
-        func buffer(_ taps: LanczosTaps) throws -> MTLBuffer {
-            guard let b = taps.table.withUnsafeBytes({
-                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
-            }) else { throw Failure("tap buffer not allocated") }
-            return b
-        }
         func texture(_ format: MTLPixelFormat, _ w: Int, _ h: Int) throws -> MTLTexture {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
             d.usage = [.shaderRead, .shaderWrite]
@@ -72,18 +65,38 @@ final class LanczosPlaneScaler {
             guard let t = device.makeTexture(descriptor: d) else { throw Failure("texture \(w)x\(h) not allocated") }
             return t
         }
-        lumaRows = try buffer(lumaX)
-        lumaColumns = try buffer(lumaY)
-        chromaRows = try buffer(chromaX)
-        chromaColumns = try buffer(chromaY)
+        lumaRows = try Self.buffer(device, lumaX)
+        lumaColumns = try Self.buffer(device, lumaY)
         lumaTemp = try texture(.r32Float, targetWidth, sourceHeight)
         chromaTemp = try texture(.rg32Float, targetWidth / 2, chromaH)
+        self.device = device
         self.queue = queue
         self.io = io
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
         self.targetWidth = targetWidth
         self.targetHeight = targetHeight
+        _ = try chromaTaps(for: .left)
+    }
+
+    private static func buffer(_ device: MTLDevice, _ taps: LanczosTaps) throws -> MTLBuffer {
+        guard let b = taps.table.withUnsafeBytes({
+            device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+        }) else { throw Failure("tap buffer not allocated") }
+        return b
+    }
+
+    /// The chroma plane is scaled on its own, so its taps carry the siting. Left-sited chroma scaled with
+    /// centred taps lands half a target sample to the right at 2x.
+    private func chromaTaps(for siting: ChromaSiting) throws -> (rows: MTLBuffer, columns: MTLBuffer) {
+        if let taps = chromaTaps[siting] { return taps }
+        let offset = siting.chromaOffset
+        guard let x = LanczosTaps(inputCount: (sourceWidth + 1) / 2, outputCount: targetWidth / 2, offset: offset.x),
+              let y = LanczosTaps(inputCount: (sourceHeight + 1) / 2, outputCount: targetHeight / 2, offset: offset.y)
+        else { throw Failure("Lanczos chroma is not an upscale") }
+        let taps = (rows: try Self.buffer(device, x), columns: try Self.buffer(device, y))
+        chromaTaps[siting] = taps
+        return taps
     }
 
     /// One frame's work, encoded and not committed: the output buffer (input's format, target size, no
@@ -99,6 +112,7 @@ final class LanczosPlaneScaler {
         }
         let tenBit = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             || format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+        let chromaTaps = try chromaTaps(for: ChromaSiting.of(input))
         let output = try makeOutput(format: format)
         let lease = io.lease()
         let iy = try planeTexture(input, plane: 0, format: tenBit ? .r16Unorm : .r8Unorm, lease)
@@ -120,8 +134,8 @@ final class LanczosPlaneScaler {
                                    height: UInt32(chromaH), codeScale: codeScale, maxCode: maxCode)
         pass(enc, kernels.rows, taps: lumaRows, region: &luma, from: iy, to: lumaTemp)
         pass(enc, kernels.columns, taps: lumaColumns, region: &luma, from: lumaTemp, to: oy)
-        pass(enc, kernels.rows, taps: chromaRows, region: &chroma, from: ic, to: chromaTemp)
-        pass(enc, kernels.columns, taps: chromaColumns, region: &chroma, from: chromaTemp, to: oc)
+        pass(enc, kernels.rows, taps: chromaTaps.rows, region: &chroma, from: ic, to: chromaTemp)
+        pass(enc, kernels.columns, taps: chromaTaps.columns, region: &chroma, from: chromaTemp, to: oc)
         enc.endEncoding()
         return (output, EncodedGPUWork(commandBuffer: cb, textures: lease) { status, error in
             Failure("command buffer \(status.rawValue): \(error.map { "\($0)" } ?? "no error")", underlying: error)

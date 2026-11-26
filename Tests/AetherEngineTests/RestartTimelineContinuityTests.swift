@@ -131,7 +131,10 @@ struct RestartTimelineContinuityTests {
         #expect(prov.mediaSegment(at: 0) != nil)
         let continuous = try #require(prov.mediaSegment(at: 1))
         let continuousTrafs = FMP4.trafSummaries(of: continuous)
-        #expect(continuousTrafs.count == 2, "fixture must carry video + audio: \(continuousTrafs)")
+        // Progressive delivery (the default since AE#1129) cuts a segment into 0.5 s fragments,
+        // so there is one traf per track and fragment, not one per track.
+        #expect(Set(continuousTrafs.map(\.trackID)).count == 2,
+                "fixture must carry video + audio: \(continuousTrafs)")
         // The continuous segment 1 must sit at its playlist offset, not at 0: a zero tfdt here
         // would make the whole witness vacuous.
         #expect(continuousTrafs.allSatisfy { $0.baseMediaDecodeTime > 0 }, "\(continuousTrafs)")
@@ -202,12 +205,17 @@ struct RestartTimelineContinuityTests {
 
         let seg0 = try #require(prov.mediaSegment(at: 0))
         let trafs = FMP4.trafSummaries(of: seg0)
-        #expect(trafs.count == 2, "fixture must carry video + audio: \(trafs)")
-        for traf in trafs {
+        let trackIDs = Set(trafs.map(\.trackID))
+        #expect(trackIDs.count == 2, "fixture must carry video + audio: \(trafs)")
+        // With progressive delivery a segment holds one traf per track and 0.5 s fragment, so the
+        // later fragments sit seconds in. Each track must start near zero and only move forward.
+        for trackID in trackIDs.sorted() {
+            let times = trafs.filter { $0.trackID == trackID }.map(\.baseMediaDecodeTime)
             // A negative timestamp written into the unsigned tfdt shows up as a huge value;
             // one source second is comfortably above any sane head-of-stream base time.
-            #expect(traf.baseMediaDecodeTime < 100_000,
-                    "head-of-stream tfdt out of range (negative wrap?): \(traf)")
+            #expect(times[0] < 100_000, "head-of-stream tfdt out of range (negative wrap?): track \(trackID) \(times)")
+            #expect(times.allSatisfy { $0 < 1 << 31 }, "tfdt wrapped inside segment 0: track \(trackID) \(times)")
+            #expect(times == times.sorted(), "tfdt went backwards inside segment 0: track \(trackID) \(times)")
         }
     }
 }

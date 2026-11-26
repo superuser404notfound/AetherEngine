@@ -41,7 +41,8 @@ struct ForwardWaitMarchRateTests {
                               producerBase: Int, initialRestartIndex: Int,
                               backpressureWait: TimeInterval = 0.3,
                               settle: TimeInterval = 0.2,
-                              burstWindow: TimeInterval = 1.5) -> VideoSegmentProvider {
+                              burstWindow: TimeInterval = 1.5,
+                              repositionSlice: TimeInterval = 0.05) -> VideoSegmentProvider {
         VideoSegmentProvider(
             cache: cache, segments: segments(200), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (3840, 2160), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
@@ -56,7 +57,7 @@ struct ForwardWaitMarchRateTests {
             marchRateSettleSeconds: settle,
             marchRateBurstWindowSeconds: burstWindow,
             initialRestartIndex: initialRestartIndex,
-            repositionWaitSlice: 0.05,
+            repositionWaitSlice: repositionSlice,
             repositionRideCapSeconds: 5.0,
             forwardBackpressureWaitSeconds: backpressureWait
         )
@@ -458,6 +459,88 @@ struct ForwardWaitMarchRateTests {
 
         _ = provider.mediaSegment(at: 31)
 
+        #expect(recorder.all.isEmpty)
+    }
+
+    /// AE#1128: a seek in the first seconds of playback comes before the march has two completions,
+    /// so the decision is the stock wait. The measurement arrives a moment later and says the march
+    /// is far too slow, but the wait used to hold for its full 30 s until AVPlayer gave up and asked
+    /// again (repro: 8 s of a 13 s landing; reporter's log: 5 s of 14.5 s).
+    @Test("a jump made before any measurement restarts once the march is measured slow",
+          .timeLimit(.minutes(3)))
+    func jumpBeforeMeasurementRestartsOnceMeasuredSlow() {
+        let cache = makeCache()
+        defer { cache.close() }
+        for i in 0...25 { cache.store(index: i, data: Data(repeating: 0xC1, count: 8)) }
+        let recorder = Recorder()
+        let provider = makeProvider(cache: cache, recorder: recorder, producerBase: 0, initialRestartIndex: 0,
+                                    backpressureWait: 30.0)
+        _ = provider.mediaSegment(at: 25)
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.2)
+            self.recordSlowMarch(provider, 18...25)
+        }
+
+        let start = DispatchTime.now()
+        let served = provider.mediaSegment(at: 31)
+
+        #expect(served != nil)
+        #expect(recorder.all == [31])
+        #expect(seconds(since: start) < 10.0)
+        #expect(provider.marchRevisitDecisionsForTesting >= 1)  // decided again, not on the first look
+    }
+
+    /// The same, right after a provider-fired restart: the request lands past the old producer's sealed
+    /// top (branch b), where the restart loop vetoes the fire and rides the march.
+    @Test("right after a restart, an unmeasured jump restarts once the march is measured slow",
+          .timeLimit(.minutes(3)))
+    func jumpAfterRestartBeforeMeasurementRestarts() {
+        let cache = makeCache()
+        defer { cache.close() }
+        for i in 0...60 { cache.store(index: i, data: Data(repeating: 0xC4, count: 8)) }
+        cache.resetHighWaterForRestart()
+        let recorder = Recorder()
+        let provider = makeProvider(cache: cache, recorder: recorder, producerBase: 65, initialRestartIndex: 65,
+                                    backpressureWait: 30.0, repositionSlice: 2.0)
+        _ = provider.mediaSegmentURL(at: 67)
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.2)
+            self.recordSlowMarch(provider, 53...60)
+        }
+
+        #expect(provider.mediaSegmentURL(at: 70) == nil)
+        let start = DispatchTime.now()
+        let served = provider.mediaSegmentSource(at: 70, onSlow: nil)
+
+        #expect(served != nil)
+        #expect(recorder.all == [70])
+        #expect(seconds(since: start) < 1.9)  // inside the first reposition slice, not at the backstop
+        #expect(provider.marchRevisitDecisionsForTesting >= 1)
+    }
+
+    @Test("a jump made before any measurement keeps waiting when the march is measured fast",
+          .timeLimit(.minutes(3)))
+    func jumpBeforeMeasurementWaitsWhenMeasuredFast() {
+        let cache = makeCache()
+        defer { cache.close() }
+        for i in 0...25 { cache.store(index: i, data: Data(repeating: 0xC2, count: 8)) }
+        let recorder = Recorder()
+        let provider = makeProvider(cache: cache, recorder: recorder, producerBase: 0, initialRestartIndex: 0,
+                                    backpressureWait: 30.0)
+        _ = provider.mediaSegment(at: 25)
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.2)
+            self.recordSlowMarch(provider, 18...25, segmentSeconds: 0.1)
+            for i in 26...31 {
+                Thread.sleep(forTimeInterval: 0.1)
+                cache.store(index: i, data: Data(repeating: 0xC3, count: 8))
+                provider.recordMarchStore(index: i, bytes: 34_500_000)
+            }
+        }
+
+        let served = provider.mediaSegment(at: 31)
+
+        #expect(served != nil)
         #expect(recorder.all.isEmpty)
     }
 

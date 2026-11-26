@@ -40,6 +40,34 @@ struct UpscaleColorKernelTests {
         #expect(maxC <= 1)
     }
 
+    /// Alternating chroma columns and rows, read at the samples' own positions and written back there. A
+    /// sample that sits on a luma sample comes back as it was. Read as centred (the old kernels), every
+    /// chroma sample came back as a blur of its neighbours.
+    @Test(arguments: [ChromaSiting.left, .topLeft, .bottom])
+    func hardChromaComesBackAtItsSiting(_ siting: ChromaSiting) throws {
+        let h = try KernelHarness()
+        let (w, ht) = (32, 32)
+        let src = try h.makePixelBuffer(width: w, height: ht, videoRange: true)
+        // On the axis where chroma sits between two luma samples, constant, so only the on-sample axis varies.
+        let alongX = siting.x != 0.5, alongY = siting.y != 0.5
+        h.fill(src) { x, y in
+            let odd = (alongX && (x / 2) % 2 == 1) != (alongY && (y / 2) % 2 == 1)
+            return (126, odd ? 104 : 152, odd ? 150 : 106)
+        }
+        let rgba = try h.makeRGBA(width: w, height: ht)
+        let dst = try h.makePixelBuffer(width: w, height: ht, videoRange: true)
+        try h.nv12ToRGBA(src, rgba: rgba, videoRange: true, siting: siting)
+        try h.rgbaToNV12(rgba, dst: dst, videoRange: true, siting: siting)
+        var maxC = 0
+        for y in 0..<(ht / 2) {
+            for x in 0..<(w / 2) {
+                let a = h.chroma(src, x, y), b = h.chroma(dst, x, y)
+                maxC = max(maxC, abs(Int(a.0) - Int(b.0)), abs(Int(a.1) - Int(b.1)))
+            }
+        }
+        #expect(maxC <= 1, "C \(maxC) at \(siting)")
+    }
+
     @Test func videoRangeBlackAndWhiteMapToRGBExtremes() throws {
         let h = try KernelHarness()
         let src = try h.makePixelBuffer(width: 16, height: 16, videoRange: true)
@@ -219,11 +247,11 @@ private struct KernelHarness {
     }
 
     private func run(_ pipeline: MTLComputePipelineState, grid: (Int, Int), videoRange: Bool, matrix: UpscaleMatrix,
-                     textures: [MTLTexture]) throws {
+                     siting: ChromaSiting, textures: [MTLTexture]) throws {
         guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { throw Failure() }
         enc.setComputePipelineState(pipeline)
         for (i, t) in textures.enumerated() { enc.setTexture(t, index: i) }
-        var params = UpscaleColorParams(videoRange: videoRange, matrix: matrix)
+        var params = UpscaleColorParams(videoRange: videoRange, matrix: matrix, siting: siting)
         enc.setBytes(&params, length: MemoryLayout<UpscaleColorParams>.size, index: 0)
         let tg = MTLSize(width: 8, height: 8, depth: 1)
         enc.dispatchThreads(MTLSize(width: grid.0, height: grid.1, depth: 1), threadsPerThreadgroup: tg)
@@ -233,17 +261,21 @@ private struct KernelHarness {
         if cb.status != .completed { throw Failure() }
     }
 
-    func nv12ToRGBA(_ pb: CVPixelBuffer, rgba: MTLTexture, videoRange: Bool, matrix: UpscaleMatrix = .bt709) throws {
+    func nv12ToRGBA(_ pb: CVPixelBuffer, rgba: MTLTexture, videoRange: Bool, matrix: UpscaleMatrix = .bt709,
+                    siting: ChromaSiting = .left) throws {
         let y = try planeTexture(pb, plane: 0, format: .r8Unorm)
         let c = try planeTexture(pb, plane: 1, format: .rg8Unorm)
-        try run(toRGBA, grid: (rgba.width, rgba.height), videoRange: videoRange, matrix: matrix, textures: [y.0, c.0, rgba])
+        try run(toRGBA, grid: (rgba.width, rgba.height), videoRange: videoRange, matrix: matrix, siting: siting,
+                textures: [y.0, c.0, rgba])
         withExtendedLifetime((y.1, c.1)) {}
     }
 
-    func rgbaToNV12(_ rgba: MTLTexture, dst: CVPixelBuffer, videoRange: Bool, matrix: UpscaleMatrix = .bt709) throws {
+    func rgbaToNV12(_ rgba: MTLTexture, dst: CVPixelBuffer, videoRange: Bool, matrix: UpscaleMatrix = .bt709,
+                    siting: ChromaSiting = .left) throws {
         let y = try planeTexture(dst, plane: 0, format: .r8Unorm)
         let c = try planeTexture(dst, plane: 1, format: .rg8Unorm)
-        try run(toNV12, grid: (rgba.width / 2, rgba.height / 2), videoRange: videoRange, matrix: matrix, textures: [rgba, y.0, c.0])
+        try run(toNV12, grid: (rgba.width / 2, rgba.height / 2), videoRange: videoRange, matrix: matrix, siting: siting,
+                textures: [rgba, y.0, c.0])
         withExtendedLifetime((y.1, c.1)) {}
     }
 }

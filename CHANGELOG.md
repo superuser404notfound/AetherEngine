@@ -19,7 +19,56 @@ the public-API contract.
   On its own it keeps `objectAudioRendering`, so the heights reach the render. `aetherctl` takes it as
   `--audio-shaping binaural`. See [formats.md › Binaural for headphones](docs/formats.md#binaural-for-headphones).
 
+### Changed
+
+- **VOD segments are served while they are written, by default (AE#1129).**
+  `LoadOptions.progressiveSegmentDelivery` is now `true`. AVPlayer starts on the first half-second
+  fragments of a segment instead of waiting for its cut, which matters when the first keyframe interval
+  is long: a file with keyframes at 0 and 10.7 s started after 5.8 s over a 25 Mbit/s link, and now after
+  2.8 s. Nothing changes on a source fast enough to cut segments before AVPlayer asks. Set the option to
+  false for the old behaviour; `aetherctl play --no-progressive-segments` does the same.
+
 ### Fixed
+
+- **Upscaled and tone-mapped frames keep their colour on the right spot.** The frame chain (line art,
+  tone map), the MetalFX conversion and the Lanczos scaler treated every frame's chroma as centred.
+  Most video has it on the left luma column (the H.264 and HEVC default), so at 2x a colour edge came out
+  half a pixel beside its luma edge, and a same-size pass blurred hard chroma edges. They now read the
+  chroma where the frame's tag puts it, untagged as left, and write it back there. Software-decoded
+  frames now carry the stream's chroma location tag, as VideoToolbox's do.
+
+- **GPU deinterlaced frames no longer keep an earlier frame's color tags (FFmpegBuild 3.19.2).** The
+  VideoToolbox deinterlacers and the GPU inverse telecine reuse output buffers, and a reused buffer kept
+  the tags of the frame it last held, so an HLG transfer function could stay on later untagged frames.
+  The deinterlaced output also no longer claims to be interlaced (field count and field detail), and
+  full-range NV12 comes out in a full-range buffer instead of a video-range one. Both deinterlacer
+  patches are now at their reviewed upstream state (FFmpeg PR 26276 and 26244).
+
+- **Exact seeks on a media-playlist session no longer fetch 1 to 3 segments before the target
+  (AE#1128).** The engine opens AVPlayer on the media playlist whenever it needs no master, which is
+  most SDR H.264 films, and that playlist did not declare `EXT-X-INDEPENDENT-SEGMENTS` (only the
+  master did). AVPlayer then began every exact seek early to find a decodable start, more the longer
+  the GOP. A VOD media playlist on a keyframe-aligned plan now carries the tag, since every segment
+  of such a plan opens on its own keyframe. A plan without a usable index (MPEG-TS, a remote MKV
+  whose Cues could not be read) keeps the old playlist. On a 6 Mbit/s link with a 4 Mbit/s, 4 s GOP file, a seek to 60 s landed in 7.7 s instead
+  of 17 s (3 runs each). Live playlists are unchanged.
+
+- **A seek in the first seconds of a slow remote session no longer waits on a march it already
+  knows is too slow (AE#1128).** The provider decides between waiting for the running producer and
+  restarting it at the target from the measured march rate. A seek before the second segment was
+  sealed had no measurement, so it waited, and the measurement that arrived a moment later was never
+  read: the request held until AVPlayer timed it out and asked again. The wait is now decided again
+  at every segment the producer seals. Measured on a 30 Mbit/s H.264 + DTS file over a link at about
+  media rate, a seek to 30 s right after the start landed in 18.7 s instead of 26 s (4 runs each).
+  `aetherctl play` gains `--seek-after N` to put a seek that early.
+
+- **ASS tracks whose events sit in the track header now show their subtitles (AE#1127).** Some
+  Matroska muxers write every `Dialogue:` line of an ASS track into its CodecPrivate and no subtitle
+  blocks. libass reads them from there, so mpv showed the lines, but the engine only sees blocks and
+  delivered no cue at all (`packets=0`). The engine now lifts those lines out of the header at open
+  and feeds them to the session as packets, on the native and the software route, into the native
+  WebVTT rendition, and for sidecar containers. They are also removed from `TrackInfo.assHeader`, so
+  a host that renders the header with libass does not draw them twice.
 
 - **`.rebuffering` no longer shows up while the software clock is still running.** The software
   host published `isRebuffering` before it paused the synchronizer, and the flag travels to the main

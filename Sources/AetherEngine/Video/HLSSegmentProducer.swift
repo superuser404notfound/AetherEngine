@@ -1670,7 +1670,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audioMoovPrimeFrame: [UInt8]? = nil,
         audioMoovPrimeKnownUnobtainable: Bool = false,
         audioDelaySeconds: Double = 0,
-        servesSegmentsProgressively: Bool = false,
+        servesSegmentsProgressively: Bool = true,
         foldsDolbyVisionFEL: Bool = true,
         epoch: UInt64 = 0
     ) {

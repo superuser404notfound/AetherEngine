@@ -2310,6 +2310,7 @@ extension AetherEngine {
             packetStore.harvest(streamIndex: idx, packet: pkt, timeBase: tb,
                                 assembleSplitDisplaySets: assembleSplitSets)
         }
+        host.subtitleHeaderEventSink = { tracks in packetStore.seedHeaderEvents(from: tracks) }
         // SW path has no AVPlayer-clock fold; the host's synchronizer is the only clock.
         self.playlistShiftSeconds = 0
         self.setPresentationAxis(PresentationAxisMap())

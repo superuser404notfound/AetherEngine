@@ -499,6 +499,7 @@ Live recording (AE#560): `AetherEngine+Recording.swift` starts it; these files c
 
 | File | What it does |
 | --- | --- |
+| `ASSHeaderEvents.swift` | Lifts the `Dialogue:` lines a muxer left in an ASS track's CodecPrivate out of the header, as Matroska-block payloads the session decodes like packets (AE#1127). |
 | `ASSScriptBuilder.swift` | Rebuilds raw ASS event cues + `TrackInfo.assHeader` into a complete script for whole-file renderers. |
 | `ExternalSubtitleFillQueue.swift` | Runs the whole-file decodes of load-declared sidecars into their native stores, one at a time, the picked track first. Shared by the loopback session and the `nativeRemoteHLS` stand-in (AE#984). |
 | `ExternalSubtitleTrack.swift` | Host-facing descriptor for external subtitle files registered as first-class tracks (synthetic `TrackInfo` ids, #88; `sourceStreamIndex` addresses one stream of a container URL, #266). |
@@ -632,6 +633,7 @@ Notes:
 | `BT2390ToneCurve.swift` | AE#957: the BT.2390 tone curve from a source peak to a target peak on PQ values (the CPU reference), the PQ conversions, which source value sets the peak (`ToneMapSourcePeak`), and the curve's shader parameters. |
 | `FrameChainOutput.swift` | AE#957: `FrameChainColorVolume`, the colour volume a frame chain stage declares for its output, and the attachments a chain's output buffer carries (the source's, minus its geometry, with the declared HDR10 metadata). |
 | `UpscaleRouteDecision.swift` | Whether and how a load upscales: source geometry, the plan, which scaler each source size gets (`UpscaleSizePolicy`), and process-wide failure and cost memory. |
+| `ChromaSiting.swift` | Where a 4:2:0 buffer's chroma sits, from its chroma location tag (untagged is left), as the frame chain, the MetalFX conversion and Lanczos read and write it, plus the Metal functions both shader libraries share for it. |
 | `LanczosTaps.swift` | The Lanczos-3 taps of one resample axis (first source index and six normalised weights per output sample), which `LanczosPlaneScaler` uploads. Pure, so its tests run in the simulator too. |
 | `VideoProcessingRouteDecision.swift` | #957: whether a load takes the picture processing route, the plan (curve and declared metadata), and the process-wide failure memory. |
 

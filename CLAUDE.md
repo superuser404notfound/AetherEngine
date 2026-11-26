@@ -79,7 +79,9 @@ draws them. The engine draws no UI.
 - **Text subtitles arrive as ASS** (libavcodec converts SRT, WebVTT and teletext). Never write a
   per-format parser.
 - **Matroska cues are not sync points**: `AVINDEX_KEYFRAME` lies for MKV; verify keyframes.
-- **AVPlayer places segments by playlist**, not by fetch; a cold seek looks back a fixed 6 to 8 s.
+- **AVPlayer places segments by playlist**, not by fetch. Without `EXT-X-INDEPENDENT-SEGMENTS` a cold
+  exact seek starts 1 to 3 segments early, more for a longer GOP; a VOD media playlist on a
+  keyframe-aligned plan declares it, so its seeks start at the target segment (AE#1128).
 - Every Dolby Vision RPU passes `DoviRpuGuard` before libdovi parses it.
 
 ## Conventions

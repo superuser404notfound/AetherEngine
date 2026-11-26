@@ -26,11 +26,15 @@ struct UpscaleColorParams {
     var videoRange: UInt32
     var kr: Float
     var kb: Float
+    var sitingX: Float
+    var sitingY: Float
 
-    init(videoRange: Bool, matrix: UpscaleMatrix) {
+    init(videoRange: Bool, matrix: UpscaleMatrix, siting: ChromaSiting) {
         self.videoRange = videoRange ? 1 : 0
         kr = matrix.kr
         kb = matrix.kb
+        sitingX = siting.x
+        sitingY = siting.y
     }
 }
 
@@ -41,7 +45,9 @@ enum UpscaleShaderSource {
     #include <metal_stdlib>
     using namespace metal;
 
-    struct UpscaleColorParams { uint videoRange; float kr; float kb; };
+    struct UpscaleColorParams { uint videoRange; float kr; float kb; float sitingX; float sitingY; };
+
+    \(ChromaSiting.shaderSource)
 
     inline float3 decodeYCbCr(float y, float2 c, bool videoRange, float kr, float kb) {
         float3 v;
@@ -67,19 +73,22 @@ enum UpscaleShaderSource {
         return float3(y, cb + 128.0 / 255.0, cr + 128.0 / 255.0);
     }
 
+    // Chroma bilinear at the luma sample, from where the buffer's tag puts the chroma samples (ChromaSiting).
     kernel void nv12ToRGBA(constant UpscaleColorParams &p [[buffer(0)]],
                            texture2d<float, access::read> yTex [[texture(0)]],
-                           texture2d<float, access::read> cTex [[texture(1)]],
+                           texture2d<float, access::sample> cTex [[texture(1)]],
                            texture2d<float, access::write> outTex [[texture(2)]],
                            uint2 gid [[thread_position_in_grid]]) {
         if (gid.x >= outTex.get_width() || gid.y >= outTex.get_height()) { return; }
+        constexpr sampler bilinear(coord::pixel, address::clamp_to_edge, filter::linear);
         float y = yTex.read(gid).r;
-        float2 c = cTex.read(gid / 2).rg;
+        float2 c = cTex.sample(bilinear, chromaSitingSamplePos(float2(gid), float2(p.sitingX, p.sitingY))).rg;
         float3 rgb = saturate(decodeYCbCr(y, c, p.videoRange == 1, p.kr, p.kb));
         outTex.write(float4(rgb, 1.0), gid);
     }
 
-    // One thread per 2x2 luma block: writes its four Y samples and one CbCr from the averaged RGB.
+    // One thread per 2x2 luma block. It writes its four Y samples and one CbCr from the block's RGB taken at
+    // the chroma sample's position, so the output keeps the siting its tag names.
     kernel void rgbaToNV12(constant UpscaleColorParams &p [[buffer(0)]],
                            texture2d<float, access::read> inTex [[texture(0)]],
                            texture2d<float, access::write> yTex [[texture(1)]],
@@ -93,11 +102,11 @@ enum UpscaleShaderSource {
             for (uint dx = 0; dx < 2; dx++) {
                 uint2 pos = base + uint2(dx, dy);
                 float3 rgb = inTex.read(pos).rgb;
-                sum += rgb;
+                sum += rgb * chromaSitingWeight(float2(p.sitingX, p.sitingY), dx + dy * 2);
                 yTex.write(float4(encodeYCbCr(rgb, videoRange, p.kr, p.kb).x, 0.0, 0.0, 1.0), pos);
             }
         }
-        float3 e = encodeYCbCr(sum * 0.25, videoRange, p.kr, p.kb);
+        float3 e = encodeYCbCr(sum, videoRange, p.kr, p.kb);
         cTex.write(float4(e.y, e.z, 0.0, 1.0), gid);
     }
     """
