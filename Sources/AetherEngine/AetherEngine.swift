@@ -9373,6 +9373,10 @@ public final class AetherEngine: ObservableObject {
         // block for ~0.5 s on a MAT passthrough route. The caller must declare an actual final teardown;
         // the host opt-in (deactivatesAudioSessionOnStop) goes to SharedOutputCoordinator.leave, and the
         // release belongs to the last engine out.
+        if finalTeardown {
+            // Sodalite#256: queued ahead of the release below, while the session is still active.
+            releaseRendererChannelPreference(reason: "final teardown")
+        }
         if finalTeardown && !keepNativeHost {
             let coordinator = SharedOutputCoordinator.shared
             let label = coordinator.label(for: ObjectIdentifier(self))

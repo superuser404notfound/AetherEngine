@@ -27,9 +27,19 @@ extension AetherEngine {
     /// Pure: the value to write, or nil when the session already holds it. The compare runs where
     /// the write does (on the session queue, against freshly read values), so a burst of route
     /// notifications, or the one a write may itself trigger, ends at the first no-op.
-    nonisolated static func channelPreferenceTarget(preferredNow: Int, sourceChannels: Int?, maxOutput: Int) -> Int? {
+    ///
+    /// `landed` is where the last write's ladder ended. When the sink refused `wanted` and the session
+    /// already holds the smaller rung for the same route, that counts as held too; otherwise the route
+    /// change the step-down itself triggers would climb straight back up.
+    nonisolated static func channelPreferenceTarget(
+        preferredNow: Int, sourceChannels: Int?, maxOutput: Int, landed: LandedChannelPreference? = nil
+    ) -> Int? {
         let wanted = preferredOutputChannels(sourceChannels: sourceChannels, maxOutput: maxOutput)
-        return wanted == preferredNow ? nil : wanted
+        if wanted == preferredNow { return nil }
+        if let landed, landed.wanted == wanted, landed.maxOutput == maxOutput, landed.landed == preferredNow {
+            return nil
+        }
+        return wanted
     }
 
     /// Only a renderer path owns its channel preference; the native path leaves it to AVKit, and a host
@@ -53,6 +63,7 @@ extension AetherEngine {
     /// after an in-place live audio switch (AE#1100), which changes the source side without a load.
     func refreshRendererChannelPreference(reason: String) {
         guard ownsChannelPreference else { return }
+        holdRendererChannelPreference()
         // Same source the activation path resolves: the engines' coordinated maximum, else this
         // engine's own track, so a stereo title is never presented to the route as 8 channels.
         let sources = SharedOutputCoordinator.shared.preferredSourceChannels ?? ownSourceChannels()
@@ -62,14 +73,12 @@ extension AetherEngine {
             guard session.maximumOutputNumberOfChannels > 0,
                   let wanted = AetherEngine.channelPreferenceTarget(
                 preferredNow: session.preferredOutputNumberOfChannels,
-                sourceChannels: sources, maxOutput: session.maximumOutputNumberOfChannels
+                sourceChannels: sources, maxOutput: session.maximumOutputNumberOfChannels,
+                landed: ChannelPreferenceLedger.shared.landed
             ) else { return }
-            do {
-                try session.setPreferredOutputNumberOfChannels(wanted)
-                EngineLog.emit("[AetherEngine] \(reason): channel preference -> \(wanted) (source=\(sources?.formatted() ?? "unknown") max=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels))", category: .engine)
-            } catch {
-                EngineLog.emit("[AetherEngine] \(reason): channel preference write failed: \(error)", category: .engine)
-            }
+            let landed = AetherEngine.writeRendererChannelPreference(
+                wanted: wanted, maxOutput: session.maximumOutputNumberOfChannels, reason: reason)
+            EngineLog.emit("[AetherEngine] \(reason): channel preference -> \(landed) (wanted=\(wanted) source=\(sources?.formatted() ?? "unknown") max=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels))", category: .engine)
         }
     }
     #endif
