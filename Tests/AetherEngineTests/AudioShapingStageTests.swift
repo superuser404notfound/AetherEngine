@@ -71,7 +71,7 @@ struct AudioShapingStageTests {
         let input = sine(frames: 10_000, channels: 2, amplitudeDB: -20)
         var emitted = 0
         input.withUnsafeBufferPointer {
-            stage.process($0.baseAddress!, frames: 10_000, pts: nil) { _, count, _ in emitted += count }
+            stage.process($0.baseAddress!, frames: 10_000, channels: 2, pts: nil) { _, count, _ in emitted += count }
         }
         let beforeRebuild = emitted
         #expect(beforeRebuild < 10_000, "the enhancer holds its latency back")
@@ -93,7 +93,7 @@ struct AudioShapingStageTests {
             var at = 0
             while at < quiet.count / 2 {
                 let n = min(1024, quiet.count / 2 - at)
-                stage.process(buf.baseAddress! + at * 2, frames: n, pts: nil) { _, _, _ in }
+                stage.process(buf.baseAddress! + at * 2, frames: n, channels: 2, pts: nil) { _, _, _ in }
                 at += n
             }
         }

@@ -366,7 +366,8 @@ extension HLSVideoEngine {
             }
             bridge = try SpatialAudioBridge(
                 srcTimeBase: audioStream.pointee.time_base, layout: layout, decoder: decoder,
-                format: objectAudioRendering.bedFormat(routeFormat: SpatialBedFormat.forCurrentRoute()) ?? .apac)
+                format: objectAudioRendering.bedFormat(routeFormat: SpatialBedFormat.forCurrentRoute()) ?? .apac,
+                binaural: audioShaping.isBinauralOnly)
         } catch {
             EngineLog.emit(
                 "[HLSVideoEngine] ERROR: \(source.name) rendering unavailable (\(error)); keeping the channel bridge",
@@ -400,12 +401,15 @@ extension HLSVideoEngine {
             let producer = try makeProducer(baseIndex: initialProducerBaseIndex)
             audioHLSCodecs = bridge.hlsCodecs
             // Short on purpose: hosts append it to a track title in one-line stats rows.
-            let bed = "\(bridge.format == .lpcm ? "PCM" : "APAC") \(layout.rawValue)"
+            let bed = bridge.binaural ? "binaural (\(layout.rawValue))"
+                : "\(bridge.format == .lpcm ? "PCM" : "APAC") \(layout.rawValue)"
             audioPipelineDescription = source == .trueHDAtmos
                 ? "\(sourceCodecLabel) Atmos → \(bed)"
                 : "DTS:X → \(bed)"
             audioDelivery = .bridged
-            audioIsRenderedBed = true
+            // A binaural bed is plain stereo: no sink should be pushed into Atmos for it.
+            audioIsRenderedBed = !bridge.binaural
+            audioShapingApplied = bridge.binaural
             let rendering: String
             switch source {
             case .trueHDAtmos:
@@ -415,7 +419,8 @@ extension HLSVideoEngine {
             }
             EngineLog.emit(
                 "[HLSVideoEngine] \(source.name): \(rendering), delivered as \(bridge.hlsCodecs) "
-                + "(\(bridge.format == .lpcm ? "lossless 24-bit PCM" : "lossy"))",
+                + (bridge.binaural ? "(binaural stereo for headphones, 24-bit PCM)"
+                   : "(\(bridge.format == .lpcm ? "lossless 24-bit PCM" : "lossy"))"),
                 category: .session
             )
             return producer

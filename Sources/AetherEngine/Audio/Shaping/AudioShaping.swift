@@ -47,13 +47,26 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
     /// stereo link, whose subwoofer only hears what is low in left and right.
     public var lfeMixDB: Double?
 
+    /// Render a multichannel source to binaural stereo for headphones instead of folding it: every
+    /// channel becomes a virtual speaker at its own direction (surrounds beside and behind, heights
+    /// above) through Apple's `AUSpatialMixer` with a generic or, where the system offers one, the
+    /// listener's personalized HRTF, and no head tracking. The output is two-channel PCM that any
+    /// headphones play, wired or Bluetooth. A mono or stereo source is left as it is. With a
+    /// `maxChannels` of 1 the cap wins and the output stays mono.
+    ///
+    /// On its own it does not take TrueHD Atmos and DTS:X off the object render: with
+    /// `LoadOptions.objectAudioRendering` on, the rendered bed, heights included, is what goes
+    /// binaural. Any other shaping field active next to it does, as before.
+    public var binaural: Bool
+
     public init(maxChannels: Int? = nil, dialogueGainDB: Double = 0, compressor: Compressor? = nil,
-                loudnessTargetLUFS: Double? = nil, lfeMixDB: Double? = nil) {
+                loudnessTargetLUFS: Double? = nil, lfeMixDB: Double? = nil, binaural: Bool = false) {
         self.maxChannels = maxChannels
         self.dialogueGainDB = dialogueGainDB
         self.compressor = compressor
         self.loudnessTargetLUFS = loudnessTargetLUFS
         self.lfeMixDB = lfeMixDB
+        self.binaural = binaural
     }
 
     /// The LFE levels the engine takes. +10 dB is the cinema LFE playback gain, nobody needs more.
@@ -130,7 +143,8 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
                      loudnessTargetLUFS: loudnessTargetLUFS.flatMap { t in
                          t.isFinite ? min(max(t, Self.loudnessTargetRange.lowerBound), Self.loudnessTargetRange.upperBound) : nil },
                      lfeMixDB: lfeMixDB.flatMap { db in
-                         db.isFinite ? min(max(db, Self.lfeMixRange.lowerBound), Self.lfeMixRange.upperBound) : nil })
+                         db.isFinite ? min(max(db, Self.lfeMixRange.lowerBound), Self.lfeMixRange.upperBound) : nil },
+                     binaural: binaural)
     }
 
     /// Whether this value asks for anything at all. An inactive value leaves every route as it was.
@@ -138,12 +152,36 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
     public var isActive: Bool {
         let c = clamped
         return (c.maxChannels ?? 8) < 8 || c.dialogueGainDB > 0 || c.compressor != nil || c.loudnessTargetLUFS != nil
+            || c.binaural
+    }
+
+    /// Whether this value changes anything for a source of `sourceChannels` channels (0 when not
+    /// known yet). Binaural alone renders nothing for mono or stereo, so such a track keeps its
+    /// stream copy instead of a decode, a limiter and a FLAC encode that would change nothing.
+    func isActive(forSourceChannels sourceChannels: Int32) -> Bool {
+        guard isActive else { return false }
+        return !(isBinauralOnly && sourceChannels > 0 && sourceChannels <= 2)
+    }
+
+    /// Whether binaural is the only thing asked for, so the object render may stay and render its
+    /// bed binaurally instead of giving way to the channel bridge.
+    var isBinauralOnly: Bool {
+        var rest = clamped
+        guard rest.binaural else { return false }
+        rest.binaural = false
+        return !rest.isActive
     }
 
     /// The channel count a source of `sourceChannels` is shaped into. Never above the source.
     func outputChannels(forSource sourceChannels: Int32) -> Int32 {
-        guard let cap = clamped.maxChannels else { return sourceChannels }
-        return min(sourceChannels, Int32(cap))
+        let c = clamped
+        let capped = c.maxChannels.map { min(sourceChannels, Int32($0)) } ?? sourceChannels
+        return c.binaural && capped > 2 ? 2 : capped
+    }
+
+    /// Whether a source of `sourceChannels` is rendered binaurally rather than folded.
+    func rendersBinaural(sourceChannels: Int32) -> Bool {
+        clamped.binaural && sourceChannels > 2 && outputChannels(forSource: sourceChannels) == 2
     }
 
     /// Linear gain the dialogue gets.
@@ -164,6 +202,7 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
         }
         if let t = c.loudnessTargetLUFS { parts.append(String(format: "loudness %.0f LUFS", t)) }
         if let l = c.lfeMixDB { parts.append(String(format: "LFE %+.1f dB", l)) }
+        if c.binaural { parts.append("binaural") }
         return parts.isEmpty ? "off" : parts.joined(separator: ", ")
     }
 }

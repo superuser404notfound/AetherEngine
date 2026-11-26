@@ -29,23 +29,27 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     enum BridgeError: Error, CustomStringConvertible {
         case codecparAllocFailed
         case unsupportedSampleRate(Int)
+        case binauralUnavailable
 
         var description: String {
             switch self {
             case .codecparAllocFailed: return "SpatialAudioBridge: avcodec_parameters_alloc failed"
             case .unsupportedSampleRate(let r): return "SpatialAudioBridge: object audio at \(r) Hz (48 kHz only)"
+            case .binauralUnavailable: return "SpatialAudioBridge: the spatial mixer refused the bed for binaural"
             }
         }
     }
 
     let layout: SpatialSpeakerLayout
     let format: SpatialBedFormat
+    /// The bed leaves as binaural stereo PCM (`BinauralBedSink`) instead of in its own layout.
+    let binaural: Bool
     private(set) var encoderCodecpar: UnsafeMutablePointer<AVCodecParameters>?
     let encoderTimeBase = AVRational(num: 1, den: Int32(SpatialAudioBridge.sampleRate))
     let soundSampleEntryOverride: Data?
     /// HLS `CODECS` value for the track.
     let hlsCodecs: String
-    var servedChannelCount: Int? { layout.channelCount }
+    var servedChannelCount: Int? { binaural ? 2 : layout.channelCount }
     let peakOutputBitRate: Int64
     /// The encoder's packets as a sample-buffer format description, and the frames the encoder
     /// primes with, for a host that feeds an audio renderer instead of a muxer (see `wrap`).
@@ -134,12 +138,16 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         srcTimeBase: AVRational,
         layout: SpatialSpeakerLayout,
         decoder: ObjectAudioDecoding,
-        format: SpatialBedFormat = .apac,
-        bitRate: Int? = nil
+        format requestedFormat: SpatialBedFormat = .apac,
+        bitRate: Int? = nil,
+        binaural: Bool = false
     ) throws {
+        // Binaural is two channels of PCM whatever the route: APAC would have to carry a bed.
+        let format: SpatialBedFormat = binaural ? .lpcm : requestedFormat
         self.srcTimeBase = srcTimeBase
         self.layout = layout
         self.format = format
+        self.binaural = binaural
         self.decoder = decoder
         levelMeter = BedLevelMeter(layout: layout, sampleRate: Self.sampleRate)
         limiter = PeakLimiter(sampleRate: Self.sampleRate)
@@ -157,6 +165,18 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
                 magicCookie: encoder.magicCookie, sampleRate: Self.sampleRate)
             hlsCodecs = APACSampleEntry.codecsString(channelCount: layout.channelCount)
             codecpar = Self.makeStandInCodecpar()
+        case .lpcm where binaural:
+            rate = 2 * PCMBedPacker.bytesPerSample * 8 * Self.sampleRate
+            guard let binauralSink = BinauralBedSink(layout: layout, sampleRate: Self.sampleRate,
+                                                     bufferFrames: Self.encodeChunkFrames * 4),
+                  let description = PCMBedPacker.stereoFormatDescription(sampleRate: Self.sampleRate) else {
+                throw BridgeError.binauralUnavailable
+            }
+            sink = binauralSink
+            packetFormatDescription = description
+            soundSampleEntryOverride = nil
+            hlsCodecs = Self.pcmHLSCodecs
+            codecpar = PCMBedPacker.makeCodecpar(speakers: [.left, .right], sampleRate: Self.sampleRate)
         case .lpcm:
             rate = layout.channelCount * PCMBedPacker.bytesPerSample * 8 * Self.sampleRate
             sink = PCMBedPacker(channels: layout.channelCount, bufferFrames: Self.encodeChunkFrames * 4)
@@ -174,7 +194,8 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         guard let cp = codecpar else { throw BridgeError.codecparAllocFailed }
         encoderCodecpar = cp
         EngineLog.emit(
-            "[SpatialAudioBridge] init: layout=\(layout.rawValue) format=\(format.rawValue) "
+            "[SpatialAudioBridge] init: layout=\(layout.rawValue) format=\(format.rawValue)"
+            + (binaural ? " binaural stereo" : "") + " "
             + "bitRate=\(rate / 1000) kbps codecs=\(hlsCodecs) priming=\(encoderLeadingFrames) frames",
             category: .session
         )

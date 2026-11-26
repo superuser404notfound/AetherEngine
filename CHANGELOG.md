@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **Binaural for headphones (`AudioShaping.binaural`).** A 5.1 or 7.1 source, or a rendered TrueHD
+  Atmos or DTS:X bed with its heights, plays as binaural stereo instead of a flat fold. Each channel
+  becomes a virtual speaker around the listener through Apple's `AUSpatialMixer` (HRTF, no head
+  tracking). The result is ordinary stereo PCM, so it works on any headphones, Bluetooth included.
+  On its own it keeps `objectAudioRendering`, so the heights reach the render. `aetherctl` takes it as
+  `--audio-shaping binaural`. See [formats.md › Binaural for headphones](docs/formats.md#binaural-for-headphones).
+
 ### Changed
 
 - **VOD segments are served while they are written, by default (AE#1129).**

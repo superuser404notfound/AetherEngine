@@ -230,9 +230,16 @@ extension HLSVideoEngine {
         }
         let forcedDrop = forcedForTesting || knownUndecodable
         // AE#923: shaping needs PCM, so it takes the session past stream copy and object rendering.
-        let shapes = audioShaping.isActive
+        let shapes = audioShaping.isActive(
+            forSourceChannels: sourceAudioStream?.pointee.codecpar.pointee.ch_layout.nb_channels ?? 0)
         audioShapingApplied = false
-        if shapes, sourceAudioStream != nil {
+        if shapes, sourceAudioStream != nil, audioShaping.isBinauralOnly {
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#923 audio shaping (binaural): TrueHD Atmos and DTS:X try the object render first, "
+                + "everything else, and a failed object render, decodes through the PCM bridge",
+                category: .session
+            )
+        } else if shapes, sourceAudioStream != nil {
             EngineLog.emit(
                 "[HLSVideoEngine] AE#923 audio shaping (\(audioShaping.summary)): decoding \(sourceIsAtmos ? "the EAC3+JOC Atmos track (objects not carried) " : "")"
                 + "through the PCM bridge instead of stream copy",
@@ -321,8 +328,9 @@ extension HLSVideoEngine {
         }
 
         // #731: TrueHD Atmos or DTS:X with object rendering requested. Tried before the channel bridges,
-        // which it falls back to on any failure (see buildSpatialAudioProducerIfEligible).
-        if !forcedDrop, !shapes, let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0,
+        // which it falls back to on any failure (see buildSpatialAudioProducerIfEligible). Binaural on
+        // its own keeps this route: the rendered bed, heights included, is what goes binaural.
+        if !forcedDrop, !shapes || audioShaping.isBinauralOnly, let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0,
            let prod = buildSpatialAudioProducerIfEligible(
                audioStream: audioStream,
                audioDemuxer: audioDemuxer,

@@ -1147,11 +1147,11 @@ if first == "play" {
     }
     // AE#923: `--audio-shaping <spec>` is the load option, `--switch-audio-shaping <spec>[@ms]` the
     // runtime setter. A spec is `off` or a comma list of `ch=N`, `dialogue=DB`, `night`, `gain=DB`,
-    // `loudness=LUFS`, `lfe=DB`.
+    // `loudness=LUFS`, `lfe=DB`, `binaural`.
     var audioShaping = AudioShaping()
     if let spec = takeStringFlag("--audio-shaping", from: &rest) {
         guard let parsed = parseAudioShapingSpec(spec) else {
-            print("ERROR: --audio-shaping takes off or ch=N,dialogue=DB,night,gain=DB,loudness=LUFS,lfe=DB; got '\(spec)'")
+            print("ERROR: --audio-shaping takes off or ch=N,dialogue=DB,night,gain=DB,loudness=LUFS,lfe=DB,binaural; got '\(spec)'")
             exit(64)
         }
         audioShaping = parsed

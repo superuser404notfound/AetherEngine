@@ -224,6 +224,8 @@ final class AudioBridge: @unchecked Sendable {
     private let shaping: AudioShaping
     private var shapingStage: AudioShapingStage?
     private var swrOutFmt: AVSampleFormat = AV_SAMPLE_FMT_FLTP
+    /// Width of what the resampler writes: the encoder's, or the source's bed while it goes binaural.
+    private var swrOutChannels: Int32 = 0
     private var pcmBytesPerSample: Int32 = 4
     private var pcmBitsPerRawSample: Int32 = 32
 
@@ -290,7 +292,9 @@ final class AudioBridge: @unchecked Sendable {
     ) throws {
         self.srcTimeBase = srcTimeBase
         self.mode = mode
-        self.shaping = shaping.clamped
+        // Binaural alone leaves a mono or stereo source as it is (no stage, no limiter).
+        self.shaping = shaping.isActive(forSourceChannels: srcCodecpar.pointee.ch_layout.nb_channels)
+            ? shaping.clamped : AudioShaping()
 
         // 1. Source decoder
         let srcCodecID = srcCodecpar.pointee.codec_id
@@ -537,9 +541,17 @@ final class AudioBridge: @unchecked Sendable {
             }
         }
         swrOutFmt = shapingStage?.hasGraph == true ? AV_SAMPLE_FMT_FLT : pcmSampleFmt
+        var swrOutLayout = AVChannelLayout()
+        defer { av_channel_layout_uninit(&swrOutLayout) }
+        if let stage = shapingStage {
+            stage.resamplerLayout(source: &inLayout, output: &enc.pointee.ch_layout, into: &swrOutLayout)
+        } else {
+            av_channel_layout_copy(&swrOutLayout, &enc.pointee.ch_layout)
+        }
+        swrOutChannels = swrOutLayout.nb_channels
         let swrRet = swr_alloc_set_opts2(
             &swrCtx,
-            &enc.pointee.ch_layout,
+            &swrOutLayout,
             swrOutFmt,
             sampleRate,
             &inLayout,
@@ -552,7 +564,7 @@ final class AudioBridge: @unchecked Sendable {
             cleanup()
             throw AudioBridgeError.resamplerAllocFailed(code: swrRet)
         }
-        shapingStage?.applyMatrix(to: swrAllocated, input: &inLayout, output: &enc.pointee.ch_layout)
+        shapingStage?.applyMatrix(to: swrAllocated, input: &inLayout, output: &swrOutLayout)
         let initRet = swr_init(swrCtx)
         guard initRet >= 0 else {
             cleanup()
@@ -1117,10 +1129,27 @@ final class AudioBridge: @unchecked Sendable {
         guard swrInput.differ(from: sf) else { return true }
 
         let frameFmt = AVSampleFormat(rawValue: frameFmtRaw)
+        // AUD-203: the matrix below lifts a source's front centre and the graph lifts a stereo source
+        // without one, so the graph follows the layout the matrix now follows. Its tail goes into
+        // the FIFO first. It runs before the resampler is chosen: the binaural bed follows the source,
+        // and only a stage that still has its graph and a renderer for the new bed may ask swr for it.
+        if let stage = shapingStage, stage.hasGraph, let fifoPtr = fifo {
+            stage.configure(sampleRate: enc.pointee.sample_rate, outputLayout: &enc.pointee.ch_layout,
+                            sourceLayout: &sf.pointee.ch_layout) { planes, count, _ in
+                self.writeShaped(planes, count: count, fifo: fifoPtr)
+            }
+        }
+        var outLayout = AVChannelLayout()
+        defer { av_channel_layout_uninit(&outLayout) }
+        if let stage = shapingStage, stage.hasGraph, swrOutFmt == AV_SAMPLE_FMT_FLT {
+            stage.resamplerLayout(source: &sf.pointee.ch_layout, output: &enc.pointee.ch_layout, into: &outLayout)
+        } else {
+            av_channel_layout_copy(&outLayout, &enc.pointee.ch_layout)
+        }
         var scratch: OpaquePointer?
         let setRet = swr_alloc_set_opts2(
             &scratch,
-            &enc.pointee.ch_layout,
+            &outLayout,
             swrOutFmt,
             enc.pointee.sample_rate,
             &sf.pointee.ch_layout,
@@ -1130,7 +1159,7 @@ final class AudioBridge: @unchecked Sendable {
             nil
         )
         if setRet >= 0, let scratchCtx = scratch {
-            shapingStage?.applyMatrix(to: scratchCtx, input: &sf.pointee.ch_layout, output: &enc.pointee.ch_layout)
+            shapingStage?.applyMatrix(to: scratchCtx, input: &sf.pointee.ch_layout, output: &outLayout)
         }
         let initRet = setRet >= 0 && scratch != nil ? swr_init(scratch) : setRet
         guard initRet >= 0 else {
@@ -1148,16 +1177,7 @@ final class AudioBridge: @unchecked Sendable {
         }
         swr_free(&swrCtx)
         swrCtx = scratch
-
-        // AUD-203: the matrix above lifts a source's front centre and the graph lifts a stereo source
-        // without one, so the graph follows the layout the matrix now follows. Its tail goes into
-        // the FIFO first.
-        if let stage = shapingStage, stage.hasGraph, let fifoPtr = fifo {
-            stage.configure(sampleRate: enc.pointee.sample_rate, outputLayout: &enc.pointee.ch_layout,
-                            sourceLayout: &sf.pointee.ch_layout) { planes, count, _ in
-                self.writeShaped(planes, count: count, fifo: fifoPtr)
-            }
-        }
+        swrOutChannels = outLayout.nb_channels
         swrInput.adopt(layout: &sf.pointee.ch_layout, format: frameFmt, rate: frameRate)
 
         // .lossless pins the encoder + swr OUTPUT to the codecpar rate/layout at init (the muxer header is
@@ -1219,7 +1239,7 @@ final class AudioBridge: @unchecked Sendable {
         let nChannels = enc.pointee.ch_layout.nb_channels
         if shapingStage?.hasGraph == true {
             resampleShapedIntoFIFO(srcFrame: sf, swr: swr, outNbSamples: outNbSamples,
-                                       channels: Int(nChannels), fifo: fifo)
+                                   channels: Int(swrOutChannels > 0 ? swrOutChannels : nChannels), fifo: fifo)
             return
         }
         let isPlanar = av_sample_fmt_is_planar(pcmSampleFmt) != 0
@@ -1294,7 +1314,7 @@ final class AudioBridge: @unchecked Sendable {
             return
         }
         // The bridge stamps from its own sample counter (`nextEncoderPTS`), so no pts rides along.
-        shapingStage?.process(floats, frames: Int(produced), pts: nil) { planes, count, _ in
+        shapingStage?.process(floats, frames: Int(produced), channels: channels, pts: nil) { planes, count, _ in
             writeShaped(planes, count: count, fifo: fifo)
         }
     }

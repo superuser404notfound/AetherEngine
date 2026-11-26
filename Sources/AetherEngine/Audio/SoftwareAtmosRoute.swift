@@ -25,6 +25,8 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
     case apac(SpatialSpeakerLayout)
     /// The rendered bed as PCM in its own layout, as opposed to `.pcm`, the source's decode.
     case pcmBed(SpatialSpeakerLayout)
+    /// The rendered bed as binaural stereo PCM for headphones (`AudioShaping.binaural`).
+    case binauralBed(SpatialSpeakerLayout)
 
     /// The route for a track. `confirmedJOC` is whether the first E-AC-3 packets carry the JOC flag
     /// (a container does not declare it reliably, so the host reads it off the stream).
@@ -104,15 +106,26 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
     var needsAtmosDecoder: Bool {
         switch self {
         case .compressedEAC3JOC, .decodedEAC3JOC: return true
-        case .pcm, .apac, .pcmBed: return false
+        case .pcm, .apac, .pcmBed, .binauralBed: return false
         }
     }
 
     /// Whether this route needs `AtmosOutputActivator` on tvOS: compressed E-AC-3 JOC and every rendered
     /// bed, TrueHD Atmos or DTS:X. Without it some sinks never switch to Dolby MAT and play the bed as
-    /// stereo or 7.1 PCM, heights folded away.
+    /// stereo or 7.1 PCM, heights folded away. Not a binaural bed, which is stereo on purpose.
     var takesAtmosOutputActivator: Bool {
-        self != .pcm
+        switch self {
+        case .pcm, .binauralBed: return false
+        case .compressedEAC3JOC, .decodedEAC3JOC, .apac, .pcmBed: return true
+        }
+    }
+
+    /// Whether audio shaping reaches the output on this route: the PCM decode, and the binaural bed.
+    var carriesShaping: Bool {
+        switch self {
+        case .pcm, .binauralBed: return true
+        case .compressedEAC3JOC, .decodedEAC3JOC, .apac, .pcmBed: return false
+        }
     }
 
     /// Packets of the source's head the JOC check may look at, and the bytes it may hold. The check
