@@ -10,10 +10,6 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
-
-## [7.76.1] - 2026-11-26
-
 ### Fixed
 
 - **VC-1 and WMV3 decoded on several threads no longer read a reference row too early (FFmpegBuild
