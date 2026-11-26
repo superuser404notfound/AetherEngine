@@ -13,9 +13,9 @@ import os
 // engine that wrote one leaves the renderer paths: on a final teardown, and when an engine moves on to
 // AVPlayer video (which leaves the preference to AVKit) without stopping first.
 
-/// Pure: the counts to ask for, best first. tvOS answers a count the HDMI sink cannot take as LPCM
-/// with stereo, not with the next smaller layout: on a Sonos Arc a preference of 8 gave 2 output
-/// channels while 6 gave 6. A 7.1 source therefore tries 5.1 next instead of ending up in stereo.
+/// Pure: the counts to ask for, best first. tvOS does not fall back to the next smaller layout when the
+/// HDMI sink cannot take a count as LPCM, it stays in stereo: on a Sonos Arc a preference of 8 threw
+/// -50 and left 2 output channels, while 6 gave 6. A 7.1 source therefore tries 5.1 next.
 nonisolated func channelPreferenceLadder(wanted: Int) -> [Int] {
     wanted > 6 ? [wanted, 6] : [wanted]
 }
@@ -95,17 +95,19 @@ extension AetherEngine {
         let ladder = channelPreferenceLadder(wanted: wanted)
         var landed = session.preferredOutputNumberOfChannels
         for (index, rung) in ladder.enumerated() {
+            let next = index + 1 < ladder.count ? ladder[index + 1] : nil
             do {
                 try session.setPreferredOutputNumberOfChannels(rung)
             } catch {
-                EngineLog.emit("[AetherEngine] \(reason): channel preference \(rung) refused: \(error)", category: .engine)
-                break
+                // The Arc answers 8 with -50 (and the property reads 8 anyway), so a throw is a
+                // refusal like a short output, not the end of the ladder.
+                EngineLog.emit("[AetherEngine] \(reason): channel preference \(rung) refused (\(error))\(next.map { ", trying \($0)" } ?? "")", category: .engine)
+                continue
             }
             landed = rung
             let output = session.outputNumberOfChannels
-            guard index + 1 < ladder.count,
-                  channelPreferenceShouldStepDown(outputAfterWrite: output, nextRung: ladder[index + 1]) else { break }
-            EngineLog.emit("[AetherEngine] \(reason): preference \(rung) gave output=\(output), trying \(ladder[index + 1])", category: .engine)
+            guard let next, channelPreferenceShouldStepDown(outputAfterWrite: output, nextRung: next) else { break }
+            EngineLog.emit("[AetherEngine] \(reason): preference \(rung) gave output=\(output), trying \(next)", category: .engine)
         }
         ledger.noteLanded(LandedChannelPreference(wanted: wanted, maxOutput: maxOutput, landed: landed))
         return landed

@@ -18,9 +18,10 @@ the public-API contract.
   into a Sonos Arc, a stereo title after a 5.1 software title arrived as Multichannel PCM 5.1 every time,
   until the app restarted. The engine now writes back the value from before the first renderer write when
   the last renderer path stops, or when an engine moves on to a native title without stopping.
-- **7.1 on the software path reaches a 5.1 soundbar as 5.1, not stereo.** tvOS answers a channel count the
-  HDMI sink cannot take as PCM with stereo rather than the next smaller layout (on the Arc, a preference
-  of 8 gave 2 output channels, 6 gave 6). A refused 8 now steps down to 6.
+- **7.1 on the software path reaches a 5.1 soundbar as 5.1, not stereo.** tvOS stays in stereo when the HDMI
+  sink cannot take a channel count as PCM, rather than falling back to the next smaller layout (on the Arc,
+  a preference of 8 was refused with error -50 and output stayed at 2, while 6 gave 6). A refused 8 now
+  steps down to 6.
 
 - **VC-1 and WMV3 decoded on several threads no longer read a reference row too early (FFmpegBuild
   3.19.3).** Near the top edge of a picture, motion compensation could pass its wait before the reference
