@@ -93,6 +93,22 @@ struct BinauralRendererTests {
         #expect(Self.measure(renderer, channel: 6).rightLag > Self.measure(renderer, channel: 0).rightLag + 8)
     }
 
+    /// The plain fold drops the LFE unless `lfeMixDB` asks for it; the mixer keeps it, low-passed,
+    /// so broadband noise on it lands about 10 dB under the same noise on the centre (measured -9.8).
+    @Test("the LFE is kept, evenly on both ears")
+    func lfeIsKept() throws {
+        try #require(BinauralRenderer.isAvailable)
+        var five = Self.layout("5.1")
+        defer { av_channel_layout_uninit(&five) }
+        let labels = try #require(BinauralRenderer.labels(for: &five))
+        let renderer = try #require(BinauralRenderer(labels: labels, sampleRate: Self.rate))
+        let lfe = Self.measure(renderer, channel: 3)
+        let centre = Self.measure(renderer, channel: 2)
+        #expect(abs(10 * log10(lfe.left / lfe.right)) < 1)
+        let level = 10 * log10((lfe.left + lfe.right) / (centre.left + centre.right))
+        #expect(level > -20 && level < 0)
+    }
+
     @Test("a full 5.1 bed comes out within 1.5 dB of the plain fold's loudness")
     func loudnessMatchesFold() throws {
         try #require(BinauralRenderer.isAvailable)

@@ -894,9 +894,11 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 | Top rear | 8 dB down | 14 samples |
 | Centre | even | 0 |
 
+**The LFE is kept.** The plain fold drops it unless `lfeMixDB` asks for it. The mixer keeps it, low-passed and even on both ears, the way a subwoofer would play it. Broadband noise on the LFE lands about 10 dB under the same noise on the centre. On Dolby's "Unfold" demo that gives about 5 dB more below 120 Hz than the fold, and within 1.5 dB of it above.
+
 The render delays the audio by 5 samples (0.1 ms), far below anything lip sync shows, so nothing compensates it. At low frequencies the head shadows little: a 500 Hz tone on the left surround reaches the right ear only 5 dB down.
 
-**Level.** The mixer renders each virtual speaker at about the level that speaker had, so a full bed comes out louder than a fold of it. A fixed -3 dB brings it near the shaping fold: about 1 dB under on decorrelated 5.1 noise, 1.7 LU over on Dolby's "Unfold" Atmos demo. The shaping limiter (-1 dBFS) runs behind it on the PCM paths, and the object bed has a peak limiter of its own after the render.
+**Level.** The mixer renders each virtual speaker at about the level that speaker had, so a full bed comes out louder than a fold of it. A fixed -3 dB brings it near the shaping fold: about 1 dB under on decorrelated 5.1 noise, 2.4 LU over on Dolby's "Unfold" Atmos demo (-12.1 against -14.5 LUFS), part of that the LFE the fold drops. Unfold is a loud demo mix, and its peaks reach the limiter. The shaping limiter (-1 dBFS) runs behind it on the PCM paths, and the object bed has a peak limiter of its own after the render.
 
 **Together with the other settings.** Binaural takes the channel cap's place: the source is not folded, it is rendered. The dialogue lift raises the centre in the bed before the render, night mode and the loudness target act on the stereo result. A `maxChannels` of 1 wins and gives mono.
 

@@ -27,10 +27,10 @@ final class BinauralRenderer {
 
     /// Gain on the mixer's output. The mixer renders each virtual speaker at about the level that
     /// speaker had, so a full bed lands above a plain fold of the same content. Measured against the
-    /// shaping fold (unnormalized, centre and surrounds at -3 dB): at -2 dB decorrelated 5.1 noise
-    /// matched it within 0.1 dB, Dolby's "Unfold" Atmos demo came out 2.7 LU louder (-11.8 against
-    /// -14.5 LUFS). -3 dB splits the two, about 1 dB under on noise and 1.7 LU over on the film. The
-    /// limiter behind it catches the peaks.
+    /// shaping fold (unnormalized, centre and surrounds at -3 dB): at -3 dB decorrelated 5.1 noise
+    /// lands 0.9 dB under it, Dolby's "Unfold" Atmos demo 2.4 LU over (-12.1 against -14.5 LUFS,
+    /// part of it the LFE the fold drops). Going lower buys little on that demo, because the limiter
+    /// behind it is already at work: -4 dB gave -12.6 LUFS, -5 dB -13.3, and noise fell out of step.
     static let outputGainDB: Float = -3
 
     /// Whether this platform has the mixer at all; false makes binaural fall back to the fold.
