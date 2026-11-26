@@ -2097,7 +2097,8 @@ extension AetherEngine {
         // and a second ladder would renegotiate the HDMI link for nothing.
         if let prefCh = channelPreferenceTarget(
             preferredNow: session.preferredOutputNumberOfChannels, sourceChannels: sourceChannels,
-            maxOutput: maxCh, landed: ChannelPreferenceLedger.shared.landed
+            maxOutput: maxCh, route: channelPreferenceRouteIdentity(session),
+            landed: ChannelPreferenceLedger.shared.landed
         ) {
             writeRendererChannelPreference(wanted: prefCh, maxOutput: maxCh, reason: "renderer activation")
         }

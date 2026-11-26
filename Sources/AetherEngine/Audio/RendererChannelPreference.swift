@@ -14,21 +14,20 @@ import os
 // AVPlayer video (which leaves the preference to AVKit) without stopping first.
 
 /// Pure: the counts to ask for, best first. tvOS does not fall back to the next smaller layout when the
-/// HDMI sink cannot take a count as LPCM, it stays in stereo: on a Sonos Arc a preference of 8 threw
-/// -50 and left 2 output channels, while 6 gave 6. A 7.1 source therefore tries 5.1 next.
+/// HDMI sink cannot take a count as LPCM. On a Sonos Arc a preference of 8 threw -50 and the output
+/// stayed in stereo, while 6 gave 6. A 7.1 source therefore tries 5.1 when 8 is refused. Only a throw
+/// counts as a refusal: the output count after a write can lag while the HDMI link renegotiates, and
+/// reading it would step a 7.1 receiver down for nothing.
 nonisolated func channelPreferenceLadder(wanted: Int) -> [Int] {
     wanted > 6 ? [wanted, 6] : [wanted]
 }
 
-/// Pure: whether the next rung is worth a write, given what the session made of the last one.
-nonisolated func channelPreferenceShouldStepDown(outputAfterWrite: Int, nextRung: Int) -> Bool {
-    outputAfterWrite < nextRung
-}
-
 /// Where a ladder ended, so a later route change does not climb back up to the count the sink refused.
+/// `route` names the output ports (type, uid, name), because the maximum alone is the same for many sinks.
 struct LandedChannelPreference: Equatable, Sendable {
     let wanted: Int
     let maxOutput: Int
+    let route: String
     let landed: Int
 }
 
@@ -85,36 +84,40 @@ extension AetherEngine {
     }
 
     #if os(iOS) || os(tvOS)
-    /// Writes `wanted`, or the next rung of the ladder when the session answers with fewer channels
-    /// than that rung. Returns the count that stayed written.
+    nonisolated static func channelPreferenceRouteIdentity(_ session: AVAudioSession) -> String {
+        session.currentRoute.outputs
+            .map { "\($0.portType.rawValue)|\($0.uid)|\($0.portName)" }
+            .joined(separator: ",")
+    }
+
+    /// Writes `wanted`, or the next rung of the ladder when the session refuses it. Returns the count
+    /// that was accepted, nil when every rung was refused (then nothing is recorded as landed, so the
+    /// next route change tries again).
     @discardableResult
-    nonisolated static func writeRendererChannelPreference(wanted: Int, maxOutput: Int, reason: String) -> Int {
+    nonisolated static func writeRendererChannelPreference(wanted: Int, maxOutput: Int, reason: String) -> Int? {
         let session = AVAudioSession.sharedInstance()
         let ledger = ChannelPreferenceLedger.shared
         ledger.noteBeforeWrite(preferredNow: session.preferredOutputNumberOfChannels)
         let ladder = channelPreferenceLadder(wanted: wanted)
-        var landed = session.preferredOutputNumberOfChannels
         for (index, rung) in ladder.enumerated() {
-            let next = index + 1 < ladder.count ? ladder[index + 1] : nil
             do {
                 try session.setPreferredOutputNumberOfChannels(rung)
             } catch {
-                // The Arc answers 8 with -50 (and the property reads 8 anyway), so a throw is a
-                // refusal like a short output, not the end of the ladder.
-                EngineLog.emit("[AetherEngine] \(reason): channel preference \(rung) refused (\(error))\(next.map { ", trying \($0)" } ?? "")", category: .engine)
+                // The property reads the refused count anyway, so the throw is the only sign of it.
+                let next = index + 1 < ladder.count ? ", trying \(ladder[index + 1])" : ""
+                EngineLog.emit("[AetherEngine] \(reason): channel preference \(rung) refused (\(error))\(next)", category: .engine)
                 continue
             }
-            landed = rung
-            let output = session.outputNumberOfChannels
-            guard let next, channelPreferenceShouldStepDown(outputAfterWrite: output, nextRung: next) else { break }
-            EngineLog.emit("[AetherEngine] \(reason): preference \(rung) gave output=\(output), trying \(next)", category: .engine)
+            ledger.noteLanded(LandedChannelPreference(
+                wanted: wanted, maxOutput: maxOutput, route: channelPreferenceRouteIdentity(session), landed: rung))
+            return rung
         }
-        ledger.noteLanded(LandedChannelPreference(wanted: wanted, maxOutput: maxOutput, landed: landed))
-        return landed
+        return nil
     }
 
     nonisolated static func restoreChannelPreferenceBaseline(reason: String) {
-        guard let baseline = ChannelPreferenceLedger.shared.takeBaseline() else { return }
+        let ledger = ChannelPreferenceLedger.shared
+        guard let baseline = ledger.takeBaseline() else { return }
         let session = AVAudioSession.sharedInstance()
         let before = session.preferredOutputNumberOfChannels
         guard before != baseline else { return }
@@ -122,6 +125,8 @@ extension AetherEngine {
             try session.setPreferredOutputNumberOfChannels(baseline)
             EngineLog.emit("[AetherEngine] \(reason): channel preference handed back \(before) -> \(baseline) (output=\(session.outputNumberOfChannels))", category: .engine)
         } catch {
+            // Kept, so the next renderer session hands back the original value, not the one left standing.
+            ledger.noteBeforeWrite(preferredNow: baseline)
             EngineLog.emit("[AetherEngine] \(reason): channel preference hand-back to \(baseline) failed: \(error)", category: .engine)
         }
     }

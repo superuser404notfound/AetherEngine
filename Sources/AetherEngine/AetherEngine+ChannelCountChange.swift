@@ -32,11 +32,13 @@ extension AetherEngine {
     /// already holds the smaller rung for the same route, that counts as held too; otherwise the route
     /// change the step-down itself triggers would climb straight back up.
     nonisolated static func channelPreferenceTarget(
-        preferredNow: Int, sourceChannels: Int?, maxOutput: Int, landed: LandedChannelPreference? = nil
+        preferredNow: Int, sourceChannels: Int?, maxOutput: Int,
+        route: String = "", landed: LandedChannelPreference? = nil
     ) -> Int? {
         let wanted = preferredOutputChannels(sourceChannels: sourceChannels, maxOutput: maxOutput)
         if wanted == preferredNow { return nil }
-        if let landed, landed.wanted == wanted, landed.maxOutput == maxOutput, landed.landed == preferredNow {
+        if let landed, landed.wanted == wanted, landed.maxOutput == maxOutput, landed.route == route,
+           landed.landed == preferredNow {
             return nil
         }
         return wanted
@@ -74,10 +76,11 @@ extension AetherEngine {
                   let wanted = AetherEngine.channelPreferenceTarget(
                 preferredNow: session.preferredOutputNumberOfChannels,
                 sourceChannels: sources, maxOutput: session.maximumOutputNumberOfChannels,
+                route: AetherEngine.channelPreferenceRouteIdentity(session),
                 landed: ChannelPreferenceLedger.shared.landed
             ) else { return }
-            let landed = AetherEngine.writeRendererChannelPreference(
-                wanted: wanted, maxOutput: session.maximumOutputNumberOfChannels, reason: reason)
+            guard let landed = AetherEngine.writeRendererChannelPreference(
+                wanted: wanted, maxOutput: session.maximumOutputNumberOfChannels, reason: reason) else { return }
             EngineLog.emit("[AetherEngine] \(reason): channel preference -> \(landed) (wanted=\(wanted) source=\(sources?.formatted() ?? "unknown") max=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels))", category: .engine)
         }
     }

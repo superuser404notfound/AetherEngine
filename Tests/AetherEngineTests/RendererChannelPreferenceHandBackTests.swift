@@ -4,7 +4,7 @@ import Testing
 /// Sodalite#256: a renderer path's channel preference outlived its session and turned the next
 /// stereo title into Multichannel PCM 5.1 at a Sonos Arc. The session itself does not exist off
 /// device, so these pin the decisions around it: who hands the value back, which value, and the
-/// 8 -> 6 step-down for a sink that answers a refused count with stereo.
+/// 8 -> 6 step-down for a sink that refuses 8.
 @Suite("Sodalite#256: channel preference hand-back")
 @MainActor
 struct Sodalite256ChannelPreferenceHandBackTests {
@@ -59,7 +59,7 @@ struct Sodalite256ChannelPreferenceHandBackTests {
         #expect(ledger.takeBaseline() == nil)
         ledger.noteBeforeWrite(preferredNow: 0)
         ledger.noteBeforeWrite(preferredNow: 6)
-        ledger.noteLanded(LandedChannelPreference(wanted: 8, maxOutput: 32, landed: 6))
+        ledger.noteLanded(LandedChannelPreference(wanted: 8, maxOutput: 32, route: "HDMI", landed: 6))
         #expect(ledger.takeBaseline() == 0)
         // Taken once: the next renderer session records its own starting value.
         #expect(ledger.takeBaseline() == nil)
@@ -74,22 +74,28 @@ struct Sodalite256ChannelPreferenceHandBackTests {
         #expect(channelPreferenceLadder(wanted: 2) == [2])
     }
 
-    @Test("a step-down happens only when the session gave fewer channels than the next rung", .timeLimit(.minutes(3)))
-    func stepDown() {
-        // Sonos Arc, measured: 8 gave output 2.
-        #expect(channelPreferenceShouldStepDown(outputAfterWrite: 2, nextRung: 6))
-        // A 7.1 receiver takes 8; a sink that gave 6 by itself needs no second write.
-        #expect(!channelPreferenceShouldStepDown(outputAfterWrite: 8, nextRung: 6))
-        #expect(!channelPreferenceShouldStepDown(outputAfterWrite: 6, nextRung: 6))
-    }
-
     @Test("a route change does not climb back to the count the sink refused", .timeLimit(.minutes(3)))
     func landedStepDownHolds() {
-        let landed = LandedChannelPreference(wanted: 8, maxOutput: 32, landed: 6)
-        #expect(AetherEngine.channelPreferenceTarget(preferredNow: 6, sourceChannels: 8, maxOutput: 32, landed: landed) == nil)
-        // A different route (other maximum) gets the full count again.
-        #expect(AetherEngine.channelPreferenceTarget(preferredNow: 6, sourceChannels: 8, maxOutput: 8, landed: landed) == 8)
-        // A different source on the same route is a new question too.
-        #expect(AetherEngine.channelPreferenceTarget(preferredNow: 6, sourceChannels: 2, maxOutput: 32, landed: landed) == 2)
+        let landed = LandedChannelPreference(wanted: 8, maxOutput: 32, route: "HDMI|1|Arc", landed: 6)
+        #expect(AetherEngine.channelPreferenceTarget(preferredNow: 6, sourceChannels: 8, maxOutput: 32, route: "HDMI|1|Arc", landed: landed) == nil)
+        // A different maximum, a different sink behind the same maximum, or a different source is a new question.
+        #expect(AetherEngine.channelPreferenceTarget(preferredNow: 6, sourceChannels: 8, maxOutput: 8, route: "HDMI|1|Arc", landed: landed) == 8)
+        #expect(AetherEngine.channelPreferenceTarget(preferredNow: 6, sourceChannels: 8, maxOutput: 32, route: "HDMI|1|AVR", landed: landed) == 8)
+        #expect(AetherEngine.channelPreferenceTarget(preferredNow: 6, sourceChannels: 2, maxOutput: 32, route: "HDMI|1|Arc", landed: landed) == 2)
+    }
+
+    @Test("a holder released without stop() leaves the hand-back to the next engine that lets go", .timeLimit(.minutes(3)))
+    func releasedHolderOwesHandBack() {
+        let c = SharedOutputCoordinator()
+        do {
+            let software = Token()
+            let id = ObjectIdentifier(software)
+            c.join(id, role: .primary, tag: "sw", owner: software)
+            c.holdChannelPreference(id)
+        }
+        c.join(b, role: .primary, tag: "native")
+        // b never held a preference, but the dropped holder's value is still standing.
+        #expect(c.releaseChannelPreference(b))
+        #expect(!c.releaseChannelPreference(b))
     }
 }
