@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **VC-1 and WMV3 decoded on several threads no longer read a reference row too early (FFmpegBuild
+  3.19.3).** Near the top edge of a picture, motion compensation could pass its wait before the reference
+  row it reads was decoded, on intact streams too. On damaged streams, error concealment could rewrite rows
+  another thread was already reading, and a repeated slice header could turn a B picture into a reference
+  picture. The frame threading patch is now at the fifth review round of FFmpeg PR 26273 (AE#1107).
 
 ## [7.76.0] - 2026-11-26
 
