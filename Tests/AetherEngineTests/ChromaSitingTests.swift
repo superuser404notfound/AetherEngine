@@ -85,7 +85,10 @@ private enum SitingGate {
 /// A Cb ramp that crosses its midpoint at source luma position 31 (on the axis under test), through each
 /// scaler at 2x. The crossing must come out at target luma 62.5 for every siting, which is where the
 /// picture put it. 10-bit, so a code is a sixteenth of a source sample on the ramp.
-@Suite("Chroma siting on the GPU", .serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(3)),
+///
+/// Off the pool but not in the one lane: a case is a few milliseconds of 64x64 work, and in the lane the
+/// first one waited 274 s on CI behind the other GPU suites, inside its time limit.
+@Suite("Chroma siting on the GPU", .serialized, .offCooperativePool, .timeLimit(.minutes(3)),
        .enabled(if: SitingGate.gpuAvailable))
 struct ChromaSitingGPUTests {
 

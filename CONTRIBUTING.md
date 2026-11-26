@@ -49,6 +49,10 @@ Why each one:
 
 CI enforces the mechanical parts with `Scripts/check-test-hygiene.py`: no `try? await Task.sleep` and no `DispatchQueue.global().async` (or `asyncAfter`) under `Tests/`, and no `.timeLimit` under three minutes (a green run has hundreds of tests above 60 s and trivial ones near 100 s; use `.minutes(3)`). A line that is a real exception says why, with `// hygiene: allow <reason>` on it.
 
+A suite or test with `.offCooperativePoolOneLane` needs a `.timeLimit` of at least five minutes, and the lint checks that too. Every suite with that trait shares one lane, and the time a case waits for it counts against its limit. A new GPU suite with three minutes timed out on CI while its first case was still waiting behind the other GPU suites (274 s in the queue).
+
+The lane is for long CPU or GPU loops. A suite whose cases take milliseconds takes `.offCooperativePool` instead, which keeps it off the cooperative pool without the queue.
+
 ## Where playback bugs get fixed
 
 A bug that reproduces in a host app but traces back to decoding, demuxing, the audio bridge, or display routing gets fixed **in the engine**, not worked around in the host. If a change starts adding host-side compensation for engine behavior, that is a signal the fix belongs here instead. PRs that move logic in the right direction are very welcome.
