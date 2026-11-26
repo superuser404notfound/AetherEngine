@@ -419,6 +419,7 @@ extension AetherEngine {
         // Audit CORE-6: the generation of the load() that routed here, not a fresh read of it, so a
         // stale caller cannot adopt its successor's generation.
         if let generation { try checkLoadCurrent(generation) }
+        releaseRendererChannelPreference(reason: "remote HLS load")
         playbackBackend = .native
         sessionCacheStatusToken &+= 1
         diagnostics.sessionCacheStatus = .nativeRemoteHLS(
@@ -904,6 +905,8 @@ extension AetherEngine {
         resolvePanelRouting: (() async throws -> Bool)? = nil,
         panelPresentsHDR: Bool = false
     ) async throws {
+        // Sodalite#256: AVKit owns the channel preference from here, so a renderer's value goes back first.
+        releaseRendererChannelPreference(reason: "native load")
         // companionAudioReader is set by the reader's resolver before any main-stream byte flows, so it is
         // final by the time loadNative runs; nil means muxed audio.
         let liveIngest = customReader as? LiveIngestSourceInfo
@@ -2067,6 +2070,7 @@ extension AetherEngine {
         let sourceChannels = ownSourceChannels(audioSourceStreamIndex: audioSourceStreamIndex)
         SharedOutputCoordinator.shared.noteSourceChannels(sourceChannels, for: ObjectIdentifier(self))
         let preferred = SharedOutputCoordinator.shared.preferredSourceChannels ?? sourceChannels
+        holdRendererChannelPreference()
         await performRendererAudioSessionActivation {
             AetherEngine.applyRendererAudioSession(sourceChannels: preferred)
         }
@@ -2089,8 +2093,14 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] activateRendererAudioSession error: \(error)", category: .engine)
         }
         let maxCh = session.maximumOutputNumberOfChannels
-        let prefCh = preferredOutputChannels(sourceChannels: sourceChannels, maxOutput: maxCh)
-        try? session.setPreferredOutputNumberOfChannels(prefCh)
+        // A reload onto the same route finds its value already held (or its step-down, Sodalite#256),
+        // and a second ladder would renegotiate the HDMI link for nothing.
+        if let prefCh = channelPreferenceTarget(
+            preferredNow: session.preferredOutputNumberOfChannels, sourceChannels: sourceChannels,
+            maxOutput: maxCh, landed: ChannelPreferenceLedger.shared.landed
+        ) {
+            writeRendererChannelPreference(wanted: prefCh, maxOutput: maxCh, reason: "renderer activation")
+        }
         EngineLog.emit("[AetherEngine] renderer audio session active: sourceCh=\(sourceChannels?.formatted() ?? "unknown") maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
     }
     #endif

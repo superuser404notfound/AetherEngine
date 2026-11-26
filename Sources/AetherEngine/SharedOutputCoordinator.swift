@@ -36,6 +36,9 @@ final class SharedOutputCoordinator {
     private var lastTransition: Task<Void, Never>?
     private var categoryConfiguration: Task<Bool, Never>?
     private var categoryConfigured = false
+    /// Engines whose renderer path wrote the session's channel preference (Sodalite#256). The last one
+    /// to let go hands the preference back.
+    private var channelPreferenceHolders: Set<ObjectIdentifier> = []
 
     init() {}
 
@@ -56,6 +59,7 @@ final class SharedOutputCoordinator {
         for (id, member) in gone {
             members[id] = nil
             deferredCriteriaResets[id] = nil
+            channelPreferenceHolders.remove(id)
             EngineLog.emit("[SharedOutput] \(member.tag ?? "engine-\(UInt(bitPattern: id.hashValue) % 10_000)") was released without stop(), dropped", category: .engine)
         }
     }
@@ -83,6 +87,18 @@ final class SharedOutputCoordinator {
         deferredCriteriaResets.removeAll()
         resets.forEach { $0() }
         return .lastOut(releaseSession: release)
+    }
+
+    func holdChannelPreference(_ id: ObjectIdentifier) {
+        channelPreferenceHolders.insert(id)
+    }
+
+    /// True when `id` was the last holder, so the preference is to be handed back now. An engine that
+    /// never held one gets false.
+    func releaseChannelPreference(_ id: ObjectIdentifier) -> Bool {
+        pruneReleasedOwners()
+        let held = channelPreferenceHolders.remove(id) != nil
+        return held && channelPreferenceHolders.isEmpty
     }
 
     func othersActive(besides id: ObjectIdentifier) -> Bool {

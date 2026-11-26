@@ -124,6 +124,7 @@ Notes:
 | `DTSXConfirmation.swift` | #744 follow-up: sets `TrackInfo.isDTSX` from the DTS:X decoder's verdict, kept beyond the session that produced it. |
 | `FLACChannelLabels.swift` | The channel layouts CoreMedia assumes for a FLAC track in fMP4, which reads no layout of its own, and whether a source's layout is one of them (AE#1120). |
 | `FLACStreamInfo.swift` | Reads the `STREAMINFO` blocksize fields CoreMedia keys FLAC on, and decides when CoreMedia would refuse or mistime the track (AE#764). |
+| `RendererChannelPreference.swift` | Sodalite#256: keeps the session's channel preference from before the first renderer write and hands it back when the last renderer path ends, so the next native title is not sent at the old channel count. Also steps a refused 7.1 preference down to 5.1 instead of leaving the output in stereo. |
 | `RendererClockResume.swift` | AE#549: what a renderer path's `play()` does with a clock the system stopped rather than the host. |
 | `RendererTimeline.swift` | AE#395: the renderer axis (source time minus `origin`) the renderers and their synchronizer run on. |
 | `ResamplerInputParameters.swift` | The input a `SwrContext` was built for, so a context is rebuilt when the frames feeding it change. |
