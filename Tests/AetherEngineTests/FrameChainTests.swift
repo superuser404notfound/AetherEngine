@@ -439,10 +439,11 @@ struct LanczosUpscalerTests {
     }
 
     /// The separable reference: rows, then columns, each component on its own, rounded and clamped.
+    /// `offset` is the chroma plane's siting (`ChromaSiting.chromaOffset`).
     private static func reference(_ p: (w: Int, h: Int, c: Int, values: [Double]), to size: (Int, Int),
-                                  maxCode: Double) throws -> [Double] {
-        let rows = try #require(LanczosTaps(inputCount: p.w, outputCount: size.0))
-        let columns = try #require(LanczosTaps(inputCount: p.h, outputCount: size.1))
+                                  maxCode: Double, offset: (x: Double, y: Double) = (0, 0)) throws -> [Double] {
+        let rows = try #require(LanczosTaps(inputCount: p.w, outputCount: size.0, offset: offset.x))
+        let columns = try #require(LanczosTaps(inputCount: p.h, outputCount: size.1, offset: offset.y))
         var out = [Double](repeating: 0, count: size.0 * size.1 * p.c)
         for comp in 0..<p.c {
             let wide = (0..<p.h).map { y in rows.apply((0..<p.w).map { p.values[(y * p.w + $0) * p.c + comp] }) }
@@ -496,8 +497,10 @@ struct LanczosUpscalerTests {
         let maxCode: Double = tenBit ? 1023 : 255
         for plane in 0..<2 {
             let got = Self.plane(out, plane)
+            // The pattern is untagged, so its chroma counts as left-sited.
             let want = try Self.reference(Self.plane(input, plane),
-                                          to: plane == 0 ? (size.2, size.3) : (size.2 / 2, size.3 / 2), maxCode: maxCode)
+                                          to: plane == 0 ? (size.2, size.3) : (size.2 / 2, size.3 / 2), maxCode: maxCode,
+                                          offset: plane == 0 ? (0, 0) : ChromaSiting.left.chromaOffset)
             let diff = zip(got.values, want).map { abs($0 - $1) }.max() ?? .infinity
             // Float on the GPU against double here: a sample on a rounding boundary may land one code off.
             #expect(diff <= 1, "plane \(plane) max difference \(diff) (tenBit \(tenBit), \(size))")

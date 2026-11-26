@@ -136,7 +136,7 @@ final class FrameChain {
         let videoRange = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             || format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
         var params = FrameChainColorParams(tenBit: tenBit, videoRange: videoRange, matrix: UpscaleMatrix.of(input),
-                                           origin: (picture.x, picture.y))
+                                           siting: ChromaSiting.of(input), origin: (picture.x, picture.y))
         let output = try makeOutput(format: format)
         let lumaFormat: MTLPixelFormat = tenBit ? .r16Unorm : .r8Unorm
         let chromaFormat: MTLPixelFormat = tenBit ? .rg16Unorm : .rg8Unorm
@@ -423,8 +423,10 @@ struct FrameChainColorParams {
     var cRange: Float
     var kr: Float
     var kb: Float
+    var sitingX: Float
+    var sitingY: Float
 
-    init(tenBit: Bool, videoRange: Bool, matrix: UpscaleMatrix, origin: (Int, Int)) {
+    init(tenBit: Bool, videoRange: Bool, matrix: UpscaleMatrix, siting: ChromaSiting, origin: (Int, Int)) {
         originX = UInt32(origin.0)
         originY = UInt32(origin.1)
         // 10-bit planes hold the code in the high bits of 16, so a unorm16 read is code * 64 / 65535.
@@ -437,6 +439,8 @@ struct FrameChainColorParams {
         cRange = videoRange ? 224 * s : maxCode
         kr = matrix.kr
         kb = matrix.kb
+        sitingX = siting.x
+        sitingY = siting.y
     }
 }
 
@@ -532,11 +536,14 @@ enum FrameChainShaderSource {
     #include <metal_stdlib>
     using namespace metal;
 
+    \(ChromaSiting.shaderSource)
+
     struct FrameChainColorParams {
         uint originX; uint originY;
         float codeScale; float maxCode;
         float yOffset; float yRange; float cOffset; float cRange;
         float kr; float kb;
+        float sitingX; float sitingY;
     };
 
     // AE#957: BT2390ToneCurve.map on each PQ-coded component, its spline as one cubic (FrameChainToneMapParams).
@@ -562,15 +569,18 @@ enum FrameChainShaderSource {
     // sample is rounded to half, as the two passes store it, so both give the same picture.
     constant bool toneMapsInRoundTrip [[function_constant(1)]];
 
-    // The picture region starts at the origin (even); chroma is sampled at each luma sample's centre.
+    // The picture region starts at the origin (even). Chroma is sampled bilinearly at each luma sample, from
+    // where the buffer's tag puts the chroma samples (ChromaSiting; untagged is left), in input coordinates.
     // Rounded to half, which is what the RGB texture holds.
+    inline float2 frameChainChromaPos(constant FrameChainColorParams &p, float2 luma) {
+        return chromaSitingSamplePos(luma, float2(p.sitingX, p.sitingY));
+    }
     inline half3 frameChainRGB(constant FrameChainColorParams &p, texture2d<float, access::read> yTex,
                                texture2d<float, access::sample> cTex, uint2 gid) {
         constexpr sampler bilinear(coord::pixel, address::clamp_to_edge, filter::linear);
         uint2 origin = uint2(p.originX, p.originY);
         float y = (yTex.read(gid + origin).r * p.codeScale - p.yOffset) / p.yRange;
-        float2 cpos = (float2(gid + origin) + 0.5) * 0.5;
-        float2 c = (cTex.sample(bilinear, cpos).rg * p.codeScale - p.cOffset) / p.cRange;
+        float2 c = (cTex.sample(bilinear, frameChainChromaPos(p, float2(gid + origin))).rg * p.codeScale - p.cOffset) / p.cRange;
         float kg = 1.0 - p.kr - p.kb;
         float r = y + 2.0 * (1.0 - p.kr) * c.y;
         float b = y + 2.0 * (1.0 - p.kb) * c.x;
@@ -591,17 +601,22 @@ enum FrameChainShaderSource {
         return clamp(rint(v * range + offset), 0.0, p.maxCode) / p.codeScale;
     }
 
+    // The weight of block sample k in the block's CbCr (chromaSitingWeight), so the output keeps the siting
+    // its tag names.
+    inline float frameChainChromaWeight(constant FrameChainColorParams &p, uint k) {
+        return chromaSitingWeight(float2(p.sitingX, p.sitingY), k);
+    }
+
     // Four RGB samples of one 2x2 block to their Y samples and the block's CbCr.
     inline void frameChainWriteBlock(constant FrameChainColorParams &p, float3 rgb[4], uint2 block,
                                      texture2d<float, access::write> yTex, texture2d<float, access::write> cTex) {
         float3 w = float3(p.kr, 1.0 - p.kr - p.kb, p.kb);
-        float3 sum = float3(0.0);
+        float3 mean = float3(0.0);
         for (uint k = 0; k < 4; k++) {
-            sum += rgb[k];
+            mean += rgb[k] * frameChainChromaWeight(p, k);
             yTex.write(float4(quantize(dot(rgb[k], w), p.yOffset, p.yRange, p), 0.0, 0.0, 1.0),
                        block * 2 + uint2(k & 1, k >> 1));
         }
-        float3 mean = sum * 0.25;
         float y = dot(mean, w);
         float cb = (mean.b - y) / (2.0 * (1.0 - p.kb));
         float cr = (mean.r - y) / (2.0 * (1.0 - p.kr));
@@ -627,7 +642,7 @@ enum FrameChainShaderSource {
     }
 
     // One thread per 2x2 output luma block: the chain's last texture sampled bilinearly at the target size,
-    // four Y samples and one CbCr from their mean.
+    // four Y samples and one CbCr from them (frameChainWriteBlock).
     kernel void frameChainToYCbCr(constant FrameChainColorParams &p [[buffer(0)]],
                                   texture2d<float, access::sample> inTex [[texture(0)]],
                                   texture2d<float, access::write> yTex [[texture(1)]],
@@ -685,8 +700,7 @@ enum FrameChainShaderSource {
         FrameChainFolded k = frameChainFold(p);
         uint2 inBase = uint2(gid.x + p.originX / 4, gid.y * 2 + p.originY);
         float4 row0 = yIn4.read(inBase), row1 = yIn4.read(inBase + uint2(0, 1));
-        // Chroma at each luma sample's centre, in input coordinates.
-        float2 c0 = (float2(gid.x * 4 + p.originX, gid.y * 2 + p.originY) + 0.5) * 0.5;
+        float2 c0 = frameChainChromaPos(p, float2(gid.x * 4 + p.originX, gid.y * 2 + p.originY));
         float3 s[8];
         for (uint i = 0; i < 4; i++) {
             s[i] = frameChainFoldedRGB(k, row0[i], cIn.sample(bilinear, c0 + float2(i, 0) * 0.5).rg);
@@ -704,7 +718,8 @@ enum FrameChainShaderSource {
         yOut4.write(out1, uint2(gid.x, gid.y * 2 + 1));
         float4 chroma;
         for (uint b = 0; b < 2; b++) {
-            float3 mean = (s[b * 2] + s[b * 2 + 1] + s[b * 2 + 4] + s[b * 2 + 5]) * 0.25;
+            float3 mean = s[b * 2] * frameChainChromaWeight(p, 0) + s[b * 2 + 1] * frameChainChromaWeight(p, 1)
+                + s[b * 2 + 4] * frameChainChromaWeight(p, 2) + s[b * 2 + 5] * frameChainChromaWeight(p, 3);
             float y = dot(mean, k.w);
             chroma[b * 2] = frameChainFoldedQuantize(k, p, (mean.b - y) * k.cbScale, p.cRange, p.cOffset);
             chroma[b * 2 + 1] = frameChainFoldedQuantize(k, p, (mean.r - y) * k.crScale, p.cRange, p.cOffset);
@@ -789,10 +804,10 @@ enum FrameChainShaderSource {
                 rgb = clampHighlight(rgb, float(stats.sample(bilinear, uv).r));
             }
             rgb = saturate(rgb);
-            sum += rgb;
+            sum += rgb * frameChainChromaWeight(p, k);
             yTex.write(float4(quantize(dot(rgb, w), p.yOffset, p.yRange, p), 0.0, 0.0, 1.0), gid * 2 + uint2(i, j));
         }
-        float3 rgb = sum * 0.25;
+        float3 rgb = sum;
         float y = dot(rgb, w);
         float cb = (rgb.b - y) / (2.0 * (1.0 - p.kb));
         float cr = (rgb.r - y) / (2.0 * (1.0 - p.kr));

@@ -1070,7 +1070,30 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, tags.primaries, .shouldPropagate)
         CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, tags.transfer, .shouldPropagate)
         CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, tags.matrix, .shouldPropagate)
+        Self.attachChromaLocation(frame.pointee.chroma_location, to: pb)
         attachHDR10(from: frame, to: pb)
+    }
+
+    /// The stream's 4:2:0 chroma siting, which the upscale and tone-map stages read (`ChromaSiting`). An
+    /// unspecified one removes the key, since a pool buffer keeps what its last frame left on it.
+    static func attachChromaLocation(_ location: AVChromaLocation, to pb: CVPixelBuffer) {
+        CVBufferRemoveAttachment(pb, kCVImageBufferChromaLocationTopFieldKey)
+        CVBufferRemoveAttachment(pb, kCVImageBufferChromaLocationBottomFieldKey)
+        guard ChromaSiting.isFourTwoZero(pb), let tag = chromaLocationTag(location) else { return }
+        CVBufferSetAttachment(pb, kCVImageBufferChromaLocationTopFieldKey, tag, .shouldPropagate)
+        CVBufferSetAttachment(pb, kCVImageBufferChromaLocationBottomFieldKey, tag, .shouldPropagate)
+    }
+
+    static func chromaLocationTag(_ location: AVChromaLocation) -> CFString? {
+        switch location {
+        case AVCHROMA_LOC_LEFT: kCVImageBufferChromaLocation_Left
+        case AVCHROMA_LOC_CENTER: kCVImageBufferChromaLocation_Center
+        case AVCHROMA_LOC_TOPLEFT: kCVImageBufferChromaLocation_TopLeft
+        case AVCHROMA_LOC_TOP: kCVImageBufferChromaLocation_Top
+        case AVCHROMA_LOC_BOTTOMLEFT: kCVImageBufferChromaLocation_BottomLeft
+        case AVCHROMA_LOC_BOTTOM: kCVImageBufferChromaLocation_Bottom
+        default: nil
+        }
     }
 
     /// AE#957: HDR10 static metadata (mastering display, content light level) for a PQ frame: the

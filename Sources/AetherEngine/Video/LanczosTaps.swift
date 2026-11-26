@@ -4,9 +4,10 @@ import Foundation
 /// samples and their weights, normalised to sum to 1. Pure, so the arithmetic is testable where the Metal
 /// stage is not built (the simulator). `LanczosPlaneScaler` uploads them once per plan.
 ///
-/// Sample centres are aligned (output sample `o` sits at source position `(o + 0.5) * in / out - 0.5`), as
-/// the rest of the upscale stage and the frame chain treat 4:2:0 chroma. For an upscale every tap the
-/// kernel's support reaches is one of the six; a downscale would need a wider kernel and is not built.
+/// Sample centres are aligned (output sample `o` sits at source position `(o + 0.5) * in / out - 0.5`). A
+/// 4:2:0 chroma plane passes its siting as `offset`, since its samples need not sit in their block's
+/// centre. For an upscale every tap the kernel's support reaches is one of the six; a downscale would need
+/// a wider kernel and is not built.
 struct LanczosTaps: Equatable {
     /// Six taps per output sample: Lanczos-3 is zero from three source samples out.
     static let count = 6
@@ -18,14 +19,16 @@ struct LanczosTaps: Equatable {
     /// `outputCount * stride` floats.
     let table: [Float]
 
-    init?(inputCount: Int, outputCount: Int) {
+    /// `offset` moves the samples off the centre of their cell, in samples (`ChromaSiting.chromaOffset`):
+    /// a sample that sits `offset` from its cell's centre in the input sits there in the output too.
+    init?(inputCount: Int, outputCount: Int, offset: Double = 0) {
         guard inputCount > 0, outputCount >= inputCount else { return nil }
         self.inputCount = inputCount
         self.outputCount = outputCount
         let ratio = Double(inputCount) / Double(outputCount)
         var table = [Float](repeating: 0, count: outputCount * Self.stride)
         for o in 0..<outputCount {
-            let centre = (Double(o) + 0.5) * ratio - 0.5
+            let centre = (Double(o) + 0.5) * ratio - 0.5 + offset * (ratio - 1)
             let first = Int(centre.rounded(.down)) - 2
             var weights = (0..<Self.count).map { Self.kernel(centre - Double(first + $0)) }
             let sum = weights.reduce(0, +)
