@@ -21,6 +21,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Upscaled and tone-mapped frames keep their colour on the right spot.** The frame chain (line art,
+  tone map), the MetalFX conversion and the Lanczos scaler treated every frame's chroma as centred.
+  Most video has it on the left luma column (the H.264 and HEVC default), so at 2x a colour edge came out
+  half a pixel beside its luma edge, and a same-size pass blurred hard chroma edges. They now read the
+  chroma where the frame's tag puts it, untagged as left, and write it back there.
+
 - **GPU deinterlaced frames no longer keep an earlier frame's color tags (FFmpegBuild 3.19.2).** The
   VideoToolbox deinterlacers and the GPU inverse telecine reuse output buffers, and a reused buffer kept
   the tags of the frame it last held, so an HLG transfer function could stay on later untagged frames.

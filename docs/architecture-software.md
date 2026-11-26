@@ -307,6 +307,13 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 - Every other chain keeps the two passes: a stage reads its neighbours from that texture.
 - Both paths give the same picture: luma unchanged, chroma within one code value.
 
+**Chroma siting.** Every scaler reads the 4:2:0 chroma where the frame's tag puts it and writes it back at the same spot (`ChromaSiting`, from `kCVImageBufferChromaLocationTopFieldKey`). The output buffer keeps the input's tag, so the two have to agree.
+
+- An untagged frame counts as left-sited, the default of MPEG-2, H.264, HEVC and VC-1. Frames the engine builds itself from a software decode carry no tag, so this is what they get.
+- The frame chain and the MetalFX conversion sample the chroma bilinearly at each luma sample's own position. On the way back, a 2x2 block's chroma is the block's RGB taken at the chroma sample's position: the mean of the block for centred chroma, the mean of its left column for left-sited chroma. No extra samples, so the timings above stand.
+- Lanczos scales the chroma plane on its own, so its chroma taps move each output sample's source position by the siting (`LanczosTaps`, `offset`).
+- Before this, every scaler treated chroma as centred. Left-sited chroma came out half a target pixel to the right at 2x, a colour edge beside its luma edge. A same-size round trip blurred each chroma sample with its neighbours, by up to 72 codes (10-bit) on hard chroma edges in `ChromaSitingTests`.
+
 **Colour volume.** Each stage declares the colour volume of its output (`FrameChainStage.outputColorVolume`), and the chain writes the frames' HDR10 metadata from it. Without that, a stage that tone maps to the display's peak would still go out with the source's metadata, and the display would tone map a second time.
 
 | A stage declares | The output frame carries |
