@@ -40,7 +40,7 @@ struct UpscaleColorKernelTests {
         #expect(maxC <= 1)
     }
 
-    /// Alternating chroma columns and rows: read at the samples' own positions and written back there, a
+    /// Alternating chroma columns and rows, read at the samples' own positions and written back there. A
     /// sample that sits on a luma sample comes back as it was. Read as centred (the old kernels), every
     /// chroma sample came back as a blur of its neighbours.
     @Test(arguments: [ChromaSiting.left, .topLeft, .bottom])

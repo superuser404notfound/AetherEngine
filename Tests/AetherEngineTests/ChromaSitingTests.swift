@@ -2,11 +2,12 @@ import Foundation
 import Testing
 import CoreVideo
 import Metal
+import AetherLibavutil
 @testable import AetherEngine
 
 /// The scalers read 4:2:0 chroma where the buffer's tag puts it and write it back there. They used to
 /// treat every frame as centre-sited, so left-sited chroma (the H.264 and HEVC default) landed half a target
-/// sample off at 2x: a colour edge beside its luma edge.
+/// sample off at 2x, a colour edge beside its luma edge.
 @Suite("Chroma siting", .timeLimit(.minutes(3)))
 struct ChromaSitingTests {
 
@@ -27,7 +28,37 @@ struct ChromaSitingTests {
         }
     }
 
-    /// A ramp over the chroma samples, scaled 2x on its own with the siting's offset: each output sample
+    /// The software decoder tags a 4:2:0 frame with the stream's siting, and an unspecified one clears what
+    /// a pool buffer's last frame left on it. VideoToolbox tags its own frames; these had none.
+    @Test func softwareFramesCarryTheStreamsSiting() throws {
+        var pb: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, nil, &pb)
+        let buffer = try #require(pb)
+        SoftwareVideoDecoder.attachChromaLocation(AVCHROMA_LOC_TOPLEFT, to: buffer)
+        #expect(ChromaSiting.of(buffer) == .topLeft)
+        SoftwareVideoDecoder.attachChromaLocation(AVCHROMA_LOC_CENTER, to: buffer)
+        #expect(ChromaSiting.of(buffer) == .center)
+        SoftwareVideoDecoder.attachChromaLocation(AVCHROMA_LOC_UNSPECIFIED, to: buffer)
+        #expect(CVBufferCopyAttachment(buffer, kCVImageBufferChromaLocationTopFieldKey, nil) == nil)
+        #expect(CVBufferCopyAttachment(buffer, kCVImageBufferChromaLocationBottomFieldKey, nil) == nil)
+
+        var full: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange, nil, &full)
+        let fourFourFour = try #require(full)
+        SoftwareVideoDecoder.attachChromaLocation(AVCHROMA_LOC_TOPLEFT, to: fourFourFour)
+        #expect(CVBufferCopyAttachment(fourFourFour, kCVImageBufferChromaLocationTopFieldKey, nil) == nil, "4:4:4")
+    }
+
+    @Test func bottomFieldTagIsTheFallback() throws {
+        var pb: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &pb)
+        let buffer = try #require(pb)
+        CVBufferSetAttachment(buffer, kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferChromaLocation_Bottom,
+                              .shouldPropagate)
+        #expect(ChromaSiting.of(buffer) == .bottom)
+    }
+
+    /// A ramp over the chroma samples, scaled 2x on its own with the siting's offset. Each output sample
     /// reads the ramp at its own position in the picture. Left-sited chroma sample i sits on luma 2i, and
     /// output chroma o on target luma 2o, which is source luma o - 0.25, so chroma index o / 2 - 0.125.
     @Test func sitedLanczosTapsReadTheirOwnPosition() throws {
@@ -52,7 +83,7 @@ private enum SitingGate {
 }
 
 /// A Cb ramp that crosses its midpoint at source luma position 31 (on the axis under test), through each
-/// scaler at 2x: the crossing must come out at target luma 62.5 for every siting, which is where the
+/// scaler at 2x. The crossing must come out at target luma 62.5 for every siting, which is where the
 /// picture put it. 10-bit, so a code is a sixteenth of a source sample on the ramp.
 @Suite("Chroma siting on the GPU", .serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(3)),
        .enabled(if: SitingGate.gpuAvailable))
@@ -177,7 +208,7 @@ struct ChromaSitingGPUTests {
         return out
     }
 
-    /// Where Cb crosses 512 along the middle row (or column) of the output, in target luma samples: output
+    /// Where Cb crosses 512 along the middle row (or column) of the output, in target luma samples. Output
     /// chroma sample o sits on target luma 2o plus the siting.
     private static func cbCrossing(_ pb: CVPixelBuffer, siting: ChromaSiting, vertical: Bool) -> Double? {
         let cw = CVPixelBufferGetWidthOfPlane(pb, 1), ch = CVPixelBufferGetHeightOfPlane(pb, 1)

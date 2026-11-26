@@ -25,7 +25,8 @@ the public-API contract.
   tone map), the MetalFX conversion and the Lanczos scaler treated every frame's chroma as centred.
   Most video has it on the left luma column (the H.264 and HEVC default), so at 2x a colour edge came out
   half a pixel beside its luma edge, and a same-size pass blurred hard chroma edges. They now read the
-  chroma where the frame's tag puts it, untagged as left, and write it back there.
+  chroma where the frame's tag puts it, untagged as left, and write it back there. Software-decoded
+  frames now carry the stream's chroma location tag, as VideoToolbox's do.
 
 - **GPU deinterlaced frames no longer keep an earlier frame's color tags (FFmpegBuild 3.19.2).** The
   VideoToolbox deinterlacers and the GPU inverse telecine reuse output buffers, and a reused buffer kept

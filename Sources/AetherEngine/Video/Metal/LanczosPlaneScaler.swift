@@ -86,7 +86,7 @@ final class LanczosPlaneScaler {
         return b
     }
 
-    /// The chroma plane is scaled on its own, so its taps carry the siting: left-sited chroma scaled with
+    /// The chroma plane is scaled on its own, so its taps carry the siting. Left-sited chroma scaled with
     /// centred taps lands half a target sample to the right at 2x.
     private func chromaTaps(for siting: ChromaSiting) throws -> (rows: MTLBuffer, columns: MTLBuffer) {
         if let taps = chromaTaps[siting] { return taps }

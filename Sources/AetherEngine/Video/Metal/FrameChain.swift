@@ -536,6 +536,8 @@ enum FrameChainShaderSource {
     #include <metal_stdlib>
     using namespace metal;
 
+    \(ChromaSiting.shaderSource)
+
     struct FrameChainColorParams {
         uint originX; uint originY;
         float codeScale; float maxCode;
@@ -571,7 +573,7 @@ enum FrameChainShaderSource {
     // where the buffer's tag puts the chroma samples (ChromaSiting; untagged is left), in input coordinates.
     // Rounded to half, which is what the RGB texture holds.
     inline float2 frameChainChromaPos(constant FrameChainColorParams &p, float2 luma) {
-        return (luma - float2(p.sitingX, p.sitingY)) * 0.5 + 0.5;
+        return chromaSitingSamplePos(luma, float2(p.sitingX, p.sitingY));
     }
     inline half3 frameChainRGB(constant FrameChainColorParams &p, texture2d<float, access::read> yTex,
                                texture2d<float, access::sample> cTex, uint2 gid) {
@@ -599,10 +601,10 @@ enum FrameChainShaderSource {
         return clamp(rint(v * range + offset), 0.0, p.maxCode) / p.codeScale;
     }
 
-    // The weight of block sample k (x = k & 1, y = k >> 1) in the block's CbCr: the block's RGB taken at the
-    // chroma sample's position, so the output keeps the siting its tag names. Centre siting is the mean.
+    // The weight of block sample k in the block's CbCr (chromaSitingWeight), so the output keeps the siting
+    // its tag names.
     inline float frameChainChromaWeight(constant FrameChainColorParams &p, uint k) {
-        return ((k & 1) ? p.sitingX : 1.0 - p.sitingX) * ((k >> 1) ? p.sitingY : 1.0 - p.sitingY);
+        return chromaSitingWeight(float2(p.sitingX, p.sitingY), k);
     }
 
     // Four RGB samples of one 2x2 block to their Y samples and the block's CbCr.
