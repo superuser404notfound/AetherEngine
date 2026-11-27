@@ -1,0 +1,60 @@
+import Foundation
+import Testing
+@testable import AetherEngine
+
+/// AE#1135: a software live channel loaded after a native live session published the previous
+/// item's seekable end as its own edge. The native 1 Hz window timer ran one more pass after
+/// `stopInternal` cancelled it, by then the load had already adopted the new session's liveness, and
+/// the edge is a running maximum. Measured in the reporter's log: the edge sat at 398.16 s (the last
+/// native item's seekable end) while the ring held about 302 s, and Go Live landed 95 s ahead.
+@Suite("AE#1135: a live window tick never outlives its session", .timeLimit(.minutes(3)))
+@MainActor
+struct Issue1135StaleLiveEdgeTests {
+
+    private static let staleEnd = 398.16
+
+    private static func liveOptions() -> LoadOptions {
+        LoadOptions(isLive: true, dvrWindowSeconds: 1_800)
+    }
+
+    @Test("the tick of a stopped session writes nothing into the next session's window")
+    func cancelledTickPublishesNothing() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let host = NativeAVPlayerHost()
+        host.setSeekableRangeForTesting(start: 0, end: Self.staleEnd)
+
+        engine.adoptSessionLiveness(from: Self.liveOptions())
+        engine.startLiveWindowTimer(host: host)
+        // The reporter's timer had been asleep for minutes; the cancel has to reach it mid-sleep.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        // What `load` does: stop the old session, then adopt the new one's liveness synchronously.
+        engine.stopInternal(resetDisplayCriteria: false)
+        engine.adoptSessionLiveness(from: Self.liveOptions())
+
+        // The cancelled task resumes at the next suspension point.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        withExtendedLifetime(host) {}
+
+        let edge = try #require(engine.liveWindow).edgeTime
+        #expect(edge == 0, "the new session's edge came from the previous item: \(edge)")
+        #expect(engine.clock.liveEdgeTime == 0)
+    }
+
+    @Test("the tick still publishes within its own session")
+    func tickPublishesWhileItsSessionRuns() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let host = NativeAVPlayerHost()
+        host.setSeekableRangeForTesting(start: 0, end: Self.staleEnd)
+
+        engine.adoptSessionLiveness(from: Self.liveOptions())
+        engine.startLiveWindowTimer(host: host)
+
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        withExtendedLifetime(host) {}
+
+        let edge = try #require(engine.liveWindow).edgeTime
+        #expect(abs(edge - Self.staleEnd) < 0.001)
+    }
+}

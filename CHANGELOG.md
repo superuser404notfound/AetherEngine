@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **Go Live on a software-path channel no longer lands past the newest media after a native live session
+  (AE#1135).** The native path's 1 Hz live window timer ran one more pass after the stop cancelled it. By
+  then the next load had already set up its own live window, so that pass wrote the previous channel's
+  seekable end into it. The edge only ever grows, so it stayed there: in the report it sat at 398 s while
+  the software ring held about 302 s, and `seekToLiveEdge()` froze the picture for 95 s while the source
+  caught up. A timer pass now ends with the session that started it, and the software host's edge
+  callback only publishes while that host is still the engine's.
+
 - **A sequential origin no longer fails at the start of a seek to 0 (AE#1117).** On an IPTV catch-up whose
   first keyframe came 2.1 s after its first timestamp, a seek to 0 issued during the load reached the
   first segment at item time -2.1 s. The AE#412 repair then asked for a restart to re-cut that segment,
