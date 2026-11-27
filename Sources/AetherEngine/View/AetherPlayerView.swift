@@ -188,7 +188,7 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     private func observeVideoRect(of layer: CALayer) {
         videoRectObservation = nil
         guard let player = layer as? AVPlayerLayer else { return }
-        videoRectObservation = player.observe(\.videoRect, options: [.new]) { [weak self] _, _ in
+        videoRectObservation = player.observe(\.videoRect, options: []) { [weak self] _, _ in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyFillTransform(animated: false) } }
         }
     }
