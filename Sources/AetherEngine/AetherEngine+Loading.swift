@@ -421,6 +421,8 @@ extension AetherEngine {
         if let generation { try checkLoadCurrent(generation) }
         releaseRendererChannelPreference(reason: "remote HLS load")
         playbackBackend = .native
+        // Sodalite#118: no producer session on this path, but stills still defer to the pipeline.
+        extractorYieldState.activatePipeline()
         sessionCacheStatusToken &+= 1
         diagnostics.sessionCacheStatus = .nativeRemoteHLS(
             requestedBudgetBytes: options.sessionCacheByteBudget.map { max(0, $0) })
@@ -2201,6 +2203,7 @@ extension AetherEngine {
         // on every build. Without it a software host came up aspect-fit whatever the app had set,
         // and only a second write mid-session took effect.
         let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
+        extractorYieldState.activatePipeline()
         let upscaleRebuild = UpscaleRouteDecision.forRebuild(
             sessionPlan: sourceUpscalePlan,
             optionOn: sourceUpscalePlan.map { UpscaleSizePolicy(loadedOptions).covers($0) } ?? false,
