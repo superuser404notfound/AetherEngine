@@ -41,12 +41,9 @@ extension AetherEngine {
 
     /// 1 Hz timer to update live surfaces while paused (the `$currentTime` sink already covers the playing case).
     ///
-    /// AE#1135: a tick belongs to the session that started it. A cancelled `Task.sleep` returns at
-    /// once, and the old `try?` let the body run one more pass after `stopInternal` cancelled it. A
-    /// load runs `stopInternal` and `adoptSessionLiveness` back to back, and the native host survives
-    /// a load until the dispatch, so that pass found `isLive` true, the new session's fresh window and
-    /// the previous item's seekable end, and published it as the new edge. The edge is a running
-    /// maximum, so on a software channel it sat 95 s past the newest media and Go Live landed there.
+    /// AE#1135: a tick ends with the session (`loadGeneration`) that started it. A load adopts the
+    /// next session's window right after the stop, and the edge is a running maximum, so one late
+    /// tick latched the previous item's seekable end as the new edge.
     func startLiveWindowTimer(host: NativeAVPlayerHost) {
         liveWindowTimerTask?.cancel()
         guard isLive else { return }
