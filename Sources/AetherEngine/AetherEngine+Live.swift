@@ -40,13 +40,18 @@ extension AetherEngine {
     }
 
     /// 1 Hz timer to update live surfaces while paused (the `$currentTime` sink already covers the playing case).
+    ///
+    /// AE#1135: a tick ends with the session (`loadGeneration`) that started it. A load adopts the
+    /// next session's window right after the stop, and the edge is a running maximum, so one late
+    /// tick latched the previous item's seekable end as the new edge.
     func startLiveWindowTimer(host: NativeAVPlayerHost) {
         liveWindowTimerTask?.cancel()
         guard isLive else { return }
+        let generation = loadGeneration
         liveWindowTimerTask = Task { [weak self, weak host] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard let self, let host else { return }
+            while true {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                guard let self, let host, !Task.isCancelled, self.loadGeneration == generation else { return }
                 guard self.isLive else { continue }
                 guard !self.liveItemPlacementPending else { continue }
                 self.publishLiveWindow(edgeSessionTime: host.seekableEnd
