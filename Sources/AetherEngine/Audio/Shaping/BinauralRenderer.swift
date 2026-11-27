@@ -148,8 +148,9 @@ final class BinauralRenderer {
 
     private func configure(labels: [AudioChannelLabel]) -> Bool {
         func set<T>(_ id: AudioUnitPropertyID, _ scope: AudioUnitScope, _ value: T) -> Bool {
-            var v = value
-            return AudioUnitSetProperty(unit, id, scope, 0, &v, UInt32(MemoryLayout<T>.size)) == noErr
+            withUnsafePointer(to: value) {
+                AudioUnitSetProperty(unit, id, scope, 0, $0, UInt32(MemoryLayout<T>.size)) == noErr
+            }
         }
         func format(_ channels: Int) -> AudioStreamBasicDescription {
             AudioStreamBasicDescription(

@@ -1405,6 +1405,8 @@ private final class MLScaler: @unchecked Sendable {
             done(.failure(error), times)
             return
         }
+        // The callbacks below run on other queues, so they get a constant copy of the copy stage's timing.
+        let launchTimes = times
         let pass = AsyncPass()
         let retrySubmit = UncheckedSendable(submit)
         let buffers = UncheckedSendable((source, destination))
@@ -1419,7 +1421,7 @@ private final class MLScaler: @unchecked Sendable {
                 return
             }
             Self.finishQueue.async { [self] in
-                var times = times
+                var times = launchTimes
                 times.ml += elapsedMs(since: t0)
                 if let error {
                     if direct, !EncodedGPUWork.isBackgroundRefusal(error) {
@@ -1456,7 +1458,7 @@ private final class MLScaler: @unchecked Sendable {
             // VT may still write these later: keep them out of the pools until it calls back.
             guard pass.timeOut({ abandoned.insert(buffers.value.0, buffers.value.1) }) else { return }
             gate.signal()
-            done(.failure(MLTimeout(seconds: timeout, outstanding: abandoned.count)), times)
+            done(.failure(MLTimeout(seconds: timeout, outstanding: abandoned.count)), launchTimes)
         }
     }
 
