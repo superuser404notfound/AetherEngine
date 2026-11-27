@@ -373,9 +373,16 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
     }
 
     if let seekDuringLoad {
-        // Lands while load() is suspended on its probe, so the engine has to stash it (#178).
+        // Fired once the engine reads .loading, so it lands while load() is suspended and the engine
+        // has to stash it (#178). A load that already returned or failed gets no seek.
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            for _ in 0..<200 where engine.state != .loading {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            guard engine.state == .loading else {
+                print("  SEEK during load skipped: the engine never read .loading (state=\(engine.state))")
+                return
+            }
             print(String(format: "  SEEK during load to %.2fs", seekDuringLoad))
             await engine.seek(to: seekDuringLoad)
         }

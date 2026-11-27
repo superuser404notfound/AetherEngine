@@ -172,32 +172,28 @@ struct Issue412RecutDecisionTests {
     }
 }
 
-/// AE#1117: a re-cut is a restart, and two landings must never pay for one. The reported shape: a
-/// stashed seek to 0.00 on an IPTV catch-up whose first keyframe came 2.104 s after its first
-/// timestamp, read by a host reader with `sequentialOrigin`. The seek reached seg0 at item -2.104 s,
-/// the re-cut asked for a restart at idx 0, and the sequential origin failed the session with -5.
-@Suite("AE#1117 re-cut skips")
-struct Issue1117RecutSkipTests {
+/// AE#1117: the reported shape. A stashed seek to 0.00 on an IPTV catch-up whose first keyframe came
+/// 2.104 s after its first timestamp, read by a host reader with `sequentialOrigin`. The seek reached
+/// seg0 at item -2.104 s, the AE#412 re-cut asked for a restart at idx 0, and the sequential origin
+/// failed the session with -5.
+@Suite("AE#1117 seek landing on a late first keyframe")
+struct Issue1117SeekLandingTests {
 
-    @Test("A sequential origin never re-cuts, wherever the landing is", .timeLimit(.minutes(3)))
-    func sequentialOriginSkips() {
-        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: true, landingIndex: 0,
-                                         offsetIntoSegment: -2.104) == .sequentialOrigin)
-        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: true, landingIndex: 12,
-                                         offsetIntoSegment: 2.0) == .sequentialOrigin)
+    @Test("Display 0 before the first keyframe lands on item 0, not below it", .timeLimit(.minutes(3)))
+    func targetBelowItemAxisClamps() {
+        // late-key fixture: source starts at 1.401 s, first keyframe and shift at 3.521 s.
+        #expect(AetherEngine.vodItemSeekTarget(sourceSeconds: 1.401, playlistShift: 3.521) == 0)
     }
 
-    @Test("A target before seg0 is not re-cut", .timeLimit(.minutes(3)))
-    func beforeFirstSegmentSkips() {
-        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: false, landingIndex: 0,
-                                         offsetIntoSegment: -2.104) == .beforeFirstSegment)
+    @Test("A target on the item axis is unchanged", .timeLimit(.minutes(3)))
+    func targetOnAxisUnchanged() {
+        #expect(AetherEngine.vodItemSeekTarget(sourceSeconds: 43.521, playlistShift: 3.521) == 40)
     }
 
-    @Test("Inside seg0 and past it the re-cut still runs", .timeLimit(.minutes(3)))
-    func ordinaryLandingsStillRecut() {
-        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: false, landingIndex: 0,
-                                         offsetIntoSegment: 0) == nil)
-        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: false, landingIndex: 11,
-                                         offsetIntoSegment: -0.5) == nil)
+    @Test("Only a seekable VOD session may re-cut its landing", .timeLimit(.minutes(3)))
+    func recutGate() {
+        #expect(HLSVideoEngine.seekLandingMayRecut(isLiveSession: false, sequentialOrigin: false))
+        #expect(!HLSVideoEngine.seekLandingMayRecut(isLiveSession: false, sequentialOrigin: true))
+        #expect(!HLSVideoEngine.seekLandingMayRecut(isLiveSession: true, sequentialOrigin: false))
     }
 }

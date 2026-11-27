@@ -1578,7 +1578,7 @@ The reader:
 | `--reader-axis absolute\|join\|mismatched` | Which byte axis the reader speaks (AE#460 round 3). | `absolute` |
 | `--join-offset-mb N` | Where the join sits, for `join` and `mismatched`. | 4 |
 | `--vod-sequential SECONDS` | Loads the spool as a closed recording instead of live (AE#1117). See below. | off (live) |
-| `--seek-during-load S` | Seeks to S before `load()` returns, so the engine stashes the seek and replays it (AE#1117). | off |
+| `--seek-during-load S` | Seeks to S while the engine reads `.loading`, so it stashes the seek and replays it (AE#1117). Prints a skip line if the load never got there. | off |
 
 **The measurement.** Every ten seconds it prints `physFP` and its slope. It closes with that slope stated against the source's own mux rate:
 

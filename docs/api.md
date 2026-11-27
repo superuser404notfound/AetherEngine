@@ -1002,6 +1002,7 @@ A rebuild consumes no new stream. Anything a host sets up at the moment it hands
 Where a seek lands:
 
 - **Native.** A seek reports a landing only when AVPlayer completed it no more than 0.75 s short of the target (an overshoot in the seek direction counts). An interrupted or clamped seek is not a landing.
+- **Before the first keyframe.** Some sources start mid-GOP, so their first keyframe comes after their first timestamp. A target in that gap, a seek to 0 among them, goes to AVPlayer as the start of the item and lands on that first keyframe (AE#1117).
 - **Software host, AV1 decoded by dav1d.** The seek lands on the keyframe nearest the target, within 10 s (and within half the seek's own distance), and never on the far side of the playhead. The candidates are the keyframes the packet cache retains or the container's index lists. `.landed` reports that keyframe's position. Without such a keyframe at or after the target, the seek stays exact ([formats › Containers and codecs](formats.md#containers-and-codecs)).
 - **`seek(to:exact: true)`** lands exactly on the target on that software AV1 route too, for a chapter mark or the end of an intro. It costs decoding from the keyframe before the target up to it. Every other route is exact either way. A seek stashed during load keeps the flag.
 

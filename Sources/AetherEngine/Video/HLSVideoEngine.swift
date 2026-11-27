@@ -5195,7 +5195,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// is nothing to act on: live, no recorded reach for the landing segment, a random-access point
     /// already within reach below the target, or a re-cut whose gate did not open in time.
     func preparedSeekLanding(itemSeconds: Double) -> Double {
-        guard !isLiveSession, let provider else { return itemSeconds }
+        guard Self.seekLandingMayRecut(isLiveSession: isLiveSession,
+                                       sequentialOrigin: sequentialOriginPinsProducerToZero),
+              let provider else { return itemSeconds }
         dropUnstartedRecut()
         let index = segmentIndexForPlaylistTime(itemSeconds)
         guard let reach = provider.videoReach(at: index) else { return itemSeconds }
@@ -5204,16 +5206,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard Self.needsRecut(landingReach: reach,
                               offsetIntoSegment: itemSeconds - advertised,
                               coveringSyncDistance: covering.map { itemSeconds - $0 }) else {
-            return itemSeconds
-        }
-        if let skip = Self.recutSkip(sequentialOrigin: sequentialOriginPinsProducerToZero,
-                                     landingIndex: index, offsetIntoSegment: itemSeconds - advertised) {
-            EngineLog.emit(
-                "[HLSVideoEngine] #412 seek to item \(String(format: "%.3f", itemSeconds))s lands in seg\(index) "
-                + "without a random-access point within reach, not re-cut (\(skip.rawValue)); "
-                + "AVPlayer lands on the next one",
-                category: .session
-            )
             return itemSeconds
         }
         EngineLog.emit(
@@ -5318,21 +5310,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return coveringSyncDistance > coldSeekLookbackSeconds
     }
 
-    /// AE#1117: why a landing that `needsRecut` still must not be re-cut.
-    enum RecutSkip: String, Equatable {
-        /// A sequential origin refuses every restart and fails the session with code -5 instead, so a
-        /// re-cut would turn a landing slightly late into a dead player.
-        case sequentialOrigin = "sequential origin has no restart"
-        /// The target sits before seg0's advertised start (a seek to 0 on a source whose first
-        /// keyframe comes after its first timestamp reads negative on the item axis). Nothing exists
-        /// below seg0, so the re-cut would restart the producer where it already is.
-        case beforeFirstSegment = "target is before the first segment"
-    }
-
-    static func recutSkip(sequentialOrigin: Bool, landingIndex: Int, offsetIntoSegment: Double) -> RecutSkip? {
-        if sequentialOrigin { return .sequentialOrigin }
-        if landingIndex == 0, offsetIntoSegment < 0 { return .beforeFirstSegment }
-        return nil
+    /// AE#1117: a re-cut is a restart. Live has its own landing rules, and a sequential origin answers
+    /// every restart by failing the session with code -5, so a landing a little late beats a dead player.
+    static func seekLandingMayRecut(isLiveSession: Bool, sequentialOrigin: Bool) -> Bool {
+        !isLiveSession && !sequentialOrigin
     }
 
     /// `segmentPlan[index].startSeconds` on the AVPlayer/playlist axis, taking `restartLock` itself.

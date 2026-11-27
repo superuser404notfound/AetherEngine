@@ -7041,6 +7041,12 @@ public final class AetherEngine: ObservableObject {
     /// producer's frontier. The cache keeps everything from the consumer's target up to the highest stored
     /// segment, so every fetch from there on is served or produced next, never a restart (which the origin
     /// cannot honour). An earlier, detached span would run into a segment that no longer exists.
+    /// AE#1117: the item-clock target of a VOD seek. The item axis starts at 0, so a target below it
+    /// means the first frame.
+    nonisolated static func vodItemSeekTarget(sourceSeconds: Double, playlistShift: Double) -> Double {
+        max(0, sourceSeconds - playlistShift)
+    }
+
     nonisolated static func sequentialSeekStaysResident(
         target: Double,
         sequentialOrigin: Bool,
@@ -7276,7 +7282,13 @@ public final class AetherEngine: ObservableObject {
         // STC base so `target` (0-based, matching duration) lands on the source-PTS shift the producer subtracts,
         // i.e. clockTarget == the 0-based playlist time (AE#105). Origin 0 off disc, so this stays
         // `target - playlistShiftSeconds` for normal VOD; SW/audio hosts run on source time (shift 0), no-op.
-        var clockTarget = PresentationAxis.source(displayTime: target, origin: sourcePresentationOrigin) - playlistShiftSeconds
+        // AE#1117: clamped like the live branch. A source whose first keyframe comes after its first
+        // timestamp puts display 0 below the item axis (-2.104 s on the reported IPTV catch-up), and no
+        // item time down there exists; the AE#412 repair read that as a landing without a keyframe and
+        // re-cut seg0, which a sequential origin answers by failing the session.
+        var clockTarget = Self.vodItemSeekTarget(
+            sourceSeconds: PresentationAxis.source(displayTime: target, origin: sourcePresentationOrigin),
+            playlistShift: playlistShiftSeconds)
         // AE#418 round 2: AVPlayer throws a sub-second axis offset away at a seek and snaps back to
         // the playlist; a larger one it carries through unchanged (measured with `play
         // --picture-probe`: -0.500 and -0.875 read `axisErr=0.000` after a seek, -1.000 through
