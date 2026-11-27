@@ -2769,6 +2769,7 @@ Declares an origin that fakes its range answers: one long-lived unranged GET, no
 - **The session plays from the start**, so a `startPosition` given to `load()` is not honoured.
 - **Seeking outside what the session holds is unavailable.** On the loopback route, a target inside the `$residentRanges` span that reaches the producer's current end (the last span) lands from the segment cache. Any other target, and every seek on the software host, is rejected as `.sourceNotSeekable`; the host re-requests the archive at a shifted start (AE#958). `canSeek` stays false, so a host offering in-cache seeks checks `residentRanges` itself.
 - **`selectAudioTrack` is ignored**, because it could only reopen at byte 0.
+- **A seek is never repaired with a restart.** Elsewhere a seek into a segment without a keyframe in reach re-cuts that segment first (AE#412). That re-cut is a restart, which this session does not have, so the seek goes out as asked and AVPlayer starts on the next keyframe (AE#1117).
 - The first append playlist waits for more media than AVPlayer's first reload interval (one `TARGETDURATION`), at most 2 s past the first segment.
 - An AirPlay hop on such a session moves the item onto the LAN address instead of reopening the source, since a reopen could only start again from byte 0.
 

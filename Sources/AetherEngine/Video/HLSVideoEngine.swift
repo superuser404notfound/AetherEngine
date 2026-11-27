@@ -5206,6 +5206,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
                               coveringSyncDistance: covering.map { itemSeconds - $0 }) else {
             return itemSeconds
         }
+        if let skip = Self.recutSkip(sequentialOrigin: sequentialOriginPinsProducerToZero,
+                                     landingIndex: index, offsetIntoSegment: itemSeconds - advertised) {
+            EngineLog.emit(
+                "[HLSVideoEngine] #412 seek to item \(String(format: "%.3f", itemSeconds))s lands in seg\(index) "
+                + "without a random-access point within reach, not re-cut (\(skip.rawValue)); "
+                + "AVPlayer lands on the next one",
+                category: .session
+            )
+            return itemSeconds
+        }
         EngineLog.emit(
             "[HLSVideoEngine] #412 seek to item \(String(format: "%.3f", itemSeconds))s lands in seg\(index) "
             + "(advertised \(String(format: "%.3f", advertised))s), which cannot start a decode run there "
@@ -5306,6 +5316,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if landingReach.serves(offsetSeconds: offsetIntoSegment) { return false }
         guard let coveringSyncDistance else { return true }
         return coveringSyncDistance > coldSeekLookbackSeconds
+    }
+
+    /// AE#1117: why a landing that `needsRecut` still must not be re-cut.
+    enum RecutSkip: String, Equatable {
+        /// A sequential origin refuses every restart and fails the session with code -5 instead, so a
+        /// re-cut would turn a landing slightly late into a dead player.
+        case sequentialOrigin = "sequential origin has no restart"
+        /// The target sits before seg0's advertised start (a seek to 0 on a source whose first
+        /// keyframe comes after its first timestamp reads negative on the item axis). Nothing exists
+        /// below seg0, so the re-cut would restart the producer where it already is.
+        case beforeFirstSegment = "target is before the first segment"
+    }
+
+    static func recutSkip(sequentialOrigin: Bool, landingIndex: Int, offsetIntoSegment: Double) -> RecutSkip? {
+        if sequentialOrigin { return .sequentialOrigin }
+        if landingIndex == 0, offsetIntoSegment < 0 { return .beforeFirstSegment }
+        return nil
     }
 
     /// `segmentPlan[index].startSeconds` on the AVPlayer/playlist axis, taking `restartLock` itself.

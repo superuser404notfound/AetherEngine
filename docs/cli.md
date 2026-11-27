@@ -1578,6 +1578,7 @@ The reader:
 | `--reader-axis absolute\|join\|mismatched` | Which byte axis the reader speaks (AE#460 round 3). | `absolute` |
 | `--join-offset-mb N` | Where the join sits, for `join` and `mismatched`. | 4 |
 | `--vod-sequential SECONDS` | Loads the spool as a closed recording instead of live (AE#1117). See below. | off (live) |
+| `--seek-during-load S` | Seeks to S before `load()` returns, so the engine stashes the seek and replays it (AE#1117). | off |
 
 **The measurement.** Every ten seconds it prints `physFP` and its slope. It closes with that slope stated against the source's own mux rate:
 
@@ -1603,6 +1604,8 @@ Run both. The Foundation arm is the control that proves the pool drains; the POS
 aetherctl customio --live --no-wrap --rate-kbps 15000 --seconds 960 --vod-sequential 1080 fixture.ts
 VERDICT: physFP 72 -> 64 MB over 903s = -0.01 MB/s (source mux rate 1.79 MB/s, read 0.88 MB/s, retention ratio -0.01)
 ```
+
+**`--seek-during-load S` (AE#1117).** Some hosts seek right after they call `load()`, at every start and every resume. The engine stashes that seek and replays it once the session settles (#178). On a sequential origin the replay is either rejected as `.sourceNotSeekable` or lands from the segment cache, depending on what the cache holds by then. The `[AetherEngine] seek` lines say which.
 
 **Read the retention ratio over a long run, not a short one.** The slope anchors at 60 s to skip the load step. That is exactly where `--reload-at 60` puts a SECOND step: the software pipeline's own baseline. A 100 s run reads ratio 1.31, which means nothing. A 260 s run shows `physFP` stepping 25 to 66 MB across the switch and then flat at 67 for 140 s: ratio 0.18 and still falling, which is a step being amortized, not a session retaining anything.
 

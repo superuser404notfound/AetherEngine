@@ -171,3 +171,33 @@ struct Issue412RecutDecisionTests {
             coveringSyncDistance: HLSVideoEngine.coldSeekLookbackSeconds + 0.001))
     }
 }
+
+/// AE#1117: a re-cut is a restart, and two landings must never pay for one. The reported shape: a
+/// stashed seek to 0.00 on an IPTV catch-up whose first keyframe came 2.104 s after its first
+/// timestamp, read by a host reader with `sequentialOrigin`. The seek reached seg0 at item -2.104 s,
+/// the re-cut asked for a restart at idx 0, and the sequential origin failed the session with -5.
+@Suite("AE#1117 re-cut skips")
+struct Issue1117RecutSkipTests {
+
+    @Test("A sequential origin never re-cuts, wherever the landing is", .timeLimit(.minutes(3)))
+    func sequentialOriginSkips() {
+        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: true, landingIndex: 0,
+                                         offsetIntoSegment: -2.104) == .sequentialOrigin)
+        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: true, landingIndex: 12,
+                                         offsetIntoSegment: 2.0) == .sequentialOrigin)
+    }
+
+    @Test("A target before seg0 is not re-cut", .timeLimit(.minutes(3)))
+    func beforeFirstSegmentSkips() {
+        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: false, landingIndex: 0,
+                                         offsetIntoSegment: -2.104) == .beforeFirstSegment)
+    }
+
+    @Test("Inside seg0 and past it the re-cut still runs", .timeLimit(.minutes(3)))
+    func ordinaryLandingsStillRecut() {
+        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: false, landingIndex: 0,
+                                         offsetIntoSegment: 0) == nil)
+        #expect(HLSVideoEngine.recutSkip(sequentialOrigin: false, landingIndex: 11,
+                                         offsetIntoSegment: -0.5) == nil)
+    }
+}
