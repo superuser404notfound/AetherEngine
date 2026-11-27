@@ -2258,8 +2258,9 @@ extension AetherEngine {
             }
         }
         // SW host provides session-relative edge on each tick; publishLiveWindow is a no-op when liveWindow is nil.
-        host.onLiveEdge = { [weak self] edge in
-            self?.publishLiveWindow(edgeSessionTime: edge)
+        host.onLiveEdge = { [weak self, weak host] edge in
+            guard let self, let host, self.softwareHost === host else { return }
+            self.publishLiveWindow(edgeSessionTime: edge)
         }
         self.softwareHost = host
         noteVideoPresentationToHost()

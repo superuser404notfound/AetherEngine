@@ -164,6 +164,12 @@ final class NativeAVPlayerHost {
     func recoverFromPrematureEndForTesting() async -> Bool {
         await recoverFromPrematureEnd()
     }
+
+    /// Stands in for an item that reports a seekable range, without opening media.
+    func setSeekableRangeForTesting(start: Double, end: Double) {
+        seekableStart = start
+        seekableEnd = end
+    }
     #endif
 
     /// Monotonic observation time for peak freshness, independent of the media clock.

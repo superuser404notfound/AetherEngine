@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **Go Live on a software-path channel no longer lands past the newest media after a native live session
+  (AE#1135).** The native path's 1 Hz live window timer ran one more pass after the stop cancelled it. By
+  then the next load had already set up its own live window, so that pass wrote the previous channel's
+  seekable end into it. The edge only ever grows, so it stayed there. In the report it sat at 398 s while
+  the software ring held about 302 s, and `seekToLiveEdge()` froze the picture for 95 s while the source
+  caught up. A timer pass now ends with the session that started it, and the software host's edge
+  callback only publishes while that host is still the engine's.
 - **A constant-rate Matroska track that drifts off the frame grid no longer hitches every few seconds.** A
   track whose frame is not exactly the standard rate's left the AE#886 grid a few minutes in, and the first
   frame of a fragment then landed a frame early. Each producer now follows the track's phase against the grid,
