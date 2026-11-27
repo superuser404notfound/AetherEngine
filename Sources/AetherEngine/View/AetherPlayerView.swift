@@ -102,6 +102,11 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     private var pictureArea: CGSize?
     /// `clipsToBounds` / `masksToBounds` as the host had it, restored when the fit ends.
     private var clipsBeforeFit: Bool?
+    /// Sodalite#118: the picture area the engine zooms to cover this view, and the software path's
+    /// presented size (the native path reads its plane off `AVPlayerLayer.videoRect`).
+    private var fillArea: CGRect?
+    private var fillSoftwareSize: CGSize?
+    private var videoRectObservation: NSKeyValueObservation?
 
     /// Engine-internal. Shape the hosted software layer to the picture (`size` non-nil, PiP active) or
     /// back to the full view (nil). No-op for a layer that is not a sample buffer layer.
@@ -128,6 +133,66 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         applyLayerFrame()
     }
 
+    /// Engine-internal. Zoom the hosted layers so `area` of the picture covers this view (nil: no zoom).
+    func setFill(area: CGRect?, softwarePresentationSize: CGSize?, animated: Bool) {
+        fillArea = area
+        fillSoftwareSize = softwarePresentationSize
+        updateClipping()
+        applyFillTransform(animated: animated)
+    }
+
+    /// The zoom as a sublayer transform, so the hosted layer, the overlay and a held still move as one
+    /// and their frames stay what the PiP fit lays out. No zoom while a PiP fit shapes the layer: the
+    /// system window mirrors the layer's own geometry, not this view's.
+    private var fillTransform: CGAffineTransform {
+        guard let area = fillArea, pictureFit == nil, pictureArea == nil else { return .identity }
+        let size = bounds.size
+        let plane: CGRect?
+        if let player = hostedLayer as? AVPlayerLayer {
+            plane = player.videoRect.isEmpty ? nil : player.videoRect
+        } else if let software = fillSoftwareSize {
+            plane = PictureFillGeometry.fitPlane(presentationSize: software, bounds: size)
+        } else {
+            plane = nil
+        }
+        guard let plane else { return .identity }
+        return PictureFillGeometry.coverTransform(plane: plane, area: area, bounds: size)
+    }
+
+    private func applyFillTransform(animated: Bool) {
+        #if canImport(UIKit)
+        let host: CALayer = layer
+        let yUp = false
+        #elseif canImport(AppKit)
+        guard let host = layer else { return }
+        let yUp = !host.isGeometryFlipped
+        #endif
+        let t = PictureFillGeometry.sublayerTransform(fillTransform, bounds: host.bounds,
+                                                      anchorPoint: host.anchorPoint, yUp: yUp)
+        let target = CATransform3DMakeAffineTransform(t)
+        guard !CATransform3DEqualToTransform(host.sublayerTransform, target) else { return }
+        CATransaction.begin()
+        if animated {
+            let animation = CABasicAnimation(keyPath: "sublayerTransform")
+            animation.fromValue = NSValue(caTransform3D: host.presentation()?.sublayerTransform ?? host.sublayerTransform)
+            animation.toValue = NSValue(caTransform3D: target)
+            animation.duration = 0.35
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            host.add(animation, forKey: "aether.fill")
+        }
+        CATransaction.setDisableActions(true)
+        host.sublayerTransform = target
+        CATransaction.commit()
+    }
+
+    private func observeVideoRect(of layer: CALayer) {
+        videoRectObservation = nil
+        guard let player = layer as? AVPlayerLayer else { return }
+        videoRectObservation = player.observe(\.videoRect, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyFillTransform(animated: false) } }
+        }
+    }
+
     /// Engine-internal. Re-applies the hosted layer's frame now, for a state it depends on that changed
     /// without a layout pass (the display layer's gravity). Not a layout pass on macOS during PiP,
     /// where the layer's autoresizing is off.
@@ -150,6 +215,8 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
 
     /// The aspect-fill rectangle is larger than the view, so the view clips it while the fit is on.
     private var wantsClipping: Bool {
+        // A zoomed picture overflows the view on at least one axis.
+        if fillArea != nil { return true }
         guard let sample = hostedLayer as? AVSampleBufferDisplayLayer else { return false }
         // The area frame can exceed this view, so the view clips it.
         if pictureArea != nil { return true }
@@ -211,6 +278,7 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         overlayLayer?.frame = bounds
         presenter.layout(bounds)
         CATransaction.commit()
+        applyFillTransform(animated: false)
     }
 
     // MARK: - Engine-only attachment
@@ -246,6 +314,8 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         updateClipping()
         layer.frame = hostedFrame
         CATransaction.commit()
+        observeVideoRect(of: layer)
+        applyFillTransform(animated: false)
     }
 
     /// Engine-internal. Draws `layer` over the hosted layer, or removes the overlay with nil. Same frame as
@@ -277,6 +347,10 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         // The PiP layout belongs to the engine that set it; a view bound again later starts clean.
         pictureFit = nil
         pictureArea = nil
+        fillArea = nil
+        fillSoftwareSize = nil
+        videoRectObservation = nil
+        applyFillTransform(animated: false)
         guard let hosted = hostedLayer else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)

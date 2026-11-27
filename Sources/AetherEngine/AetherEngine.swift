@@ -1302,6 +1302,7 @@ public final class AetherEngine: ObservableObject {
             #if os(macOS)
             updatePictureInPictureAspect()
             #endif
+            if oldValue != softwareDisplaySize { refreshFillTransform() }
         }
     }
     #if os(macOS)
@@ -2045,18 +2046,44 @@ public final class AetherEngine: ObservableObject {
         get { _videoGravity }
         set {
             _videoGravity = newValue
-            // Most tvOS hosts use AVPlayerViewController, which mounts its own AVPlayerLayer.
-            // Still correct for hosts that use the engine's layer directly and for the SW displayLayer.
-            nativeHost?.playerLayer.videoGravity = newValue
-            softwareHost?.displayLayer.videoGravity = newValue
-            #if DualLayerDolbyVision
-            dualLayerOutputRoute?.setVideoGravity(newValue)
-            #endif
-            // The PiP fit depends on the gravity and no layout pass follows a change.
-            if softwareHost != nil { boundView?.refreshHostedLayerFrame() }
+            applyEffectiveVideoGravity()
         }
     }
     var _videoGravity: AVLayerVideoGravity = .resizeAspect
+
+    /// The part of the picture that should cover the bound view, normalized to the frame (a
+    /// `PictureArea.rect`), or nil for plain `videoGravity` behaviour (Sodalite#118). While set, the
+    /// engine's own layers lay out `.resizeAspect` and the bound `AetherPlayerView` zooms them with
+    /// `PictureFillGeometry`, so a 2.39 film painted into a 16:9 raster fills a 16:9 screen. A host
+    /// that renders through AVKit applies the same geometry to AVKit's layer itself.
+    public private(set) var fillPictureArea: CGRect?
+
+    public func setFillPictureArea(_ area: CGRect?, animated: Bool = false) {
+        guard area != fillPictureArea else { return }
+        fillPictureArea = area
+        applyEffectiveVideoGravity()
+        refreshFillTransform(animated: animated)
+    }
+
+    /// `.resizeAspect` while a fill area zooms the picture, the host's gravity otherwise.
+    var effectiveVideoGravity: AVLayerVideoGravity { fillPictureArea == nil ? _videoGravity : .resizeAspect }
+
+    private func applyEffectiveVideoGravity() {
+        let gravity = effectiveVideoGravity
+        // Most tvOS hosts use AVPlayerViewController, which mounts its own AVPlayerLayer.
+        // Still correct for hosts that use the engine's layer directly and for the SW displayLayer.
+        nativeHost?.playerLayer.videoGravity = gravity
+        softwareHost?.displayLayer.videoGravity = gravity
+        #if DualLayerDolbyVision
+        dualLayerOutputRoute?.setVideoGravity(gravity)
+        #endif
+        // The PiP fit depends on the gravity and no layout pass follows a change.
+        if softwareHost != nil { boundView?.refreshHostedLayerFrame() }
+    }
+
+    func refreshFillTransform(animated: Bool = false) {
+        boundView?.setFill(area: fillPictureArea, softwarePresentationSize: softwareDisplaySize, animated: animated)
+    }
 
     // MARK: - Capabilities
 
@@ -2275,6 +2302,7 @@ public final class AetherEngine: ObservableObject {
         boundSurfaces.removeAll { $0.view == nil || $0.view === view }
         boundSurfaces.append(BoundSurface(view: view))
         presentCurrentLayer()
+        refreshFillTransform()
     }
 
     /// Bind the surface the engine holds the picture on across the item swap of an audio-track switch,
