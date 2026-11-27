@@ -166,4 +166,46 @@ struct CFRFrameGridTests {
         #expect(grid.snap(41) == 1001)
         #expect(grid.snap(43) == nil)
     }
+
+    // A producer that has played from the start and one that restarts at a seek must put a frame on the same
+    // slot, however far the track has drifted: a restarted segment has to match its continuous twin.
+    @Test("A continuous producer and a restarted one agree on every slot, far past the tracking limit")
+    func continuousAndRestartedProducersAgree() throws {
+        let anchored = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
+        // A fast drift, 2e-3 ms a frame: half a slot (20.85 ms) is passed around frame 10,400.
+        func fastDrift(_ n: Int64) -> Int64 { Int64((Double(n) * (1001.0 / 24.0 + 0.002)).rounded()) }
+        let continuous = anchored.trackingCopy()
+        for n: Int64 in 0..<30_000 {
+            let placed = continuous.snap(fastDrift(n))
+            if n % 500 == 0 {
+                // A producer restarted at this frame (a seek) takes its phase from here.
+                let restarted = anchored.trackingCopy().snap(fastDrift(n))
+                if let placed, let restarted { #expect(placed == restarted, "frame \(n)") }
+            }
+            // Inside the limit (15.6 ms here, reached near frame 7,800) every frame is placed, on its own slot.
+            if n < 7_000 { #expect(placed == n * 1001, "frame \(n)") }
+        }
+    }
+
+    @Test("The tracking limit is under half a slot, whatever the rate")
+    func trackingLimitIsUnderHalfASlot() throws {
+        for (num, den) in [(24000, 1001), (24, 1), (30000, 1001), (60000, 1001)] as [(Int32, Int32)] {
+            let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: num, den: den), startPts: 0))
+            #expect(grid.maximumPhase * 2 < grid.slotSpan)
+            #expect(grid.maximumPhase > 0)
+        }
+    }
+
+    @Test("A decode time does not move the phase")
+    func decodeTimesDoNotMoveThePhase() throws {
+        let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0)).trackingCopy()
+        // Every DTS sits a constant 1 ms early, as a sanitized Matroska DTS can; the PTS axis is exact.
+        for n: Int64 in 0..<2_000 {
+            let pts = matroskaPts(n + 2, rate: 24000.0 / 1001.0)
+            let dts = matroskaPts(n, rate: 24000.0 / 1001.0) - 1
+            let placed = try #require(grid.place(pts: pts, dts: dts, duration: 42, shift: 0), "frame \(n)")
+            #expect(placed.pts == (n + 2) * 1001, "frame \(n)")
+        }
+        #expect(abs(grid.phase?.offset ?? .max) <= grid.scale / 2)
+    }
 }

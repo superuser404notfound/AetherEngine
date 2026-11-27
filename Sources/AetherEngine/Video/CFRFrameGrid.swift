@@ -38,10 +38,20 @@ struct CFRFrameGrid {
     final class Phase: @unchecked Sendable {
         var offset: Int64 = 0
         var isSet = false
-        /// Never follow further than this many source ticks from the anchored grid: past it the
-        /// picture would run visibly out of step with the sound, and the track is left as it is.
-        static let maximumTicks: Int64 = 40
     }
+
+    /// One source tick, and one slot, in the units of `snap`'s exact fraction.
+    var scale: Int64 { Int64(sourceTimeBase.num) * Int64(outputTimeBase.den) }
+    var slotSpan: Int64 { Int64(sourceTimeBase.den) * frameTicks }
+
+    /// The furthest a phase may sit from the anchored grid: three eighths of a slot.
+    ///
+    /// It has to stay under half a slot. A producer that restarts takes its phase from the slot
+    /// nearest its first frame, so it can only ever start within half a slot of the anchored grid;
+    /// a producer that had followed the track further than that would number the same frame one
+    /// slot differently, and a restarted segment would no longer match its continuous twin. Past
+    /// the limit the track is left as it is (frames pass through unsnapped, as on an anchored grid).
+    var maximumPhase: Int64 { slotSpan / 8 * 3 }
 
     /// Nil: the anchored grid, exactly as before. Set by `trackingCopy()`.
     private(set) var phase: Phase?
@@ -100,7 +110,11 @@ struct CFRFrameGrid {
 
     /// The grid slot for a source-axis timestamp, in `outputTimeBase`, or nil when it lies more
     /// than one source tick from every slot (or is NOPTS).
-    func snap(_ sourcePts: Int64) -> Int64? {
+    ///
+    /// - Parameter tracking: false for a time that must not move the phase. A decode time is one:
+    ///   it is placed with the phase the presentation times found, but a DTS that sits a constant
+    ///   step off the PTS axis (a sanitized Matroska DTS) must not pull the phase towards itself.
+    func snap(_ sourcePts: Int64, tracking: Bool = true) -> Int64? {
         guard sourcePts != Int64.min else { return nil }
         // Offset from the origin in output ticks, kept as the exact fraction N / D.
         let scale = Int64(sourceTimeBase.num) * Int64(outputTimeBase.den)
@@ -110,11 +124,11 @@ struct CFRFrameGrid {
         let (slotSpan, o3) = d.multipliedReportingOverflow(by: frameTicks)
         guard !o1, !o2, !o3, slotSpan > 0 else { return nil }
         if let phase {
-            if !phase.isSet {
+            if tracking, !phase.isSet {
                 // The producer's first frame says where the track sits now.
                 let nearest = Self.roundedQuotient(n, slotSpan)
                 let (base, overflow) = nearest.multipliedReportingOverflow(by: slotSpan)
-                if !overflow, abs(n - base) <= Phase.maximumTicks * scale {
+                if !overflow, abs(n - base) <= maximumPhase {
                     phase.offset = n - base
                     phase.isSet = true
                 }
@@ -125,10 +139,10 @@ struct CFRFrameGrid {
             guard !o4 else { return nil }
             let error = adjusted - onGrid
             // Follow frames that are near a slot (rounding and drift), not ones that are somewhere else.
-            if abs(error) <= 2 * scale {
+            if tracking, abs(error) <= 2 * scale {
                 let step = error / 16
                 let moved = phase.offset + (step != 0 ? step : (abs(error) * 4 > scale ? error.signum() : 0))
-                if abs(moved) <= Phase.maximumTicks * scale { phase.offset = moved }
+                if abs(moved) <= maximumPhase { phase.offset = moved }
             }
             guard abs(error) <= scale else { return nil }
             return rescale(originPts) &+ slot &* frameTicks
@@ -152,7 +166,7 @@ struct CFRFrameGrid {
         let outPts = gridPts &- shiftOut
         var outDts = dts
         if dts != Int64.min {
-            outDts = (snap(dts &+ unshift).map { $0 &- shiftOut } ?? rescale(dts))
+            outDts = (snap(dts &+ unshift, tracking: false).map { $0 &- shiftOut } ?? rescale(dts))
             outDts = min(outDts, outPts)
         }
         let durationOut = rescale(duration)
