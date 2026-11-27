@@ -555,9 +555,9 @@ extension AetherEngine {
                 releaseAt: playhead + Self.subtitleDrainHarvestGapReleaseLeadSeconds,
                 isRead: store.harvestReadCheck())
             work.channels.append(SubtitleDrainChannelWork(
-                channel: channel, streamIndex: streamIndex, store: store, plan: plan, isReset: isReset,
+                channel: channel, streamIndex: streamIndex, store: store, isReset: isReset,
                 window: window, coverageStart: coverageStart, retained: retained,
-                decoder: decoder, entries: entries, batchEnd: batchEnd, decodeEnd: step.decodeEnd,
+                decoder: decoder, entries: entries, decodeEnd: step.decodeEnd,
                 gapHold: step.hold))
         }
         return work
@@ -585,13 +585,11 @@ extension AetherEngine {
             guard subtitlePacketStore(for: channel) === store,
                   subtitleDrainTargets[channel] == streamIndex,
                   subtitleDrainDecoders[channel] === job.decoder else { continue }
-            let plan = job.plan
             let isReset = job.isReset
             let window = job.window
             let coverageStart = job.coverageStart
             let retained = job.retained
             let entries = job.entries
-            let batchEnd = job.batchEnd
             let decodeEnd = job.decodeEnd
             let gapHold = job.gapHold
             // #271: bind the channel's cue array ONCE for the whole batch. `subtitleCues` is
@@ -3438,9 +3436,8 @@ extension AetherEngine {
             }
             let option = group.options[index]
             // The provider too: a background teardown (#597) can release the stand-in under a kept item.
-            let isCurrent = { [weak self] () -> Bool in
-                guard let self else { return false }
-                return generation == self.injectedRenditionSelectGeneration
+            let isCurrent = { () -> Bool in
+                generation == self.injectedRenditionSelectGeneration
                     && self.activeSubtitleTrackIndex == id
                     && self.currentAVPlayer?.currentItem === item
                     && self.remoteHLSSubtitleProxy?.provider === provider
@@ -3550,14 +3547,12 @@ struct SubtitleDrainChannelWork {
     let channel: SubtitleChannel
     let streamIndex: Int32
     let store: SubtitlePacketStore
-    let plan: SubtitleDrainPlan
     let isReset: Bool
     let window: (from: Double, through: Double)
     let coverageStart: Double?
     let retained: SubtitleResolutionStatement.Retention?
     let decoder: EmbeddedSubtitleDecoder
     let entries: [StoredSubtitlePacket]
-    let batchEnd: Int
     let decodeEnd: Int
     let gapHold: SubtitleOverlayDrainer.HarvestGapHold?
 }

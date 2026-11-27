@@ -227,8 +227,10 @@ final class PictureInPictureAreaTracker {
             if Thread.isMainThread {
                 MainActor.assumeIsolated { view.postsFrameChangedNotifications = before }
             } else {
-                nonisolated(unsafe) let unsafeView = view
-                DispatchQueue.main.async { unsafeView.postsFrameChangedNotifications = before }
+                // Not nonisolated(unsafe): the macOS 27 SDK makes NSView Sendable and warns about it,
+                // while the 26 SDK needs it. The wrapper compiles clean under both.
+                let unsafeView = UncheckedSendable(view)
+                DispatchQueue.main.async { unsafeView.value.postsFrameChangedNotifications = before }
             }
         }
 

@@ -46,6 +46,13 @@ the public-API contract.
   row it reads was decoded, on intact streams too. On damaged streams, error concealment could rewrite rows
   another thread was already reading, and a repeated slice header could turn a B picture into a reference
   picture. The frame threading patch is now at the fifth review round of FFmpeg PR 26273 (AE#1107).
+- **The engine builds without warnings under Xcode 27.2 again (AE#1140).** Six diagnostics that code added
+  since #1062 brought back: a mutable timing value captured by the ML upscaler's callbacks, two unused values
+  in the subtitle drain, a `weak self` inside a task that already holds `self`, and an inout pointer to a
+  generic value in the binaural renderer's property setter. A seventh, macOS only, was left in on purpose at
+  #1062: the PiP area tracker's `nonisolated(unsafe)` view, which the 27 SDK no longer wants and the 26 SDK
+  still needs. It now goes through a wrapper both accept. Nothing changes at runtime. Thanks to YangHanqing
+  for the report.
 
 ## [7.76.0] - 2026-11-26
 
