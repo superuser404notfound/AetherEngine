@@ -203,7 +203,16 @@ The grid is derived once per session, before the first producer runs, from the s
 - The fragments cut from that mix join a frame apart, so the first frame of a fragment lands on its neighbour and leaves a hole behind it.
 - AVPlayer counts no dropped frame. The picture hitches every few seconds.
 
-So each producer follows the track's phase against the grid (`CFRFrameGrid.Phase`). It takes the phase from its first frame and moves it a little with every frame that lands near a slot. The "within one source tick" test then holds while the slots move with the track. Slot numbers do not change, because the phase is a few milliseconds and a slot is tens, so two producers still place a frame on the same output time. A frame that is really irregular is still passed through. The phase never follows further than three eighths of a slot from the anchored grid. It has to stay under half a slot: a restarted producer takes its phase from the slot nearest its first frame, so a producer that had followed further would number the same frame one slot differently. Past the limit the track is left as it is. Decode times are placed with the phase but never move it.
+So each producer checks frames against the track's own band instead of the anchored slot (`CFRFrameGrid.Phase`):
+
+- The first frame of a segment opens the band: its offset from the nearest slot.
+- A later frame of the same segment snaps while all snapped frames of the segment stay within two source ticks of each other. Rounding spans one tick, and the drift inside one segment is hundredths of a millisecond.
+- A frame outside the band is irregular and keeps its own time. Decode times are placed against the band but never widen it.
+- Frames keep their own slot numbers, so the output time is still `slot × frame`, exact.
+
+The band starts empty at every segment. So what a segment writes depends only on that segment's packets, and a producer restarted at a segment writes it exactly as the continuous one did, however far the track has drifted. A phase shift from an edit or a joined file costs at most the rest of one segment, the next one opens its own band.
+
+The first frame may open the band at most three eighths of a slot from the anchored grid (15.6 ms at 23.976). Further out it looks more like an irregular frame than like drift, so the band waits for the next frame. That also bounds what the grid does to A/V sync: a snapped frame sits at most about three eighths of a frame (plus two source ticks) from its own time. A track that drifts further passes through unsnapped until it is back within three eighths of the next slot, and then snaps one slot on. At the measured 6 ms an hour, that is past two and a half hours of drift.
 
 **When the declared rate is not a standard rate.** Then `SourceFrameRateMeasurement` fits the rate to the head packets that `find_stream_info` already queued (peeked, not consumed), and the load uses that instead (Sodalite#236). This matters because mkvmerge writes the first frame's duration as a track's DefaultDuration, so film carrying 2:3 pulldown timing declares 20 fps while it runs at 23.976.
 

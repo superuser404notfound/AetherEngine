@@ -4,7 +4,7 @@ import Testing
 import AetherLibavutil
 @testable import AetherEngine
 
-@Suite("CFRFrameGrid (AE#886)")
+@Suite("CFRFrameGrid (AE#886)", .timeLimit(.minutes(3)))
 struct CFRFrameGridTests {
     private let ms = AVRational(num: 1, den: 1000)
 
@@ -120,19 +120,28 @@ struct CFRFrameGridTests {
         #expect(missed > 300)
     }
 
+    /// Frames per segment in these tests: six seconds at 23.976.
+    private let segmentFrames: Int64 = 144
+
+    /// What a producer writes for frames `range`, in decode order `range`, opening a segment every
+    /// `segmentFrames` frames the way the producer does at each cut.
+    private func produce(_ grid: CFRFrameGrid, _ range: Range<Int64>, pts: (Int64) -> Int64) -> [Int64?] {
+        range.map { n in
+            grid.beginSegment(Int(n / segmentFrames))
+            return grid.snap(pts(n))
+        }
+    }
+
     @Test("A tracking grid follows the drift: every frame lands on an exact 1001-tick step")
     func trackingGridFollowsDrift() throws {
         let anchored = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
         // A producer that starts 12.5 minutes in (a resume or a seek), then plays for an hour.
-        let grid = anchored.trackingCopy()
         let from: Int64 = 18_000
-        var previous: Int64?
-        for n in from..<from + 86_400 {
-            let placed = try #require(grid.snap(driftingPts(n)), "frame \(n) was left off the grid")
-            if let previous { #expect(placed - previous == 1001, "frame \(n)") }
-            previous = placed
-            // The slot is the frame's own: tracking never renumbers frames.
-            #expect(placed == n * 1001)
+        let placed = produce(anchored.trackingCopy(), from..<from + 86_400, pts: driftingPts)
+        for (i, slot) in placed.enumerated() {
+            let n = from + Int64(i)
+            // The slot is the frame's own: tracking never renumbers frames inside the limit.
+            #expect(slot == n * 1001, "frame \(n)")
         }
     }
 
@@ -143,9 +152,11 @@ struct CFRFrameGridTests {
         // Half a frame late: an edit or a variable-rate stretch, not rounding.
         let irregular = grid.snap(driftingPts(200) + 20)
         #expect(irregular == nil)
+        // Two ticks off the band is irregular too, and does not widen it.
+        #expect(grid.snap(driftingPts(201) + 2) == nil)
         // And the frames after it are still found.
-        let next = grid.snap(driftingPts(201))
-        #expect(next == Int64(201 * 1001))
+        let next = grid.snap(driftingPts(202))
+        #expect(next == Int64(202 * 1001))
     }
 
     @Test("Frames arrive in decode order: a B-frame's earlier time does not disturb the tracking")
@@ -154,6 +165,7 @@ struct CFRFrameGridTests {
         let from: Int64 = 60_000
         // P b b P b b ...: each anchor is decoded before the two frames shown ahead of it.
         for group in stride(from: from, to: from + 3000, by: 3) {
+            grid.beginSegment(Int(group / segmentFrames))
             for n in [group + 2, group, group + 1] {
                 #expect(grid.snap(driftingPts(n)) == n * 1001, "frame \(n)")
             }
@@ -165,26 +177,50 @@ struct CFRFrameGridTests {
         let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
         #expect(grid.snap(41) == 1001)
         #expect(grid.snap(43) == nil)
+        grid.beginSegment(1)
+        #expect(grid.snap(43) == nil)
     }
 
-    // A producer that has played from the start and one that restarts at a seek must put a frame on the same
-    // slot, however far the track has drifted: a restarted segment has to match its continuous twin.
-    @Test("A continuous producer and a restarted one agree on every slot, far past the tracking limit")
+    // A producer that has played from the start and one that restarts at a segment must write that segment
+    // the same way, frame for frame, however far the track has drifted: a restarted segment has to match its
+    // continuous twin. That includes the frames neither of them snaps.
+    @Test("A continuous producer and a restarted one write every segment alike, far past the tracking limit")
     func continuousAndRestartedProducersAgree() throws {
         let anchored = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
-        // A fast drift, 2e-3 ms a frame: half a slot (20.85 ms) is passed around frame 10,400.
+        // A fast drift, 2e-3 ms a frame: the limit (15.6 ms) is reached near frame 7,800, half a slot
+        // (20.85 ms) near frame 10,400, and the next slot's limit is back in reach near frame 13,000.
         func fastDrift(_ n: Int64) -> Int64 { Int64((Double(n) * (1001.0 / 24.0 + 0.002)).rounded()) }
-        let continuous = anchored.trackingCopy()
-        for n: Int64 in 0..<30_000 {
-            let placed = continuous.snap(fastDrift(n))
-            if n % 500 == 0 {
-                // A producer restarted at this frame (a seek) takes its phase from here.
-                let restarted = anchored.trackingCopy().snap(fastDrift(n))
-                if let placed, let restarted { #expect(placed == restarted, "frame \(n)") }
+        let total: Int64 = 30_000
+        let continuous = produce(anchored.trackingCopy(), 0..<total, pts: fastDrift)
+        for start in stride(from: Int64(0), to: total, by: Int(segmentFrames)) {
+            let restarted = produce(anchored.trackingCopy(), start..<min(start + segmentFrames, total), pts: fastDrift)
+            for (i, slot) in restarted.enumerated() {
+                let n = start + Int64(i)
+                #expect(slot == continuous[Int(n)], "frame \(n)")
             }
-            // Inside the limit (15.6 ms here, reached near frame 7,800) every frame is placed, on its own slot.
-            if n < 7_000 { #expect(placed == n * 1001, "frame \(n)") }
         }
+        // Inside the limit every frame is placed, on its own slot.
+        for n: Int64 in 0..<7_000 { #expect(continuous[Int(n)] == n * 1001, "frame \(n)") }
+        // Past the limit the track keeps its own time.
+        #expect(continuous[9_000] == nil)
+        // Back in reach of the next slot, frames snap again, one slot on. The track is then 3/8 of a frame
+        // ahead of its slot at most, as it was 3/8 behind it before the limit.
+        #expect(continuous[20_000] == Int64(20_001 * 1001))
+    }
+
+    // An edit (or a joined file) shifts the track against the grid. The band of the segment the shift lands in
+    // no longer fits, but the next segment opens its own, so the track is back on the grid a segment later, for
+    // a continuous producer as much as for one that started after the edit.
+    @Test("A shift in the track's phase is caught at the next segment")
+    func phaseShiftIsCaughtAtTheNextSegment() throws {
+        let anchored = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
+        let edit: Int64 = 5_000
+        func shifted(_ n: Int64) -> Int64 { matroskaPts(n, rate: 24000.0 / 1001.0) + (n >= edit ? 10 : 0) }
+        let placed = produce(anchored.trackingCopy(), 0..<10_000, pts: shifted)
+        let firstFullSegment = (edit / segmentFrames + 1) * segmentFrames
+        for n in firstFullSegment..<10_000 { #expect(placed[Int(n)] == n * 1001, "frame \(n)") }
+        // Frames before the edit stayed on the grid too.
+        for n in 0..<edit { #expect(placed[Int(n)] == n * 1001, "frame \(n)") }
     }
 
     @Test("The tracking limit is under half a slot, whatever the rate")
@@ -196,7 +232,7 @@ struct CFRFrameGridTests {
         }
     }
 
-    @Test("A decode time does not move the phase")
+    @Test("A decode time does not widen the band")
     func decodeTimesDoNotMoveThePhase() throws {
         let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0)).trackingCopy()
         // Every DTS sits a constant 1 ms early, as a sanitized Matroska DTS can; the PTS axis is exact.
@@ -206,6 +242,7 @@ struct CFRFrameGridTests {
             let placed = try #require(grid.place(pts: pts, dts: dts, duration: 42, shift: 0), "frame \(n)")
             #expect(placed.pts == (n + 2) * 1001, "frame \(n)")
         }
-        #expect(abs(grid.phase?.offset ?? .max) <= grid.scale / 2)
+        let phase = try #require(grid.phase)
+        #expect(phase.low >= -grid.scale / 2 && phase.high <= grid.scale / 2)
     }
 }

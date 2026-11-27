@@ -19,10 +19,12 @@ the public-API contract.
   the software ring held about 302 s, and `seekToLiveEdge()` froze the picture for 95 s while the source
   caught up. A timer pass now ends with the session that started it, and the software host's edge
   callback only publishes while that host is still the engine's.
-- **A constant-rate Matroska track that drifts off the frame grid no longer hitches every few seconds.** A
-  track whose frame is not exactly the standard rate's left the AE#886 grid a few minutes in, and the first
-  frame of a fragment then landed a frame early. Each producer now follows the track's phase against the grid,
-  up to three eighths of a slot.
+- **A constant-rate Matroska track that drifts off the frame grid no longer hitches every few seconds
+  (PR #1139).** A track whose frame is a hair longer than the standard rate's (41.70839 ms against 41.70833
+  on a Blu-ray remux) left the AE#886 grid a few minutes in, and the first frame of a fragment then landed a
+  frame early. The grid now checks each frame against a band the segment's first frame opens, so a drifting
+  track stays on it. A 12-minute resume into a test file drifting 3.6 ms went from 0 of 1632 frames on the
+  grid to all of them, and a restarted producer writes the same presentation times as a continuous one.
 - **A sequential origin no longer fails at the start of a seek to 0 (AE#1117).** On an IPTV catch-up whose
   first keyframe came 2.1 s after its first timestamp, a seek to 0 issued during the load reached the
   first segment at item time -2.1 s. The AE#412 repair then asked for a restart to re-cut that segment,

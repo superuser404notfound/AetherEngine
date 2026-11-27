@@ -1727,7 +1727,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
         self.videoCodecparForTap = video.codecpar
-        // Each producer follows the track's drift against the grid from its own first frame
+        // Each producer follows the track's drift against the grid segment by segment
         // (`CFRFrameGrid.Phase`); the retimer places through the same copy.
         let trackingGrid = isLive ? nil : video.frameGrid?.trackingCopy()
         self.frameGrid = trackingGrid
@@ -5297,6 +5297,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // AE#886: decided on the source time base, before the rescale rounds it away.
         // Sodalite#236: the retimer owns every packet of a 24p grid, so its window sees them all.
         let onGridMuxer = muxer.muxerVideoTimeBase.den == frameGrid?.outputTimeBase.den
+        // The drift band starts afresh with every segment, so a restarted producer writes a segment
+        // exactly as the continuous one did.
+        frameGrid?.beginSegment(muxer.currentSegmentIndex)
         let gridded: (pts: Int64, dts: Int64, duration: Int64)?
         if !onGridMuxer {
             gridded = nil

@@ -21,7 +21,7 @@ struct CFRFrameGrid {
     /// One frame in `outputTimeBase` ticks.
     let frameTicks: Int64
 
-    /// Where a track's frames really sit against the grid, followed as they arrive.
+    /// Where a track's frames really sit against the grid, set afresh for every segment.
     ///
     /// The grid is anchored at the stream's start, and a real track's frame is not always exactly
     /// 1001/24000 s: a Blu-ray remux measured 41.70839 ms a frame against 41.70833, which is 1.3 ms
@@ -30,38 +30,49 @@ struct CFRFrameGrid {
     /// that did snap, and the fragments the muxer cuts from that mix join a frame apart: the first
     /// frame of a fragment is pulled a frame early, on top of its neighbour, with a hole behind it.
     ///
-    /// The phase is that offset, in the units of `snap`'s exact fraction. It is taken from the first
-    /// frame a producer sees and then follows each frame that lands near a slot, so the test stays
-    /// "within one source tick of a slot" while the slots move with the track. Frames keep their
-    /// own slot numbers (the phase is a few milliseconds, a slot is tens), so two producers of one
-    /// session still place a frame on the same output time. Pump thread only.
+    /// So a tracked grid does not ask "within one tick of the anchored slot". It asks whether the
+    /// frame sits in the same narrow band against the grid as the frames before it in this segment:
+    /// the segment's first frame opens the band, and a frame joins it while the band stays within two
+    /// source ticks (rounding spans one, the drift inside one segment is hundredths of a millisecond).
+    /// A frame outside it is irregular and keeps its own time. Frames keep their own slot numbers.
+    ///
+    /// The band starts empty at every segment (`beginSegment`), so what a segment writes depends only
+    /// on that segment's own packets. A producer restarted at a segment therefore writes it exactly as
+    /// the continuous producer did, however far the track has drifted. Bounds are residuals in the
+    /// units of `snap`'s exact fraction. Pump thread only.
     final class Phase: @unchecked Sendable {
-        var offset: Int64 = 0
+        var low: Int64 = 0
+        var high: Int64 = 0
         var isSet = false
+        var segment = Int.min
     }
 
     /// One source tick, and one slot, in the units of `snap`'s exact fraction.
     var scale: Int64 { Int64(sourceTimeBase.num) * Int64(outputTimeBase.den) }
     var slotSpan: Int64 { Int64(sourceTimeBase.den) * frameTicks }
 
-    /// The furthest a phase may sit from the anchored grid: three eighths of a slot.
-    ///
-    /// It has to stay under half a slot. A producer that restarts takes its phase from the slot
-    /// nearest its first frame, so it can only ever start within half a slot of the anchored grid;
-    /// a producer that had followed the track further than that would number the same frame one
-    /// slot differently, and a restarted segment would no longer match its continuous twin. Past
-    /// the limit the track is left as it is (frames pass through unsnapped, as on an anchored grid).
+    /// The furthest from the anchored grid a segment's first frame may open the band: three eighths
+    /// of a slot. Further out, the frame looks more like an irregular one than like drift, so the
+    /// band waits for the next frame. Under half a slot, so the band never straddles two slots.
     var maximumPhase: Int64 { slotSpan / 8 * 3 }
 
     /// Nil: the anchored grid, exactly as before. Set by `trackingCopy()`.
     private(set) var phase: Phase?
 
-    /// This grid, following the track's drift from here on. One per producer: a producer that
-    /// starts after a seek takes its phase from its own first frame.
+    /// This grid, following the track's drift segment by segment. One per producer, since the band
+    /// is mutable state on the pump thread.
     func trackingCopy() -> CFRFrameGrid {
         var copy = self
         copy.phase = Phase()
         return copy
+    }
+
+    /// The packets that follow go into segment `index`. A new index empties the band, so the
+    /// segment's first frame opens it afresh. A no-op on an anchored grid.
+    func beginSegment(_ index: Int) {
+        guard let phase, phase.segment != index else { return }
+        phase.segment = index
+        phase.isSet = false
     }
 
     /// The rates the grid is built for, as exact rationals.
@@ -111,9 +122,11 @@ struct CFRFrameGrid {
     /// The grid slot for a source-axis timestamp, in `outputTimeBase`, or nil when it lies more
     /// than one source tick from every slot (or is NOPTS).
     ///
-    /// - Parameter tracking: false for a time that must not move the phase. A decode time is one:
-    ///   it is placed with the phase the presentation times found, but a DTS that sits a constant
-    ///   step off the PTS axis (a sanitized Matroska DTS) must not pull the phase towards itself.
+    /// On a tracked grid the test is the segment's band instead (`Phase`).
+    ///
+    /// - Parameter tracking: false for a time that must not open or widen the band. A decode time is
+    ///   one: it is placed against the band the presentation times found, but a DTS that sits a
+    ///   constant step off the PTS axis (a sanitized Matroska DTS) must not stretch it.
     func snap(_ sourcePts: Int64, tracking: Bool = true) -> Int64? {
         guard sourcePts != Int64.min else { return nil }
         // Offset from the origin in output ticks, kept as the exact fraction N / D.
@@ -125,26 +138,30 @@ struct CFRFrameGrid {
         guard !o1, !o2, !o3, slotSpan > 0 else { return nil }
         if let phase {
             if tracking, !phase.isSet {
-                // The producer's first frame says where the track sits now.
                 let nearest = Self.roundedQuotient(n, slotSpan)
                 let (base, overflow) = nearest.multipliedReportingOverflow(by: slotSpan)
                 if !overflow, abs(n - base) <= maximumPhase {
-                    phase.offset = n - base
+                    phase.low = n - base
+                    phase.high = n - base
                     phase.isSet = true
                 }
             }
-            let adjusted = n - phase.offset
-            let slot = Self.roundedQuotient(adjusted, slotSpan)
+            let center = phase.isSet ? phase.low / 2 + phase.high / 2 : 0
+            let slot = Self.roundedQuotient(n - center, slotSpan)
             let (onGrid, o4) = slot.multipliedReportingOverflow(by: slotSpan)
             guard !o4 else { return nil }
-            let error = adjusted - onGrid
-            // Follow frames that are near a slot (rounding and drift), not ones that are somewhere else.
-            if tracking, abs(error) <= 2 * scale {
-                let step = error / 16
-                let moved = phase.offset + (step != 0 ? step : (abs(error) * 4 > scale ? error.signum() : 0))
-                if abs(moved) <= maximumPhase { phase.offset = moved }
+            let residual = n - onGrid
+            if phase.isSet {
+                let low = min(phase.low, residual)
+                let high = max(phase.high, residual)
+                guard high - low <= 2 * scale else { return nil }
+                if tracking {
+                    phase.low = low
+                    phase.high = high
+                }
+            } else {
+                guard abs(residual) <= scale else { return nil }
             }
-            guard abs(error) <= scale else { return nil }
             return rescale(originPts) &+ slot &* frameTicks
         }
         let slot = Self.roundedQuotient(n, slotSpan)
