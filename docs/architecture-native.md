@@ -193,9 +193,32 @@ The case this covers: MPEG-TS timestamps are 33-bit and wrap around. When an MPE
 - the source tick is 0.1 ms or coarser, and
 - the frame rate probes as exactly a standard rate the tick cannot represent.
 
-It then uses a time base with one frame in whole ticks (1/24000 with 1001 ticks for 23.976, 1/24000 with 1000 ticks for 24), anchored at the stream's start time. `HLSSegmentProducer` moves each packet whose source-axis PTS lies within one source tick of a grid slot onto that slot (the DTS onto its own slot, never past the PTS), and rescales everything else as before.
+It then uses a time base with one frame in whole ticks (1/24000 with 1001 ticks for 23.976, 1/24000 with 1000 ticks for 24), anchored at the stream's start time. On the anchored grid, `HLSSegmentProducer` moves each packet whose source-axis PTS lies within one source tick of a grid slot onto that slot (the DTS onto its own slot, never past the PTS), and rescales everything else as before. The producers use the drift band described below instead of that one-tick test.
 
 The grid is derived once per session, before the first producer runs, from the stream's declared rate. So every producer of a session writes the same `init.mp4` timescale, and a restarted segment still matches its continuous twin.
+
+**A track that drifts.** A real track's frame is not always exactly the standard rate's. A Blu-ray remux can run a few hundred-thousandths of a millisecond long per frame, and that adds up to more than one source tick within minutes. Anchored at the stream's start, the grid then loses most of the track's frames:
+
+- They pass through unsnapped, between neighbours that still snap.
+- The fragments cut from that mix join a frame apart, so the first frame of a fragment lands on its neighbour and leaves a hole behind it.
+- AVPlayer counts no dropped frame. The picture hitches every few seconds.
+
+So each producer checks frames against the track's own band instead of the anchored slot (`CFRFrameGrid.Phase`):
+
+- The first frame of a segment opens the band: its offset from the nearest slot.
+- A later frame of the same segment snaps while all snapped frames of the segment stay within two source ticks of each other. Rounding spans one tick, and the drift inside one segment is hundredths of a millisecond.
+- A frame outside the band is irregular and keeps its own time.
+- A decode time snaps within two source ticks of the band's middle and never widens the band. The muxer's timestamp sanitizer keeps decode times rising.
+- Frames keep their own slot numbers, so the output time is still `slot × frame`, exact.
+
+Two guards keep the band from doing harm, because it can move a frame by more than a third of a frame:
+
+- **An irregular keyframe.** The segment's first frame is its keyframe. If the next frame does not fit, the keyframe stood alone, and the band opens once more on that frame. Without this, one keyframe 6 ms off would take its whole segment off the grid.
+- **Order.** A frame only snaps where it stays in presentation order with the segment's recent frames, snapped or not, and moves less than the smallest spacing the segment has shown. The second rule covers frames that have not come yet. Both matter only in a variable-rate stretch whose frames sit closer than three eighths of a frame, which a constant-rate track never has.
+
+The band starts empty at every segment. So what a segment writes depends only on that segment's packets, and a producer restarted at a segment writes it exactly as the continuous one did, however far the track has drifted. The one exception is 24p film, where the pulldown retimer decides which packets reach the grid, and its window carries history across segments. A phase shift from an edit or a joined file costs at most the rest of one segment, because the next one opens its own band.
+
+The first frame may open the band at most three eighths of a slot from the anchored grid (15.6 ms at 23.976). Further out it looks more like an irregular frame than like drift, so the band waits for the next frame. That also bounds what the grid does to A/V sync. A snapped frame sits at most about three eighths of a frame (plus two source ticks) from its own time. A track that drifts further passes through unsnapped until it is back within three eighths of the next slot, and then snaps one slot on. Each of those two switches shows once as one uneven frame step (about 57 ms instead of 41.7) and moves A/V sync by up to 15.6 ms. At the measured 6 ms an hour, the first switch comes after about two and a half hours.
 
 **When the declared rate is not a standard rate.** Then `SourceFrameRateMeasurement` fits the rate to the head packets that `find_stream_info` already queued (peeked, not consumed), and the load uses that instead (Sodalite#236). This matters because mkvmerge writes the first frame's duration as a track's DefaultDuration, so film carrying 2:3 pulldown timing declares 20 fps while it runs at 23.976.
 

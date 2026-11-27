@@ -12,6 +12,9 @@ import AetherLibavutil
 /// (1/24000 with 1001 ticks a frame for 23.976) and puts every timestamp that lies within one
 /// source tick of a grid slot onto that slot. Anything farther away keeps its own time, so a
 /// variable-rate or edited stretch is passed through rather than bent onto a grid it does not have.
+///
+/// That is the anchored grid. The producers use a tracking copy (`trackingCopy()`), which replaces
+/// the one-tick test with a band per segment, so a track that drifts against the grid stays on it.
 struct CFRFrameGrid {
     let sourceTimeBase: AVRational
     /// Source-axis PTS of slot 0, the stream's start time.
@@ -20,6 +23,104 @@ struct CFRFrameGrid {
     let outputTimeBase: AVRational
     /// One frame in `outputTimeBase` ticks.
     let frameTicks: Int64
+
+    /// Where a track's frames really sit against the grid, set afresh for every segment.
+    ///
+    /// The grid is anchored at the stream's start, and a real track's frame is not always exactly
+    /// 1001/24000 s: a Blu-ray remux measured 41.70839 ms a frame against 41.70833, which is 1.3 ms
+    /// of drift 12 minutes in and 6 ms after an hour. Anchored, such a track ends up more than one
+    /// source tick from every slot, most of its frames pass through unsnapped between neighbours
+    /// that did snap, and the fragments the muxer cuts from that mix join a frame apart: the first
+    /// frame of a fragment is pulled a frame early, on top of its neighbour, with a hole behind it.
+    ///
+    /// So a tracked grid does not ask "within one tick of the anchored slot". It asks whether the
+    /// frame sits in the same narrow band against the grid as the frames before it in this segment:
+    /// the segment's first frame opens the band, and a frame joins it while the band stays within two
+    /// source ticks (rounding spans one, the drift inside one segment is hundredths of a millisecond).
+    /// A frame outside it is irregular and keeps its own time. Frames keep their own slot numbers.
+    ///
+    /// Two guards keep a band from doing harm. If the frame after the opener does not fit, the opener
+    /// stood alone (an irregular keyframe) and the band opens once more on that frame, instead of
+    /// taking the whole segment off the grid. And a frame only snaps where it stays in presentation
+    /// order with every recent frame of the segment, snapped or not, and moves less than the smallest
+    /// spacing the segment has shown so far (so it cannot pass a frame still to come either): a band
+    /// can move a frame by more than a third of a frame, which in a variable-rate stretch could
+    /// otherwise land it on or past its neighbour.
+    ///
+    /// The band starts empty at every segment (`beginSegment`), so what a segment writes depends only
+    /// on that segment's own packets. A producer restarted at a segment therefore writes it exactly as
+    /// the continuous producer did, however far the track has drifted. Bounds are residuals in the
+    /// units of `snap`'s exact fraction.
+    ///
+    /// A reference type on purpose: every copy of one tracking grid shares it, the producer's and the
+    /// pulldown retimer's. Pump thread only.
+    final class Phase: @unchecked Sendable {
+        var low: Int64 = 0
+        var high: Int64 = 0
+        var isSet = false
+        var members = 0
+        var reopened = false
+        var segment = Int.min
+        /// The segment's recent presentation times, source and placed, in `snap`'s units.
+        var recent: [(source: Int64, placed: Int64)] = []
+
+        static let recentCapacity = 32
+
+        func open(at residual: Int64) {
+            low = residual
+            high = residual
+            isSet = true
+            members = 0
+        }
+
+        /// `placed` keeps this frame on the same side of every recent frame as `source`, at least
+        /// `gap` away from each.
+        func keepsOrder(source: Int64, placed: Int64, gap: Int64) -> Bool {
+            recent.allSatisfy { ($0.source < source) == ($0.placed < placed) && abs($0.placed - placed) >= gap }
+        }
+
+        /// The smallest gap between two of the segment's recent presentation times, nil with fewer than two.
+        func smallestSpacing() -> Int64? {
+            guard recent.count >= 2 else { return nil }
+            let sorted = recent.map(\.source).sorted()
+            return zip(sorted.dropFirst(), sorted).map { $0 - $1 }.min()
+        }
+
+        func record(source: Int64, placed: Int64) {
+            recent.append((source, placed))
+            if recent.count > Self.recentCapacity { recent.removeFirst() }
+        }
+    }
+
+    /// One source tick, and one slot, in the units of `snap`'s exact fraction.
+    var scale: Int64 { Int64(sourceTimeBase.num) * Int64(outputTimeBase.den) }
+    var slotSpan: Int64 { Int64(sourceTimeBase.den) * frameTicks }
+
+    /// The furthest from the anchored grid a segment's first frame may open the band: three eighths
+    /// of a slot. Further out, the frame looks more like an irregular one than like drift, so the
+    /// band waits for the next frame. Under half a slot, so the band never straddles two slots.
+    var maximumPhase: Int64 { slotSpan / 8 * 3 }
+
+    /// Nil: the anchored grid, exactly as before. Set by `trackingCopy()`.
+    private(set) var phase: Phase?
+
+    /// This grid, following the track's drift segment by segment. One per producer, since the band
+    /// is mutable state on the pump thread.
+    func trackingCopy() -> CFRFrameGrid {
+        var copy = self
+        copy.phase = Phase()
+        return copy
+    }
+
+    /// The packets that follow go into segment `index`. A new index empties the band, so the
+    /// segment's first frame opens it afresh. A no-op on an anchored grid.
+    func beginSegment(_ index: Int) {
+        guard let phase, phase.segment != index else { return }
+        phase.segment = index
+        phase.isSet = false
+        phase.reopened = false
+        phase.recent.removeAll(keepingCapacity: true)
+    }
 
     /// The rates the grid is built for, as exact rationals.
     static let standardRates: [AVRational] = [
@@ -67,20 +168,98 @@ struct CFRFrameGrid {
 
     /// The grid slot for a source-axis timestamp, in `outputTimeBase`, or nil when it lies more
     /// than one source tick from every slot (or is NOPTS).
-    func snap(_ sourcePts: Int64) -> Int64? {
+    ///
+    /// On a tracked grid the test is the segment's band instead (`Phase`).
+    ///
+    /// - Parameter tracking: false for a time that must not open or widen the band. A decode time is
+    ///   one: it is placed against the band the presentation times found, but a DTS that sits a
+    ///   constant step off the PTS axis (a sanitized Matroska DTS) must not stretch it. It snaps
+    ///   within two source ticks of the band's middle, and the muxer's sanitizer keeps it rising.
+    func snap(_ sourcePts: Int64, tracking: Bool = true) -> Int64? {
         guard sourcePts != Int64.min else { return nil }
-        // Offset from the origin in output ticks, kept as the exact fraction N / D.
-        let scale = Int64(sourceTimeBase.num) * Int64(outputTimeBase.den)
+        // Offset from the origin in output ticks, kept as the exact fraction N / D. One source tick
+        // is `scale` in it, one slot `slotSpan`.
         let d = Int64(sourceTimeBase.den)
         let (delta, o1) = sourcePts.subtractingReportingOverflow(originPts)
         let (n, o2) = delta.multipliedReportingOverflow(by: scale)
         let (slotSpan, o3) = d.multipliedReportingOverflow(by: frameTicks)
         guard !o1, !o2, !o3, slotSpan > 0 else { return nil }
+        if let phase {
+            return snapTracked(n, slotSpan: slotSpan, phase: phase, tracking: tracking)
+        }
         let slot = Self.roundedQuotient(n, slotSpan)
         let (onGrid, o4) = slot.multipliedReportingOverflow(by: slotSpan)
         guard !o4 else { return nil }
         // One source tick is `scale` in the N / D fraction.
         guard abs(n - onGrid) <= scale else { return nil }
+        return rescale(originPts) &+ slot &* frameTicks
+    }
+
+    /// `snap` on a tracking grid, `n` already in the exact fraction's units.
+    private func snapTracked(_ n: Int64, slotSpan: Int64, phase: Phase, tracking: Bool) -> Int64? {
+        // The slot nearest `n` on the anchored grid, and how far `n` sits from it.
+        func nearest(_ shift: Int64) -> (slot: Int64, residual: Int64)? {
+            let slot = Self.roundedQuotient(n - shift, slotSpan)
+            let (onGrid, overflow) = slot.multipliedReportingOverflow(by: slotSpan)
+            return overflow ? nil : (slot, n - onGrid)
+        }
+        if tracking, !phase.isSet, let anchored = nearest(0), abs(anchored.residual) <= maximumPhase {
+            phase.open(at: anchored.residual)
+        }
+        guard phase.isSet else {
+            // No band yet (the frames so far sat too far out): the anchored test.
+            guard let anchored = nearest(0), abs(anchored.residual) <= scale else {
+                if tracking { phase.record(source: n, placed: n) }
+                return nil
+            }
+            return admit(n, slot: anchored.slot, slotSpan: slotSpan, phase: phase, tracking: tracking)
+        }
+        guard var fit = nearest(phase.low / 2 + phase.high / 2) else { return nil }
+        if !tracking {
+            let middle = phase.low / 2 + phase.high / 2
+            guard abs(fit.residual - middle) <= 2 * scale else { return nil }
+            return rescale(originPts) &+ fit.slot &* frameTicks
+        }
+        var low = min(phase.low, fit.residual)
+        var high = max(phase.high, fit.residual)
+        if high - low > 2 * scale {
+            // The opener stood alone, so it was the irregular frame: open the band once more here.
+            guard phase.members == 1, !phase.reopened,
+                  let anchored = nearest(0), abs(anchored.residual) <= maximumPhase else {
+                phase.record(source: n, placed: n)
+                return nil
+            }
+            phase.open(at: anchored.residual)
+            phase.reopened = true
+            fit = anchored
+            low = anchored.residual
+            high = anchored.residual
+        }
+        guard let placed = admit(n, slot: fit.slot, slotSpan: slotSpan, phase: phase, tracking: true) else {
+            return nil
+        }
+        phase.low = low
+        phase.high = high
+        return placed
+    }
+
+    /// Puts a tracked presentation time on `slot` if that keeps it in order with the segment's recent
+    /// frames, and records where it went.
+    private func admit(_ n: Int64, slot: Int64, slotSpan: Int64, phase: Phase, tracking: Bool) -> Int64? {
+        let target = slot &* slotSpan
+        guard tracking else { return rescale(originPts) &+ slot &* frameTicks }
+        // One output tick, so two frames never round onto the same output time.
+        let gap = Int64(sourceTimeBase.den)
+        // The order check only sees frames that already came. A frame that has not come yet is at least
+        // the segment's smallest spacing away, so a move shorter than that cannot pass it either.
+        let spacing = phase.smallestSpacing()
+        guard phase.keepsOrder(source: n, placed: target, gap: gap),
+              spacing.map({ abs(target - n) < $0 - gap }) ?? true else {
+            phase.record(source: n, placed: n)
+            return nil
+        }
+        phase.record(source: n, placed: target)
+        phase.members += 1
         return rescale(originPts) &+ slot &* frameTicks
     }
 
@@ -95,7 +274,7 @@ struct CFRFrameGrid {
         let outPts = gridPts &- shiftOut
         var outDts = dts
         if dts != Int64.min {
-            outDts = (snap(dts &+ unshift).map { $0 &- shiftOut } ?? rescale(dts))
+            outDts = (snap(dts &+ unshift, tracking: false).map { $0 &- shiftOut } ?? rescale(dts))
             outDts = min(outDts, outPts)
         }
         let durationOut = rescale(duration)
