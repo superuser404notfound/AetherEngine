@@ -197,6 +197,14 @@ It then uses a time base with one frame in whole ticks (1/24000 with 1001 ticks 
 
 The grid is derived once per session, before the first producer runs, from the stream's declared rate. So every producer of a session writes the same `init.mp4` timescale, and a restarted segment still matches its continuous twin.
 
+**A track that drifts.** A real track's frame is not always exactly the standard rate's. A Blu-ray remux can run a few hundred-thousandths of a millisecond long per frame, and that adds up to more than one source tick within minutes. Anchored at the stream's start, the grid then loses most of the track's frames:
+
+- They pass through unsnapped, between neighbours that still snap.
+- The fragments cut from that mix join a frame apart, so the first frame of a fragment lands on its neighbour and leaves a hole behind it.
+- AVPlayer counts no dropped frame. The picture hitches every few seconds.
+
+So each producer follows the track's phase against the grid (`CFRFrameGrid.Phase`). It takes the phase from its first frame and moves it a little with every frame that lands near a slot. The "within one source tick" test then holds while the slots move with the track. Slot numbers do not change, because the phase is a few milliseconds and a slot is tens, so two producers still place a frame on the same output time. A frame that is really irregular is still passed through. The phase never follows further than a fixed limit from the anchored grid; past it the track is left as it is, so the picture cannot walk away from the sound.
+
 **When the declared rate is not a standard rate.** Then `SourceFrameRateMeasurement` fits the rate to the head packets that `find_stream_info` already queued (peeked, not consumed), and the load uses that instead (Sodalite#236). This matters because mkvmerge writes the first frame's duration as a track's DefaultDuration, so film carrying 2:3 pulldown timing declares 20 fps while it runs at 23.976.
 
 ### 2:3 pulldown timing on 24p film

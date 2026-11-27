@@ -103,4 +103,67 @@ struct CFRFrameGridTests {
         #expect(grid.place(pts: 42, dts: 42, duration: 84, shift: 0)?.duration == Int64(84 * 24))
         #expect(grid.place(pts: 42, dts: 42, duration: 0, shift: 0)?.duration == 0)
     }
+
+    // A track whose frames are a hair longer than 1001/24000 s (41.70839 ms rather than 41.70833: measured on a
+    // real Blu-ray remux) drifts off a grid anchored at the stream's start: about 1.3 ms after 12 minutes and
+    // 6 ms after an hour. Anchored, most of its frames are then more than one source tick from every slot and are
+    // passed through unsnapped, between neighbours that did snap.
+    private func driftingPts(_ n: Int64) -> Int64 {
+        Int64((Double(n) * 41.70839).rounded())
+    }
+
+    @Test("An anchored grid loses a slowly drifting track")
+    func anchoredGridLosesADriftingTrack() throws {
+        let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
+        let from: Int64 = 18_000   // 12.5 minutes in
+        let missed = (from..<from + 1200).filter { grid.snap(driftingPts($0)) == nil }.count
+        #expect(missed > 300)
+    }
+
+    @Test("A tracking grid follows the drift: every frame lands on an exact 1001-tick step")
+    func trackingGridFollowsDrift() throws {
+        let anchored = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
+        // A producer that starts 12.5 minutes in (a resume or a seek), then plays for an hour.
+        let grid = anchored.trackingCopy()
+        let from: Int64 = 18_000
+        var previous: Int64?
+        for n in from..<from + 86_400 {
+            let placed = try #require(grid.snap(driftingPts(n)), "frame \(n) was left off the grid")
+            if let previous { #expect(placed - previous == 1001, "frame \(n)") }
+            previous = placed
+            // The slot is the frame's own: tracking never renumbers frames.
+            #expect(placed == n * 1001)
+        }
+    }
+
+    @Test("A tracking grid still passes a real irregularity through")
+    func trackingGridKeepsIrregularFramesOffGrid() throws {
+        let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0)).trackingCopy()
+        for n: Int64 in 0..<200 { _ = grid.snap(driftingPts(n)) }
+        // Half a frame late: an edit or a variable-rate stretch, not rounding.
+        let irregular = grid.snap(driftingPts(200) + 20)
+        #expect(irregular == nil)
+        // And the frames after it are still found.
+        let next = grid.snap(driftingPts(201))
+        #expect(next == Int64(201 * 1001))
+    }
+
+    @Test("Frames arrive in decode order: a B-frame's earlier time does not disturb the tracking")
+    func trackingGridTakesDecodeOrder() throws {
+        let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0)).trackingCopy()
+        let from: Int64 = 60_000
+        // P b b P b b ...: each anchor is decoded before the two frames shown ahead of it.
+        for group in stride(from: from, to: from + 3000, by: 3) {
+            for n in [group + 2, group, group + 1] {
+                #expect(grid.snap(driftingPts(n)) == n * 1001, "frame \(n)")
+            }
+        }
+    }
+
+    @Test("An untracked grid behaves exactly as before")
+    func anchoredGridIsUnchanged() throws {
+        let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
+        #expect(grid.snap(41) == 1001)
+        #expect(grid.snap(43) == nil)
+    }
 }

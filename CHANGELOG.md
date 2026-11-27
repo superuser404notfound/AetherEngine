@@ -12,6 +12,16 @@ the public-API contract.
 
 ### Fixed
 
+- **A constant-rate Matroska track that drifts off the frame grid no longer hitches every few seconds.** The
+  grid (AE#886) is anchored at the stream's start, and a real track's frame is not always exactly the standard
+  rate's: a 23.976 Blu-ray remux measured 41.70839 ms a frame against 41.70833, which is more than one source
+  tick of drift 12 minutes in. Most of its frames were then passed through unsnapped between neighbours that
+  snapped (`onGrid=343 offGrid=1062` on the finish line), and the fragments cut from that mix joined a frame
+  apart: the first frame of a fragment landed 0.4 to 1.2 ms from its neighbour with a two-frame hole behind it,
+  about once every 3.4 s (22 of 2,193 frames), with no dropped frame counted. Each producer now follows the
+  track's phase against the grid from its first frame, so every frame of such a track lands on its slot
+  (`onGrid=2278 offGrid=0` on the same title). Slot numbers are unchanged, so a restarted segment still matches
+  its continuous twin; a frame that is really irregular still passes through.
 - **A sequential origin no longer fails at the start of a seek to 0 (AE#1117).** On an IPTV catch-up whose
   first keyframe came 2.1 s after its first timestamp, a seek to 0 issued during the load reached the
   first segment at item time -2.1 s. The AE#412 repair then asked for a restart to re-cut that segment,

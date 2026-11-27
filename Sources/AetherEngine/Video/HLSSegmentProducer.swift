@@ -1727,8 +1727,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
         self.videoCodecparForTap = video.codecpar
-        self.frameGrid = isLive ? nil : video.frameGrid
-        self.pulldownRetimer = (isLive ? nil : video.frameGrid).flatMap {
+        // Each producer follows the track's drift against the grid from its own first frame
+        // (`CFRFrameGrid.Phase`); the retimer places through the same copy.
+        let trackingGrid = isLive ? nil : video.frameGrid?.trackingCopy()
+        self.frameGrid = trackingGrid
+        self.pulldownRetimer = trackingGrid.flatMap {
             PulldownCadenceRetimer(grid: $0, latch: video.pulldownLatch)
         }
         self.targetSegmentDurationSeconds = targetSegmentDurationSeconds

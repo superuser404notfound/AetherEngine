@@ -21,6 +21,39 @@ struct CFRFrameGrid {
     /// One frame in `outputTimeBase` ticks.
     let frameTicks: Int64
 
+    /// Where a track's frames really sit against the grid, followed as they arrive.
+    ///
+    /// The grid is anchored at the stream's start, and a real track's frame is not always exactly
+    /// 1001/24000 s: a Blu-ray remux measured 41.70839 ms a frame against 41.70833, which is 1.3 ms
+    /// of drift 12 minutes in and 6 ms after an hour. Anchored, such a track ends up more than one
+    /// source tick from every slot, most of its frames pass through unsnapped between neighbours
+    /// that did snap, and the fragments the muxer cuts from that mix join a frame apart: the first
+    /// frame of a fragment is pulled a frame early, on top of its neighbour, with a hole behind it.
+    ///
+    /// The phase is that offset, in the units of `snap`'s exact fraction. It is taken from the first
+    /// frame a producer sees and then follows each frame that lands near a slot, so the test stays
+    /// "within one source tick of a slot" while the slots move with the track. Frames keep their
+    /// own slot numbers (the phase is a few milliseconds, a slot is tens), so two producers of one
+    /// session still place a frame on the same output time. Pump thread only.
+    final class Phase: @unchecked Sendable {
+        var offset: Int64 = 0
+        var isSet = false
+        /// Never follow further than this many source ticks from the anchored grid: past it the
+        /// picture would run visibly out of step with the sound, and the track is left as it is.
+        static let maximumTicks: Int64 = 40
+    }
+
+    /// Nil: the anchored grid, exactly as before. Set by `trackingCopy()`.
+    private(set) var phase: Phase?
+
+    /// This grid, following the track's drift from here on. One per producer: a producer that
+    /// starts after a seek takes its phase from its own first frame.
+    func trackingCopy() -> CFRFrameGrid {
+        var copy = self
+        copy.phase = Phase()
+        return copy
+    }
+
     /// The rates the grid is built for, as exact rationals.
     static let standardRates: [AVRational] = [
         AVRational(num: 24000, den: 1001), AVRational(num: 24, den: 1), AVRational(num: 25, den: 1),
@@ -76,6 +109,30 @@ struct CFRFrameGrid {
         let (n, o2) = delta.multipliedReportingOverflow(by: scale)
         let (slotSpan, o3) = d.multipliedReportingOverflow(by: frameTicks)
         guard !o1, !o2, !o3, slotSpan > 0 else { return nil }
+        if let phase {
+            if !phase.isSet {
+                // The producer's first frame says where the track sits now.
+                let nearest = Self.roundedQuotient(n, slotSpan)
+                let (base, overflow) = nearest.multipliedReportingOverflow(by: slotSpan)
+                if !overflow, abs(n - base) <= Phase.maximumTicks * scale {
+                    phase.offset = n - base
+                    phase.isSet = true
+                }
+            }
+            let adjusted = n - phase.offset
+            let slot = Self.roundedQuotient(adjusted, slotSpan)
+            let (onGrid, o4) = slot.multipliedReportingOverflow(by: slotSpan)
+            guard !o4 else { return nil }
+            let error = adjusted - onGrid
+            // Follow frames that are near a slot (rounding and drift), not ones that are somewhere else.
+            if abs(error) <= 2 * scale {
+                let step = error / 16
+                let moved = phase.offset + (step != 0 ? step : (abs(error) * 4 > scale ? error.signum() : 0))
+                if abs(moved) <= Phase.maximumTicks * scale { phase.offset = moved }
+            }
+            guard abs(error) <= scale else { return nil }
+            return rescale(originPts) &+ slot &* frameTicks
+        }
         let slot = Self.roundedQuotient(n, slotSpan)
         let (onGrid, o4) = slot.multipliedReportingOverflow(by: slotSpan)
         guard !o4 else { return nil }
