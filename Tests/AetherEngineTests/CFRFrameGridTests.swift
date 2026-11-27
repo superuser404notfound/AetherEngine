@@ -223,6 +223,39 @@ struct CFRFrameGridTests {
         for n in 0..<edit { #expect(placed[Int(n)] == n * 1001, "frame \(n)") }
     }
 
+    // A segment's first frame is its keyframe, and one keyframe can sit off the grid (an edit point, a muxer
+    // quirk) while the rest of the segment is regular. The band then opens once more on the next frame instead
+    // of leaving the whole segment off the grid.
+    @Test("An irregular keyframe does not take its segment off the grid")
+    func irregularOpenerReopensTheBand() throws {
+        let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0)).trackingCopy()
+        let rate = 24000.0 / 1001.0
+        grid.beginSegment(7)
+        // 6 ms late: inside the opening limit, far outside the rounding.
+        #expect(grid.snap(matroskaPts(1_008, rate: rate) + 6) == Int64(1_008 * 1001))
+        for n: Int64 in 1_009..<1_152 {
+            #expect(grid.snap(matroskaPts(n, rate: rate)) == n * 1001, "frame \(n)")
+        }
+        // It reopens once per segment: a second irregular frame is just passed through.
+        #expect(grid.snap(matroskaPts(1_152, rate: rate) + 6) == nil)
+    }
+
+    // A band can move a frame by more than a third of a frame (15 ms here). In a variable-rate stretch inside a
+    // track declared 23.976, with frames 8 ms apart, that is enough to land a frame on or past its neighbour, so a
+    // frame only snaps where it stays in order with the segment's recent frames.
+    @Test("A tracked grid never puts two frames out of order or on one time")
+    func trackedGridKeepsPresentationOrder() throws {
+        let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0)).trackingCopy()
+        grid.beginSegment(0)
+        // Opens the band 15 ms late, then a 119.88 run.
+        let times = [Int64(15)] + (1..<240).map { 15 + Int64((Double($0) * 1001.0 / 120.0).rounded()) }
+        let placed = times.map { grid.snap($0) ?? grid.rescale($0) }
+        for i in 1..<placed.count {
+            #expect(placed[i] > placed[i - 1], "frame \(i): \(placed[i - 1]) then \(placed[i])")
+        }
+        #expect(placed.contains { $0 != grid.rescale(times[placed.firstIndex(of: $0)!]) }, "the band snapped nothing at all")
+    }
+
     @Test("The tracking limit is under half a slot, whatever the rate")
     func trackingLimitIsUnderHalfASlot() throws {
         for (num, den) in [(24000, 1001), (24, 1), (30000, 1001), (60000, 1001)] as [(Int32, Int32)] {
