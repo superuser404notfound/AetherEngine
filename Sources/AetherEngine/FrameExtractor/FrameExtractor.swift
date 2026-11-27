@@ -17,7 +17,25 @@ public struct BoundedStillFrame: @unchecked Sendable {
 /// full-res), `preview` (frame-accurate, downscaled) and `thumbnail` (keyframe-snapped, fast). Lazy: context opens on
 /// first use; blocking FFmpeg work runs on a dedicated serial queue, not the cooperative pool.
 /// Create one per URL; for the playing item prefer `AetherEngine.makeFrameExtractor()`.
-public actor FrameExtractor {
+/// What a still request produced. `.yielded` means the request stood back for a starved playback
+/// pipeline and is worth repeating; `.unavailable` covers every other way no image came back.
+public enum StillOutcome: @unchecked Sendable {
+    case image(CGImage)
+    case yielded
+    case unavailable
+
+    public var image: CGImage? {
+        if case .image(let image) = self { return image }
+        return nil
+    }
+}
+
+/// Anything that hands out keyframe stills by time, so a scanner can be driven by a fake in tests.
+public protocol StillSource: Sendable {
+    func thumbnailOutcome(at seconds: Double, maxWidth: Int) async -> StillOutcome
+}
+
+public actor FrameExtractor: StillSource {
     private let context: FrameDecodeContext
     private let cache: FrameCache
     private let decodeQueue: DispatchQueue
@@ -202,18 +220,24 @@ public actor FrameExtractor {
     // MARK: - Public API
 
     public func thumbnail(at seconds: Double, maxWidth: Int = 320) async -> CGImage? {
+        await produce(at: seconds, mode: .thumbnail, targetWidth: maxWidth, maxSize: nil).image
+    }
+
+    /// Same still as `thumbnail(at:maxWidth:)`, but says whether a missing image yielded to a starved
+    /// pipeline (worth asking again later) or could not be produced.
+    public func thumbnailOutcome(at seconds: Double, maxWidth: Int) async -> StillOutcome {
         await produce(at: seconds, mode: .thumbnail, targetWidth: maxWidth, maxSize: nil)
     }
 
     /// Produce a frame-accurate, downscaled still for interactive scrubbing.
     /// Like thumbnails, uncached previews yield while the playback pipeline is starved.
     public func preview(at seconds: Double, maxWidth: Int = 320) async -> CGImage? {
-        await produce(at: seconds, mode: .preview, targetWidth: maxWidth, maxSize: nil)
+        await produce(at: seconds, mode: .preview, targetWidth: maxWidth, maxSize: nil).image
     }
 
     public func snapshot(at seconds: Double, maxSize: CGSize? = nil) async -> CGImage? {
         // targetWidth is inert for snapshot; FrameDecodeContext.clampedWidth governs size.
-        await produce(at: seconds, mode: .snapshot, targetWidth: 0, maxSize: maxSize)
+        await produce(at: seconds, mode: .snapshot, targetWidth: 0, maxSize: maxSize).image
     }
 
     /// AE#711 follow-up: the frame `offset` seconds after the first one this source decodes, for a
@@ -333,9 +357,9 @@ public actor FrameExtractor {
 
     // MARK: - Core
 
-    private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> CGImage? {
+    private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> StillOutcome {
         // Audit BIT-105: a 0/0 scrub fraction or `CMTime.indefinite.seconds` is a host bug, not a position.
-        guard !isShutDown, !Task.isCancelled, seconds.isFinite, seconds >= 0 else { return nil }
+        guard !isShutDown, !Task.isCancelled, seconds.isFinite, seconds >= 0 else { return .unavailable }
         // A valid request owns the scrub intent even when its image is already cached or it
         // yields to playback. Retire the preceding decode before either early return.
         currentToken?.cancel()
@@ -348,14 +372,14 @@ public actor FrameExtractor {
             if !isShutDown, currentToken === token { scheduleIdleClose() }
         }
         if let hit = cache.get(mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize) {
-            return hit
+            return .image(hit)
         }
         // Elective thumbnails/previews yield to a starved playback pipeline (snapshots are deliberate
         // one-shot user actions and stay ungated). Checked after the cache: hits are free.
         if mode.isElective, yieldWhile?() == true {
             EngineLog.emit("[FrameExtractor] \(mode) yielded: playback pipeline starved",
                            category: .swPlayback, level: .verbose)
-            return nil
+            return .yielded
         }
         let context = self.context
         let result = await withTaskCancellationHandler {
@@ -393,11 +417,10 @@ public actor FrameExtractor {
         }
         // Cancellation can win after the decode's last check, or while its result waits to
         // reenter this actor. Never publish/cache that result or reset a newer request's idle timer.
-        guard !isShutDown, !Task.isCancelled, !token.isCancelled else { return nil }
-        if let image = result.image {
-            cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize)
-        }
-        return result.image
+        guard !isShutDown, !Task.isCancelled, !token.isCancelled else { return .unavailable }
+        guard let image = result.image else { return .unavailable }
+        cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize)
+        return .image(image)
     }
 
     /// Run blocking work on the serial queue, awaiting the result without blocking the actor's executor.
