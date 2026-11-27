@@ -5195,7 +5195,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// is nothing to act on: live, no recorded reach for the landing segment, a random-access point
     /// already within reach below the target, or a re-cut whose gate did not open in time.
     func preparedSeekLanding(itemSeconds: Double) -> Double {
-        guard !isLiveSession, let provider else { return itemSeconds }
+        guard Self.seekLandingMayRecut(isLiveSession: isLiveSession,
+                                       sequentialOrigin: sequentialOriginPinsProducerToZero),
+              let provider else { return itemSeconds }
         dropUnstartedRecut()
         let index = segmentIndexForPlaylistTime(itemSeconds)
         guard let reach = provider.videoReach(at: index) else { return itemSeconds }
@@ -5306,6 +5308,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if landingReach.serves(offsetSeconds: offsetIntoSegment) { return false }
         guard let coveringSyncDistance else { return true }
         return coveringSyncDistance > coldSeekLookbackSeconds
+    }
+
+    /// AE#1117: a re-cut is a restart. Live has its own landing rules, and a sequential origin answers
+    /// every restart by failing the session with code -5, so a landing a little late beats a dead player.
+    static func seekLandingMayRecut(isLiveSession: Bool, sequentialOrigin: Bool) -> Bool {
+        !isLiveSession && !sequentialOrigin
     }
 
     /// `segmentPlan[index].startSeconds` on the AVPlayer/playlist axis, taking `restartLock` itself.

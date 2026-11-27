@@ -1002,6 +1002,7 @@ A rebuild consumes no new stream. Anything a host sets up at the moment it hands
 Where a seek lands:
 
 - **Native.** A seek reports a landing only when AVPlayer completed it no more than 0.75 s short of the target (an overshoot in the seek direction counts). An interrupted or clamped seek is not a landing.
+- **Before the first keyframe.** Some sources start mid-GOP, so their first keyframe comes after their first timestamp. A target in that gap, a seek to 0 among them, goes to AVPlayer as the start of the item and lands on that first keyframe (AE#1117).
 - **Software host, AV1 decoded by dav1d.** The seek lands on the keyframe nearest the target, within 10 s (and within half the seek's own distance), and never on the far side of the playhead. The candidates are the keyframes the packet cache retains or the container's index lists. `.landed` reports that keyframe's position. Without such a keyframe at or after the target, the seek stays exact ([formats › Containers and codecs](formats.md#containers-and-codecs)).
 - **`seek(to:exact: true)`** lands exactly on the target on that software AV1 route too, for a chapter mark or the end of an intro. It costs decoding from the keyframe before the target up to it. Every other route is exact either way. A seek stashed during load keeps the flag.
 
@@ -2769,6 +2770,7 @@ Declares an origin that fakes its range answers: one long-lived unranged GET, no
 - **The session plays from the start**, so a `startPosition` given to `load()` is not honoured.
 - **Seeking outside what the session holds is unavailable.** On the loopback route, a target inside the `$residentRanges` span that reaches the producer's current end (the last span) lands from the segment cache. Any other target, and every seek on the software host, is rejected as `.sourceNotSeekable`; the host re-requests the archive at a shifted start (AE#958). `canSeek` stays false, so a host offering in-cache seeks checks `residentRanges` itself.
 - **`selectAudioTrack` is ignored**, because it could only reopen at byte 0.
+- **A seek is never repaired with a restart.** Elsewhere a seek into a segment without a keyframe in reach re-cuts that segment first (AE#412). That re-cut is a restart, which this session does not have, so the seek goes out as asked and AVPlayer starts on the next keyframe (AE#1117).
 - The first append playlist waits for more media than AVPlayer's first reload interval (one `TARGETDURATION`), at most 2 s past the first segment.
 - An AirPlay hop on such a session moves the item onto the LAN address instead of reopening the source, since a reopen could only start again from byte 0.
 

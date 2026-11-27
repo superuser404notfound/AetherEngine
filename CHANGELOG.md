@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Fixed
 
+- **A sequential origin no longer fails at the start of a seek to 0 (AE#1117).** On an IPTV catch-up whose
+  first keyframe came 2.1 s after its first timestamp, a seek to 0 issued during the load reached the
+  first segment at item time -2.1 s. The AE#412 repair then asked for a restart to re-cut that segment,
+  and a sequential origin answers every restart by failing the session (`Source cannot be repositioned`,
+  code -5), within 4 s of the start. A VOD seek target now stops at the start of the item, as a live one
+  already did, and the repair leaves a sequential origin alone, since it has no restart to repair with.
 - **A stereo title after a software-path title no longer goes out as multichannel PCM (Sodalite#256).**
   The software and audio-only paths set the audio session's preferred channel count, and nothing set it
   back. The value is process-wide, so the next title on AVPlayer inherited it. Measured on an Apple TV 4K

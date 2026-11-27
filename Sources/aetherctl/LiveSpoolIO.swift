@@ -299,7 +299,7 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
                         reloadAt: Double? = nil, cancelLatches: Bool = false,
                         reloadDecodePath: DecodePath? = nil,
                         axis: ReaderAxis = .absolute, joinOffsetMB: Int = 4,
-                        vodDeclaredSeconds: Double? = nil) -> Int32 {
+                        vodDeclaredSeconds: Double? = nil, seekDuringLoad: Double? = nil) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         // Uncapped captures: a steady mux-rate climb spends one capture per threshold climbed, so the
@@ -323,7 +323,8 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
                                              reloadDecodePath: reloadDecodePath,
                                              cancelLatches: cancelLatches,
                                              axis: axis, joinOffsetMB: joinOffsetMB,
-                                             vodDeclaredSeconds: vodDeclaredSeconds)
+                                             vodDeclaredSeconds: vodDeclaredSeconds,
+                                             seekDuringLoad: seekDuringLoad)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -337,7 +338,8 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
                                 reloadDecodePath: DecodePath? = nil,
                                 cancelLatches: Bool = false,
                                 axis: ReaderAxis = .absolute, joinOffsetMB: Int = 4,
-                                vodDeclaredSeconds: Double? = nil) async -> Int32 {
+                                vodDeclaredSeconds: Double? = nil,
+                                seekDuringLoad: Double? = nil) async -> Int32 {
     let reader: PacedLiveSpoolIOReader
     do {
         reader = try PacedLiveSpoolIOReader(path: path, rateKbps: rateKbps,
@@ -370,6 +372,21 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
         options.dvrWindowSeconds = dvrWindow
     }
 
+    if let seekDuringLoad {
+        // Fired once the engine reads .loading, so it lands while load() is suspended and the engine
+        // has to stash it (#178). A load that already returned or failed gets no seek.
+        Task { @MainActor in
+            for _ in 0..<200 where engine.state != .loading {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            guard engine.state == .loading else {
+                print("  SEEK during load skipped: the engine never read .loading (state=\(engine.state))")
+                return
+            }
+            print(String(format: "  SEEK during load to %.2fs", seekDuringLoad))
+            await engine.seek(to: seekDuringLoad)
+        }
+    }
     do {
         try await engine.load(source: .custom(reader, formatHint: "mpegts"), options: options)
     } catch {

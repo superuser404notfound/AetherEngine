@@ -134,11 +134,12 @@ func printUsage() {
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats;
                           --software runs a real session through the SW sink, exit 3 if it yields no audible PCM)
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] [--reload-decode-path automatic|software] <file>
-      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] [--reload-decode-path automatic|software] [--reader-axis absolute|join|mismatched] [--join-offset-mb N] [--vod-sequential SECONDS] <file.ts>
+      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] [--reload-decode-path automatic|software] [--reader-axis absolute|join|mismatched] [--join-offset-mb N] [--vod-sequential SECONDS] [--seek-during-load S] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate.
                           AE#1117: --vod-sequential loads it as a closed recording with sequentialOrigin
-                          and that declared duration; pair it with --no-wrap)
+                          and that declared duration; pair it with --no-wrap. --seek-during-load
+                          issues a seek before the load returns, so the engine stashes and replays it)
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--realtime-rate X] [--standard-join] [--live-cushion N] [--startup-grace S] [--single-segment-min S] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
                      [--freeze-after N] [--unfreeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N] [--live-only] [--no-blocking-reload] [--force-master]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
@@ -1397,6 +1398,9 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     // declared duration; the load goes out VOD with sequentialOrigin, which is how a host that
     // reads a finished HLS playlist itself hands it over.
     let customVodSequential = takeDoubleFlag("--vod-sequential", from: &rest)
+    // AE#1117 round 2: a seek the host issues while the load is still in flight, which the engine
+    // stashes and replays once the session settles. Theamo seeks to 0 at every start and resume.
+    let customSeekDuringLoad = takeDoubleFlag("--seek-during-load", from: &rest)
     let customMallocCensus = takeFlag("--malloc-census", from: &rest)
     // AE#445 round 2: the reader arm is the measurement's subject, so it is a flag rather than a
     // fixed choice. Default reads with pread and allocates nothing, which is the reporter's shape
@@ -1515,7 +1519,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
                                     cancelLatches: customCancelLatches,
                                     reloadDecodePath: customReloadDecodePath,
                                     axis: customReaderAxis, joinOffsetMB: customJoinOffsetMB,
-                                    vodDeclaredSeconds: customVodSequential))
+                                    vodDeclaredSeconds: customVodSequential,
+                                    seekDuringLoad: customSeekDuringLoad))
         }
         exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex, reloadDecodePath: customReloadDecodePath))
     default:

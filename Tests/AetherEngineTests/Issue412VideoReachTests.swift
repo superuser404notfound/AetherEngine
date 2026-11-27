@@ -171,3 +171,29 @@ struct Issue412RecutDecisionTests {
             coveringSyncDistance: HLSVideoEngine.coldSeekLookbackSeconds + 0.001))
     }
 }
+
+/// AE#1117: the reported shape. A stashed seek to 0.00 on an IPTV catch-up whose first keyframe came
+/// 2.104 s after its first timestamp, read by a host reader with `sequentialOrigin`. The seek reached
+/// seg0 at item -2.104 s, the AE#412 re-cut asked for a restart at idx 0, and the sequential origin
+/// failed the session with -5.
+@Suite("AE#1117 seek landing on a late first keyframe")
+struct Issue1117SeekLandingTests {
+
+    @Test("Display 0 before the first keyframe lands on item 0, not below it", .timeLimit(.minutes(3)))
+    func targetBelowItemAxisClamps() {
+        // late-key fixture: source starts at 1.401 s, first keyframe and shift at 3.521 s.
+        #expect(AetherEngine.vodItemSeekTarget(sourceSeconds: 1.401, playlistShift: 3.521) == 0)
+    }
+
+    @Test("A target on the item axis is unchanged", .timeLimit(.minutes(3)))
+    func targetOnAxisUnchanged() {
+        #expect(AetherEngine.vodItemSeekTarget(sourceSeconds: 43.521, playlistShift: 3.521) == 40)
+    }
+
+    @Test("Only a seekable VOD session may re-cut its landing", .timeLimit(.minutes(3)))
+    func recutGate() {
+        #expect(HLSVideoEngine.seekLandingMayRecut(isLiveSession: false, sequentialOrigin: false))
+        #expect(!HLSVideoEngine.seekLandingMayRecut(isLiveSession: false, sequentialOrigin: true))
+        #expect(!HLSVideoEngine.seekLandingMayRecut(isLiveSession: true, sequentialOrigin: false))
+    }
+}
