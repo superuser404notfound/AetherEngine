@@ -10,7 +10,24 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **A fill that zooms past bars painted into the picture (Sodalite#118).** A 2.39 film delivered as a 16:9
+  file has its black bars in the frame, so `.resizeAspectFill` had nothing to crop. `PictureAreaScanner`
+  samples keyframes through `FrameExtractor` and returns where the picture sits (`PictureArea`, snapped to a
+  cinema ratio). Its look-ahead keeps sampling ahead of the playhead, and the area only grows, so a film with
+  IMAX passages ends at 16:9 instead of losing picture. `setFillPictureArea(_:animated:)` zooms the bound
+  `AetherPlayerView` so that area covers it, and `PictureFillGeometry` has the same math for hosts that
+  render through AVKit. `FrameExtractor.thumbnailOutcome(at:maxWidth:)` tells a still that yielded to
+  playback from one that failed.
+
 ### Fixed
+
+- **Stills yield to a starved pipeline on every path (Sodalite#118).** Only the native loopback session armed
+  the extractor's yield gate. On a remote HLS transcode and on the software host, session-coupled stills
+  read the original file unthrottled, on a transcode over the line that was already too thin for it. Both
+  paths now arm it. The software path counts a tick as healthy while its decoded cushion is not empty and
+  the host is not rebuffering.
 
 - **Go Live on a software-path channel no longer lands past the newest media after a native live session
   (AE#1135).** The native path's 1 Hz live window timer ran one more pass after the stop cancelled it. By
