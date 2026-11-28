@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The state of a native subtitle select is published (AE#1141).** A select first fills the rendition and
+  then deselects and reselects, so AVKit's legible selection reads empty for up to seconds, which a host
+  following AVKit's menu could not tell from the viewer picking Off. `nativeSubtitleSelectionState` reads
+  `idle`, `preparing`, `selected` or `refused` (`NativeSubtitleSelectionState`), and
+  `emptySelectionMeansOff` holds the rule. A refused pick, empty at the playhead, was silent before.
+
+### Fixed
+
+- **Subtitles off during a native pre-fill stays off (AE#1141).** `clearSubtitle()` while the rendition was
+  the display deselected the item, but a select still waiting on its pre-fill landed a second later and
+  turned the rendition back on with nothing feeding it. Measured with aetherctl (`nativerender@8,subsoff@8`):
+  `selected=English engineActive=nil` before, `selected=none` after.
 
 ## [7.77.0] - 2026-11-28
 

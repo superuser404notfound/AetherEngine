@@ -1924,6 +1924,12 @@ public final class AetherEngine: ObservableObject {
     /// Hosts use this to populate a picker and call `setNativeSubtitleSelected(track:)`.
     @Published public internal(set) var nativeSubtitleTracks: [NativeSubtitleTrack] = []
 
+    /// AE#1141: where the native subtitle selection stands, so a host that follows AVKit's subtitle
+    /// menu can tell the engine emptying the selection on its way to a select from the viewer picking
+    /// Off, and learns when a pick was refused. Treat an empty legible selection as Off only while
+    /// `emptySelectionMeansOff` holds. Reset to `.idle` by `load()` and `stop()`.
+    @Published public internal(set) var nativeSubtitleSelectionState: NativeSubtitleSelectionState = .idle
+
     /// Ordinal of the native subtitle rendition marked DEFAULT=YES in the master, resolved from
     /// `LoadOptions.preferredSubtitleLanguages` (fallback 0). A programmatically-selected legible track only
     /// renders if it is the master's default (AVKit's AVSmartSubtitlesController hides a non-default selection
@@ -3105,6 +3111,10 @@ public final class AetherEngine: ObservableObject {
 
     /// AE#1052: bumped by every native selection, so a pre-fill that outlived its request stops.
     var nativeSubtitleSelectGeneration: UInt64 = 0
+
+    /// AE#1141: the pick a reload carries across its own stop, so the state reads `preparing` until
+    /// the replay lands instead of `idle` while the rebuilt item has no selection yet.
+    var nativeSubtitleSelectionCarry: Int?
 
     /// Whole-file decodes filling native stores for load-declared external tracks (#88), one at a
     /// time, the picked track first (AE#984).
@@ -5191,6 +5201,7 @@ public final class AetherEngine: ObservableObject {
         nativeSubtitleTrackTable = []
         nativeSubtitleReapplyOrdinal = nil
         nativeSubtitleMarkerOrdinal = nil
+        resetNativeSubtitleSelectionState()
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
         discTitles = []
@@ -7005,6 +7016,9 @@ public final class AetherEngine: ObservableObject {
         // session state is seeded into the load and the selection restored after it.
         let audioToRestore = selection.audioTrackIndex
         let carryover = selection.subtitles
+        // AE#1141: the pick reads preparing across the reload's own stop, not idle.
+        let previousSelectionCarry = beginNativeSubtitleSelectionCarry(carryover.nativeReapplyOrdinal)
+        defer { endNativeSubtitleSelectionCarry(restoring: previousSelectionCarry) }
         let wasPreservingSession = sessionPreservingReloadInFlight
         sessionPreservingReloadInFlight = true
         // #227: the reconcile has to run on every exit, including a thrown/superseded load, or an edge held
@@ -9514,6 +9528,7 @@ public final class AetherEngine: ObservableObject {
         nativeSubtitleTrackTable = []
         nativeSubtitleReapplyOrdinal = nil
         nativeSubtitleMarkerOrdinal = nil
+        resetNativeSubtitleSelectionState()
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
         cancelNativeSubtitleReaders()

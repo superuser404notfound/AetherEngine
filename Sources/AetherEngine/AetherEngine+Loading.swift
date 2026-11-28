@@ -2681,6 +2681,9 @@ extension AetherEngine {
         // selection back through its synthetic id (the registry survives stopInternal here).
         let activeTrackToResume = activeSubtitleTrackIndex
         let reapplyOrdinalToRestore = nativeSubtitleReapplyOrdinal
+        // AE#1141: the pick reads preparing across the reload's own stop, not idle.
+        let previousSelectionCarry = beginNativeSubtitleSelectionCarry(reapplyOrdinalToRestore)
+        defer { endNativeSubtitleSelectionCarry(restoring: previousSelectionCarry) }
         let reapplyMatchesActiveTrack = currentReapplyOrdinalMatchesActiveTrack()
         let markerOrdinalToRestore = nativeSubtitleMarkerOrdinal
         // #112 full umbau: an audio-track switch does not move the playhead, so the PGS line already on screen is

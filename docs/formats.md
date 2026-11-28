@@ -1599,6 +1599,9 @@ engine.setNativeSubtitleSelected(track ordinal: Int?, markerOnly: Bool = false)
 // convenience for the enter/leave pattern below: true resolves the rendition matching the
 // currently-active overlay track and selects it, false deselects
 engine.setNativeSubtitleRendering(_ active: Bool)
+
+// where the last select stands: idle, preparing, selected or refused (AE#1141)
+engine.$nativeSubtitleSelectionState       // @Published var NativeSubtitleSelectionState
 ```
 
 `NativeSubtitleTrack` carries `.ordinal` (position in the rendition declaration), `.language` (ISO 639-2 tag), and `.displayName` (localized name suitable for a picker label).
@@ -1633,6 +1636,35 @@ A host that draws a bitmap track itself inside a stock `AVPlayerViewController` 
 - `clearSubtitle()` leaves the renditions' stores in place, so a marker set after subtitles-off still lands on the rendition AVKit fetches.
 - When the marker moves to another track or to Off, its rendition stays empty until AVKit's select of the new choice has landed. AVKit keeps asking for the old rendition until then, and an empty answer costs nothing, while a rendition waiting for text that never comes holds each request for 3 s. Only a marker that becomes the display itself (`setNativeSubtitleRendering(true)`, or a plain select of the same track) gets its text at once.
 - Scope is the VOD loopback, the same as bitmap renditions in general.
+
+#### Following AVKit's menu: the selection state
+
+A select takes a while to land, and the item's legible selection reads empty for most of it. `nativeSubtitleSelectionState` says why it is empty (AE#1141).
+
+A host that lets the viewer pick tracks in AVKit's own menu and follows it through `AVPlayerItem.mediaSelectionDidChangeNotification` sees the same empty selection in two cases. One is the viewer picking Off. The other is the engine on its way to a select: it fills the rendition before AVKit may see it, then deselects and reselects to make AVKit attach its renderer. Measured on an Apple TV 4K with tvOS 27.2.1 and one SubRip track, the selection was empty from 51 ms to 2,485 ms after the pick. Waiting until the track has been seen selected does not help either, because one notification inside that window still read the pick for an instant.
+
+| State | Means | An empty selection is Off |
+| --- | --- | --- |
+| `idle` | Nothing selected or asked for, or no session item. | yes |
+| `preparing(ordinal:)` | From the call until AVKit holds the selection. The engine's own replays (recovery, audio-switch and AirPlay reloads, the PiP re-anchor) pass through here too. | no |
+| `selected(ordinal:)` | AVKit holds the selection. A `markerOnly` select reads this as well. | yes |
+| `refused(ordinal:)` | The engine left the rendition deselected: empty at the playhead, no matching option in the legible group, or no item to select on. | no |
+
+`emptySelectionMeansOff` holds that rule, so the check is one line:
+
+```swift
+if item.currentMediaSelection.selectedMediaOption(in: group) == nil,
+   engine.nativeSubtitleSelectionState.emptySelectionMeansOff {
+    // the viewer picked Off
+}
+```
+
+- `preparing` starts inside the host's call, so a notification handled after it already reads it.
+- `clearSubtitle()` while the rendition is the display reads `idle` at once and drops a select still waiting on its pre-fill, so the rendition does not come back on a second after Off.
+- A reload that carries a pick (audio switch, AirPlay LAN swap, background return) reads `preparing` across its own teardown until the pick is back on the new item. It does not drop to `idle` in between.
+- A refusal is not final. When a later select lands (the host's next call, a reload, or the re-anchor after a seek), the state moves through `preparing` to `selected`. The engine refuses because AVKit keeps whatever it is handed, so an empty rendition selected now would show nothing for the rest of the session ([Sodalite#156 above](#native-subtitle-renditions-webvtt-for-pip-airplay-and-external-display)).
+- The Sodalite#65 pin deselects a pick the system or the viewer made before the host asked for any track. That clear happens while the state is still `idle`, and `systemCaptionRequest` names the pick right after it.
+- Every change writes one `AE#1141 native subtitle selection state:` line to the engine log.
 
 ### Live HLS subtitle renditions (host overlay)
 

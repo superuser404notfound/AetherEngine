@@ -762,6 +762,8 @@ aetherctl play --subs ger --seconds 30 \
 | `selected=German engineActive=nil` | A rendition nobody fills any more. On an AirPlay receiver that is an empty caption box. |
 | `selected=none engineActive=2` | Subtitles that never came back. |
 
+`subsoff` on the same tick as `nativerender` turns subtitles off while the select still waits on its pre-fill. Healthy is `selected=none` after both. `selected=<track> engineActive=nil` means the pending select landed after the off (AE#1141). Each `AE#1141 native subtitle selection state:` line in the run shows the published state on the way.
+
 **`lanreload@N`** fires `reloadAtCurrentPosition()` at tick N. That is the session-preserving rebuild a wireless AirPlay receiver starts (AE#955). It prints `activeSubtitleTrackIndex` on both sides of it, plus a `LEGIBLE` and `VTT` readout four ticks later. A Mac has no receiver to flip the route, so this is the reload without the route. With a bitmap track it also drives the OCR-fed rendition through the rebuild:
 
 ```bash
