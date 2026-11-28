@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.77.0] - 2026-11-28
+
 ### Added
 
 - **A fill that zooms past bars painted into the picture (Sodalite#118).** A 2.39 film delivered as a 16:9
