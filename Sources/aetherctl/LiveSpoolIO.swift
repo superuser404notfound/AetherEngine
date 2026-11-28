@@ -299,7 +299,8 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
                         reloadAt: Double? = nil, cancelLatches: Bool = false,
                         reloadDecodePath: DecodePath? = nil,
                         axis: ReaderAxis = .absolute, joinOffsetMB: Int = 4,
-                        vodDeclaredSeconds: Double? = nil, seekDuringLoad: Double? = nil) -> Int32 {
+                        vodDeclaredSeconds: Double? = nil, seekDuringLoad: Double? = nil,
+                        playDuringLoad: Bool = false) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         // Uncapped captures: a steady mux-rate climb spends one capture per threshold climbed, so the
@@ -324,7 +325,8 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
                                              cancelLatches: cancelLatches,
                                              axis: axis, joinOffsetMB: joinOffsetMB,
                                              vodDeclaredSeconds: vodDeclaredSeconds,
-                                             seekDuringLoad: seekDuringLoad)
+                                             seekDuringLoad: seekDuringLoad,
+                                             playDuringLoad: playDuringLoad)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -339,7 +341,8 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
                                 cancelLatches: Bool = false,
                                 axis: ReaderAxis = .absolute, joinOffsetMB: Int = 4,
                                 vodDeclaredSeconds: Double? = nil,
-                                seekDuringLoad: Double? = nil) async -> Int32 {
+                                seekDuringLoad: Double? = nil,
+                                playDuringLoad: Bool = false) async -> Int32 {
     let reader: PacedLiveSpoolIOReader
     do {
         reader = try PacedLiveSpoolIOReader(path: path, rateKbps: rateKbps,
@@ -385,6 +388,38 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
             }
             print(String(format: "  SEEK during load to %.2fs", seekDuringLoad))
             await engine.seek(to: seekDuringLoad)
+        }
+    }
+    if playDuringLoad {
+        // AE#1117 round 3: Theamo's player controller can call play() again while the load is in
+        // flight. Pressed every 20 ms for as long as the engine reads .loading, with the clock and
+        // duration it saw, so a window where the playhead reads past the end shows up in the log.
+        Task { @MainActor in
+            for _ in 0..<200 where engine.state != .loading {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            // Every sample for 8 s, so a clock that reads at or past the end (the #164 rewind
+            // condition) shows up even after the load hands over.
+            var presses = 0
+            var last = ""
+            let start = Date()
+            while Date().timeIntervalSince(start) < 8 {
+                let line = String(format: "currentTime=%.3fs duration=%.3fs state=%@",
+                                  engine.currentTime, engine.duration, "\(engine.state)")
+                let atEnd = engine.duration > 0 && engine.currentTime >= engine.duration - 0.5
+                if line != last && (atEnd || engine.state == .loading || last.isEmpty
+                                    || !last.hasSuffix("state=\(engine.state)")) {
+                    print(String(format: "  CLOCK t=%.2fs ", Date().timeIntervalSince(start))
+                          + line + (atEnd ? " AT-END" : ""))
+                }
+                last = line
+                if engine.state == .loading {
+                    presses += 1
+                    engine.play()
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            print("  PLAY during load: \(presses) presses, state now \(engine.state)")
         }
     }
     do {
