@@ -6,8 +6,9 @@ import Testing
 /// AE#1117 round 3 (en0x): a host `play()` while a fresh `load()` was running reached the transport
 /// and wrote `.playing` at once. Measured on the harness that was 30 ms into the load, 2 s before
 /// the first frame and before AVPlayer had an item, so a host spinner fell early, and on a mounted
-/// host the press started AVPlayer ahead of the play gate. The press now waits for the load's own
-/// start, a paused mount the host pressed Play on starts there, and a `pause()` withdraws it.
+/// host the press started AVPlayer ahead of the play gate. The press is now held, and only the
+/// load's exit acts on it: an autostart needs nothing, a paused mount gets the play there, and a
+/// `pause()` or a second toggle withdraws it.
 @Suite("AE#1117: a play() during the load waits for the load's own start", .timeLimit(.minutes(3)))
 @MainActor
 struct Issue1117PlayDuringLoadTests {
@@ -24,11 +25,13 @@ struct Issue1117PlayDuringLoadTests {
     }
 
     /// Runs `body` once, on the first `.loading` the load publishes, and records the state it left.
+    /// Fails if the press ran after load() returned, so a fast fixture cannot pass it vacuously.
     private func duringLoad(
         of engine: AetherEngine, _ body: @escaping @MainActor () -> Void,
         load: () async throws -> Void
     ) async throws -> PlaybackState? {
         var fired = false
+        var pressedInFlight = false
         var stateAfterPress: PlaybackState?
         let observer = engine.$state.sink { next in
             MainActor.assumeIsolated {
@@ -37,6 +40,7 @@ struct Issue1117PlayDuringLoadTests {
                 // The sink runs inside the didSet; the press goes out right after it, while the
                 // load is still suspended in its open.
                 Task { @MainActor in
+                    pressedInFlight = engine.loadInFlight
                     body()
                     stateAfterPress = engine.state
                 }
@@ -45,6 +49,7 @@ struct Issue1117PlayDuringLoadTests {
         defer { observer.cancel() }
         try await load()
         #expect(fired)
+        #expect(pressedInFlight)
         return stateAfterPress
     }
 
@@ -61,11 +66,15 @@ struct Issue1117PlayDuringLoadTests {
         #expect(!AetherEngine.playWaitsForLoad(state: .loading, loadInFlight: true, sessionPreservingReload: true))
     }
 
-    @Test("a held press turns a paused mount into an autostart")
-    func autostartPolicy() {
-        #expect(AetherEngine.loadPerformsAutostart(LoadOptions(autoplay: false), playRequestedDuringLoad: true))
-        #expect(!AetherEngine.loadPerformsAutostart(LoadOptions(autoplay: false), playRequestedDuringLoad: false))
-        #expect(AetherEngine.loadPerformsAutostart(LoadOptions(autoplay: true), playRequestedDuringLoad: false))
+    @Test("the exit owes the press only to a paused mount that has not started")
+    func exitPolicy() {
+        #expect(AetherEngine.heldPlayIsOwedAtLoadExit(autostarted: false, state: .paused))
+        // The remote HLS bypass returns before readiness.
+        #expect(AetherEngine.heldPlayIsOwedAtLoadExit(autostarted: false, state: .loading))
+        #expect(!AetherEngine.heldPlayIsOwedAtLoadExit(autostarted: false, state: .playing))
+        #expect(!AetherEngine.heldPlayIsOwedAtLoadExit(autostarted: false, state: .error("x")))
+        #expect(!AetherEngine.heldPlayIsOwedAtLoadExit(autostarted: true, state: .paused))
+        #expect(!AetherEngine.heldPlayIsOwedAtLoadExit(autostarted: true, state: .loading))
     }
 
     @Test("a play() during an autostarting load leaves it .loading and it still starts")
@@ -104,9 +113,21 @@ struct Issue1117PlayDuringLoadTests {
         #expect(engine.nativeHost?.transportIntentIsPlaying == false)
     }
 
-    @Test("a press that came after the load's own start is given at its exit")
-    func exitGivesALatePress() throws {
+    @Test("a second toggle during the load takes the first one back")
+    func secondToggleWithdraws() async throws {
         let engine = try AetherEngine()
+        defer { engine.stop() }
+        _ = try await duringLoad(of: engine, { engine.togglePlayPause(); engine.togglePlayPause() }) {
+            _ = try await engine.load(source: Self.customSource(), options: LoadOptions(autoplay: false))
+        }
+        try await waitFor { engine.state == .paused }
+        #expect(engine.nativeHost?.transportIntentIsPlaying == false)
+    }
+
+    @Test("a paused mount that ended paused gets the press at its exit")
+    func exitGivesThePress() throws {
+        let engine = try AetherEngine()
+        engine.setLoadedOptionsForTesting(LoadOptions(autoplay: false))
         let generation = engine.loadGeneration
         engine.beginLoadInFlight(generation)
         engine.state = .paused
@@ -118,8 +139,8 @@ struct Issue1117PlayDuringLoadTests {
         #expect(engine.state == .playing)
     }
 
-    @Test("a load that ended playing gets nothing extra at its exit")
-    func exitLeavesAStartedLoadAlone() throws {
+    @Test("an autostarting load gets nothing extra at its exit")
+    func exitLeavesAnAutostartAlone() throws {
         let engine = try AetherEngine()
         let generation = engine.loadGeneration
         engine.beginLoadInFlight(generation)
@@ -140,28 +161,5 @@ struct Issue1117PlayDuringLoadTests {
         #expect(engine.playRequestedDuringLoad)
         engine.stop()
         #expect(!engine.playRequestedDuringLoad)
-    }
-
-    private final class HostFixture: ObservableObject {
-        @Published var duration: Double = 0
-        @Published var isReady = false
-        @Published var failure: PlaybackErrorInfo?
-        @Published var didReachEnd = false
-    }
-
-    @Test("readiness of a paused mount with a held press keeps .loading (no pause flash, AE#1000)")
-    func readinessHoldsLoadingForAHeldPress() throws {
-        let engine = try AetherEngine()
-        let host = HostFixture()
-        engine.state = .loading
-        engine.playRequestedDuringLoad = true
-        var cancellables = Set<AnyCancellable>()
-        engine.wireCommonHostSinks(
-            duration: host.$duration, isReady: host.$isReady,
-            settlePausedAtReadiness: AetherEngine.readinessSettlesPaused(autostarts: false),
-            failure: host.$failure, didReachEnd: host.$didReachEnd, storeIn: &cancellables)
-        host.isReady = true
-        #expect(engine.state == .loading)
-        withExtendedLifetime(cancellables) {}
     }
 }

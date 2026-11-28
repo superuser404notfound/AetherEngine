@@ -989,15 +989,14 @@ A rebuild consumes no new stream. Anything a host sets up at the moment it hands
 | `volume` | Pass 0.0 to 1.0 (not clamped). A write before a session exists is remembered and applied at load. |
 | `selectTitle(id:)`, `selectChapter(id:)` | Disc titles and chapters. See the note below. |
 
-**`play()` during a load.** A `play()` while a `load()` is still running does not reach AVPlayer and does not change `state` (AE#1117). The load starts playback itself, after its play gate (the wait for a display mode switch), so the press only says that it should.
+**`play()` during a load.** A `play()` while a `load()` is still running does not reach AVPlayer and does not change `state` (AE#1117). The engine holds it, and only the end of the load acts on it.
 
-- An autostarting load stays `.loading` until it starts, as if the press had not happened.
-- A paused mount (`autoplay: false`) starts too, at the point where an autostart would. Its readiness then keeps `.loading` instead of settling at `.paused`.
-- A press after that point is given when the load returns, if the session is paused then.
-- A `pause()` after the press withdraws it. A new title's `load()` and `stop()` drop it.
+- An autostarting load starts by itself after its play gate (the wait for a display mode switch), so the press adds nothing. The load stays `.loading` until then.
+- A paused mount (`autoplay: false`) still settles at `.paused` when its item is ready, and starts playing when `load()` returns.
+- A `pause()` after the press withdraws it, and so does a second `togglePlayPause()`. A new title's `load()` and `stop()` drop it.
 - A session-preserving rebuild (`reloadAtCurrentPosition`, an audio switch) is not affected; it keeps the press its own way (AE#464).
 
-Before, such a press wrote `.playing` at once. On the harness that was 30 ms into the load, about 2 s before the first frame, so a host spinner fell early and a paused mount was left reading `.playing` with nothing playing.
+Before, such a press wrote `.playing` at once. On the harness that was 30 ms into the load, about 2 s before the first frame, so a host spinner fell early. On a paused mount the press was lost: the state read `.playing` for a moment and the session ended up paused.
 
 **Titles and chapters.** `selectTitle` is synchronous and returns before the switch. It rebuilds the session at the start of the new title, like a fresh load. A pick made while a `load` is still running waits for that load to return, as an audio pick does. When several picks wait like that, only the last one rebuilds. It ignores an unknown id, the title already playing, and a forward-only custom source; a reload that fails is only logged. `selectChapter` looks only in `discChapters` and seeks with `exact: true`. It cannot reach container chapters (`mediaChapters`): pass their `startSeconds` to `seek(to:exact: true)`.
 

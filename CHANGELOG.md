@@ -23,8 +23,10 @@ the public-API contract.
 - **A `play()` during a load waits for the load (AE#1117).** It used to reach AVPlayer and write
   `.playing` at once: on the harness 30 ms into the load, about 2 s before the first frame, so a host
   spinner fell early and a mounted item could start ahead of the display switch. The press is now held
-  for the load's own start. A paused mount the host pressed Play on starts there, a later press is given
-  when the load returns, and a `pause()` withdraws it. Before, such a paused mount never started.
+  and only the end of the load acts on it. An autostarting load needs nothing from it; a paused mount
+  starts playing when `load()` returns. A `pause()` or a second `togglePlayPause()` withdraws it. On a
+  paused mount the press used to be lost: the state read `.playing` for a moment, then the session sat
+  paused.
 - **A sparse first subtitle track no longer parks the side readers at its first cue (AE#1142).** Both
   subtitle side readers anchored their seek on the lowest routed track, and Matroska raises a seek target
   to the anchor's first cue. On an MKV whose first track is a forced track starting at 900 s, the native

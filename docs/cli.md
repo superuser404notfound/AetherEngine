@@ -1612,12 +1612,12 @@ VERDICT: physFP 72 -> 64 MB over 903s = -0.01 MB/s (source mux rate 1.79 MB/s, r
 
 A replay line also shows up without the flag. A sequential origin queues its own seek to 0 for the moment the item is ready, and it prints the same `replaying seek stashed during load` line (see [api.md › `sequentialOrigin`](api.md#sequentialorigin)).
 
-**`--play-during-load` (AE#1117).** Some hosts call `play()` again while the load is still running. The arm does that every 20 ms and prints a `CLOCK` line whenever the state changes, or the playhead reads at the end (`AT-END`, the condition of the #164 rewind). The engine holds the press, so the first `CLOCK` line after the load starts should read `state=playing` only once the load itself starts it, with one `play() during the load ... held for the load's own start` line before it.
+**`--play-during-load` (AE#1117).** Some hosts call `play()` again while the load is still running. The arm does that every 20 ms and prints a `CLOCK` line whenever the state changes, or the playhead reads at the end (`AT-END`, the condition of the #164 rewind). The engine holds the press, so the first `CLOCK` line after the load starts should read `state=playing` only once the load itself starts it, with one `play() during the load ... held until the load returns` line before it.
 
 ```
 aetherctl customio --live --no-wrap --rate-kbps 20000 --seconds 12 --vod-sequential 35 --play-during-load late-key.ts
   CLOCK t=0.00s currentTime=0.000s duration=0.000s state=loading
-[AetherEngine] play() during the load (state=loading): held for the load's own start (AE#1117)
+[AetherEngine] play() during the load (state=loading): held until the load returns (AE#1117)
   CLOCK t=0.74s currentTime=0.000s duration=35.000s state=playing
 ```
 

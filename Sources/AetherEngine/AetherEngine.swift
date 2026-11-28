@@ -1358,9 +1358,9 @@ public final class AetherEngine: ObservableObject {
     var loadInFlightGeneration: UInt64? {
         didSet { if loadInFlightGeneration != oldValue { resumeLoadSettleWaiters() } }
     }
-    /// AE#1117: a host `play()` that arrived while a fresh `load()` was running. The load's own
-    /// start honors it (`loadAutostarts`), and its exit catches a press that came after that point.
-    /// A `pause()` withdraws it. Cleared by a new load (a reroute keeps it) and by `stop()`.
+    /// AE#1117: a host `play()` that arrived while a fresh `load()` was running. Only the load's
+    /// exit acts on it (`settlePlayRequestedDuringLoad`), so one load never decides twice. A `pause()`
+    /// withdraws it. Cleared by a new load (a reroute keeps it) and by `stop()`.
     var playRequestedDuringLoad = false
     /// AE#1061: picks parked until the load in flight returns. See `awaitLoadInFlightSettled`.
     var loadSettleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -3586,14 +3586,16 @@ public final class AetherEngine: ObservableObject {
     /// paused mount: skip all of it, leave `playIntent` false, and let the wired `host.$isReady`
     /// waypoint settle `.loading -> .paused`. Pure so the gate stays greppable and a new autostart
     /// site cannot silently bypass the flag.
-    nonisolated static func loadPerformsAutostart(_ options: LoadOptions, playRequestedDuringLoad: Bool = false) -> Bool {
-        options.autoplay || playRequestedDuringLoad
+    nonisolated static func loadPerformsAutostart(_ options: LoadOptions) -> Bool {
+        options.autoplay
     }
 
-    /// AE#1117: `loadPerformsAutostart` with the host's play press during this load folded in, so a
-    /// paused mount the host pressed Play on starts at the load's own start, behind its play gate.
-    func loadAutostarts(_ options: LoadOptions) -> Bool {
-        Self.loadPerformsAutostart(options, playRequestedDuringLoad: playRequestedDuringLoad)
+    /// AE#1117: whether the load's exit owes the session the play press held during it. An
+    /// autostarting load started itself; a paused mount that ended paused, or still `.loading` (the
+    /// remote HLS bypass returns before readiness), gets the press.
+    nonisolated static func heldPlayIsOwedAtLoadExit(autostarted: Bool, state: PlaybackState) -> Bool {
+        guard !autostarted else { return false }
+        return state == .paused || state == .loading
     }
 
     /// AE#1117: whether a host `play()` waits for the load in flight instead of reaching the transport.
@@ -5822,7 +5824,7 @@ public final class AetherEngine: ObservableObject {
                     activeAudioDecoder = "AVPlayer"
                     videoFormat = .sdr
                     // #124: a paused mount skips autostart; loadAudioNative's host.$isReady settles .paused.
-                    if loadAutostarts(options) {
+                    if Self.loadPerformsAutostart(options) {
                         audioAVPlayerHost?.play()
                         state = .playing
                     }
@@ -5845,7 +5847,7 @@ public final class AetherEngine: ObservableObject {
                     )
                     videoFormat = .sdr
                     // #124: a paused mount skips autostart; loadAudio's host.$isReady settles .paused.
-                    if loadAutostarts(options) {
+                    if Self.loadPerformsAutostart(options) {
                         audioHost?.play()
                         state = .playing
                     }
@@ -6594,7 +6596,7 @@ public final class AetherEngine: ObservableObject {
                     preopenedDemuxer: probeOpened ? probe : nil,
                     requiresDeinterlaceWarmup: requiresDeinterlaceWarmup,
                     inverseTelecine: inverseTelecine,
-                    autostarts: loadAutostarts(options),
+                    autostarts: Self.loadPerformsAutostart(options),
                     generation: gen,
                     elType: elType,
                     audioOutputWaitsForPlayGate: true
@@ -6655,7 +6657,7 @@ public final class AetherEngine: ObservableObject {
                 try checkLoadCurrent(gen)
                 followAtmosOutput()
                 // #124: a paused mount skips autostart; loadSoftware's host.$isReady settles .paused.
-                if loadAutostarts(options) {
+                if Self.loadPerformsAutostart(options) {
                     softwareHost?.play()
                     state = .playing
                 } else {
@@ -6669,7 +6671,7 @@ public final class AetherEngine: ObservableObject {
                                          contentRate: presentationRate, requestedRate: snappedRate)
                 armPlaybackPanelProbe(gen: gen, effectiveFormat: effectiveFormat,
                                       panelPresentedHDRAtLoad: panelHDRAfterHandshake,
-                                      sessionIsPlaying: loadAutostarts(options))
+                                      sessionIsPlaying: Self.loadPerformsAutostart(options))
             } else {
                 // Sodalite#245: the forced Profile 5 route is fixed inside loadNative, before the producer
                 // could see the source's HDR10+, so a load that may yield it asks the head of the stream.
@@ -6742,7 +6744,7 @@ public final class AetherEngine: ObservableObject {
                     // this; fresh joins keep the verified seek-to-0.
                     liveRejoin: options.isLiveRejoin,
                     preopenedDemuxer: probeOpened ? probe : nil,
-                    autostarts: loadAutostarts(options),
+                    autostarts: Self.loadPerformsAutostart(options),
                     generation: gen,
                     resolvePanelRouting: panelRoutingSettled ? nil : {
                         try await settlePanelRouting(ownsProbe: false)
@@ -6811,7 +6813,7 @@ public final class AetherEngine: ObservableObject {
                 // receiver's HDR mode is unreadable from the sender, so an offered HDR/DV master can be
                 // rejected or park silently, and the escalation (reload master -> reduced HDR master ->
                 // media, all on the LAN IP) is exactly the recovery that hop needs.
-                if loadAutostarts(options) {
+                if Self.loadPerformsAutostart(options) {
                     if didSwitchPanel || airPlayServedMasterToReceiver, let session = nativeVideoSession,
                        session.servingMasterPlaylist, !options.isLive {
                         try await runStartupReadinessGate(
@@ -6830,7 +6832,7 @@ public final class AetherEngine: ObservableObject {
                                          contentRate: presentationRate, requestedRate: snappedRate)
                 armPlaybackPanelProbe(gen: gen, effectiveFormat: effectiveFormat,
                                       panelPresentedHDRAtLoad: panelHDRAfterHandshake,
-                                      sessionIsPlaying: loadAutostarts(options))
+                                      sessionIsPlaying: Self.loadPerformsAutostart(options))
             }
         } catch is CancellationError {
             // Superseded.
@@ -6904,7 +6906,7 @@ public final class AetherEngine: ObservableObject {
                                  sessionPreservingReload: sessionPreservingReloadInFlight) {
             if !playRequestedDuringLoad {
                 playRequestedDuringLoad = true
-                EngineLog.emit("[AetherEngine] play() during the load (state=\(state)): held for the load's own start (AE#1117)",
+                EngineLog.emit("[AetherEngine] play() during the load (state=\(state)): held until the load returns (AE#1117)",
                                category: .engine)
             }
             return
@@ -6969,6 +6971,13 @@ public final class AetherEngine: ObservableObject {
             isPlaying = nativeHost.isEffectivelyPlaying
         } else {
             isPlaying = (state == .playing)
+        }
+        // AE#1117: a second press during the load takes back the play the first one left waiting.
+        if playRequestedDuringLoad,
+           Self.playWaitsForLoad(state: state, loadInFlight: loadInFlight,
+                                 sessionPreservingReload: sessionPreservingReloadInFlight) {
+            pause()
+            return
         }
         if isPlaying { pause() } else { play() }
     }
