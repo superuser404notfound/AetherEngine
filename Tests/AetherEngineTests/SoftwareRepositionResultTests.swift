@@ -117,6 +117,21 @@ struct SoftwareRepositionResultTests {
         #expect(!host.isPlaying)
     }
 
+    @Test("caller cancellation without a successor settles the seek instead of leaving its window open")
+    func cancelledSeekWithoutSuccessor() async throws {
+        let gate = Gate()
+        let host = try await loadedHost { _, _, _, _, _ in await gate.next() }
+        defer { host.stop() }
+        let work = Task { await host.seek(to: 12) }
+        try await waitFor { await gate.count == 1 }
+        work.cancel()
+        await gate.finish(0, .superseded)
+        #expect(await work.value == .stalled)
+        #expect(host.failure?.kind == .softwarePipelineFailed)
+        #expect(!host.isPlaying)
+        #expect(host.currentTime != 12)
+    }
+
     @Test("A late failed seek cannot poison a newer successful paused seek")
     func supersededFailure() async throws {
         let gate = Gate()
