@@ -1779,11 +1779,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             category: .session
         )
 
-        // AV1: gated on VTCapabilityProbe.av1Available (false on all current Apple TV chips;
+        // AV1: gated on VTCapabilityProbe.av1HardwareUsable (false on every Apple TV, AE#1144;
         // load() routes AV1 to SoftwarePlaybackHost instead). VP9: excluded despite VT HW
         // decode capability because AVPlayer's HLS manifest parser rejects the `vp09` CODECS
         // attribute; load() routes VP9 to SoftwarePlaybackHost.
-        let av1OK = isAV1 && VTCapabilityProbe.av1Available
+        let av1OK = isAV1 && VTCapabilityProbe.av1HardwareUsable
         guard isHEVC || isH264 || av1OK else {
             throw HLSVideoEngineError.unsupportedCodec(rawCodecID: codecpar.pointee.codec_id.rawValue)
         }

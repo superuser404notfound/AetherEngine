@@ -34,8 +34,8 @@ The engine sends a format to hardware when the platform can decode it, and to it
 
 | Path | Codecs |
 | --- | --- |
-| Hardware (VideoToolbox) | H.264, HEVC, HEVC Main10; AV1 Main profile where the device has AV1 hardware |
-| Software | AV1 (dav1d) without hardware, and AV1 High / Professional (4:4:4, 4:2:2, 12-bit) everywhere; VP9 (VideoToolbox hardware when supported, otherwise libavcodec); VP8; MPEG-4 Part 2; MPEG-2; VC-1; QuickTime RLE; the Flash tail (Sorenson Spark, On2 VP6); RealVideo 1-4; H.263; Theora; anything else the FFmpeg build has a decoder for |
+| Hardware (VideoToolbox) | H.264, HEVC, HEVC Main10; AV1 Main profile where the device has AV1 hardware, except Apple TV |
+| Software | AV1 (dav1d) without hardware and on every Apple TV, and AV1 High / Professional (4:4:4, 4:2:2, 12-bit) everywhere; VP9 (VideoToolbox hardware when supported, otherwise libavcodec); VP8; MPEG-4 Part 2; MPEG-2; VC-1; QuickTime RLE; the Flash tail (Sorenson Spark, On2 VP6); RealVideo 1-4; H.263; Theora; anything else the FFmpeg build has a decoder for |
 
 - Software is the default route. Only HEVC, H.264 and hardware-decodable AV1 go native.
 - H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext go to software where VideoToolbox has no hardware decoder for them (Intel Macs, older chips).

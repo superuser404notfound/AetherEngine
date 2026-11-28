@@ -45,7 +45,7 @@ The audio columns describe the native path. The software host decodes every trac
 | H.264 MVC (3D Blu-ray, both views in one track) | Base view, 2D | Software | [3D Blu-ray MVC](#3d-blu-ray-mvc) |
 | HEVC Main / Main 10 | Yes | Native | HEVC Rext (4:2:2 / 4:4:4 / 12-bit) goes software where VideoToolbox has no decoder for it |
 | MV-HEVC | Yes | Native | Base layer, or stereo on visionOS ([3D Blu-ray MVC](#3d-blu-ray-mvc)) |
-| AV1 Main | Yes | Native on chips with hardware AV1 (A17 Pro, M3 and later), software elsewhere (every Apple TV) | [AV1](#av1) |
+| AV1 Main | Yes | Native on iPhone, iPad, Mac and Vision Pro chips with hardware AV1 (A17 Pro, M3 and later), software elsewhere, every Apple TV included | [AV1](#av1) |
 | AV1 High / Professional | Yes | Software | Apple's AV1 hardware decodes Main only |
 | VP9 | Yes | Software | VideoToolbox for profiles 0 and 2 (4:2:0), libavcodec otherwise ([VP9 and VP8](#vp9-and-vp8)) |
 | VP8, MPEG-2, MPEG-4 Part 2 (XviD / DivX), VC-1 | Yes | Software | |
@@ -68,7 +68,7 @@ The audio columns describe the native path. The software host decodes every trac
 | Dolby Vision 8.1 / 8.4 | Yes | Native | Base layer plus Dolby Vision signalling |
 | Dolby Vision 7 (UHD Blu-ray) | Yes | Native, converted to 8.1 | Curve fold and dual-layer composition are opt-in ([Profile 7](#profile-7)) |
 | Dolby Vision 8.2, AV1 10.2, H.264 9 | Base layer only | Native | No Apple decoder for these |
-| AV1 Dolby Vision 10.0 | Hardware AV1 only | Native | The software path refuses it ([Known limitations](#known-limitations)) |
+| AV1 Dolby Vision 10.0 | Hardware AV1 only, not on Apple TV | Native | The software path refuses it ([Known limitations](#known-limitations)) |
 | AV1 Dolby Vision 10.1 / 10.4 | Yes | Native or software | 10.1 keeps its Dolby Vision on the software host too ([AV1 Dolby Vision](#av1-dolby-vision)) |
 
 ### Audio codecs
@@ -205,7 +205,8 @@ The `mfra` decides where the plan may cut and which bytes are fetched early, nev
 Native AVPlayer path, VideoToolbox:
 
 - H.264 (progressive), HEVC, HEVC Main10, on hardware whose VideoToolbox has a decoder for the specific profile.
-- AV1 Main profile on devices with hardware AV1 (M3+ Mac, iPhone 15 Pro+, future Apple TV chips). Apple's AV1 hardware decodes Main only (8 or 10 bit, 4:2:0), so High (4:4:4) and Professional (4:2:2, 12 bit) take the software path on these devices too, live included.
+- AV1 Main profile on devices with hardware AV1 (M3+ Mac, iPhone 15 Pro+). Apple's AV1 hardware decodes Main only (8 or 10 bit, 4:2:0), so High (4:4:4) and Professional (4:2:2, 12 bit) take the software path on these devices too, live included.
+- Not on Apple TV, even where the chip has hardware AV1 (AE#1144). See [AV1](#av1).
 
 ### Software decode
 
@@ -213,7 +214,7 @@ Native AVPlayer path, VideoToolbox:
 
 | Source | Why it is software | Decoder |
 | --- | --- | --- |
-| AV1 without hardware AV1 | No hardware decoder (every current Apple TV, M1 / M2 Macs, iPhones before the A17 Pro). The engine registers the supplemental VideoToolbox AV1 decoder and checks `VTIsHardwareDecodeSupported` (`VTCapabilityProbe`), lazily, only when it routes an AV1 source | libavcodec / dav1d |
+| AV1 without hardware AV1, and AV1 on every Apple TV | No hardware decoder (Apple TVs up to the 3rd generation, M1 / M2 Macs, iPhones before the A17 Pro), or tvOS, where the hardware decoder is not used (AE#1144, see [AV1](#av1)). The engine registers the supplemental VideoToolbox AV1 decoder and checks `VTIsHardwareDecodeSupported` (`VTCapabilityProbe`), lazily, only when it routes an AV1 source | libavcodec / dav1d |
 | AV1 High / Professional | Apple's AV1 hardware decodes Main profile only, so these go software on hardware-AV1 devices too, live included | libavcodec / dav1d |
 | VP9, VP8 | AVPlayer parses the manifest, sees `vp09` / `vp08` in `CODECS`, then silently stops fetching (`item.status` never leaves `.unknown`). VideoToolbox decodes VP9 in hardware fine, only not inside the HLS pipeline | VideoToolbox for some VP9, else libavcodec |
 | MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, VC-1 | None of `mp4v.20.X` / `mp2v` / `vc-1` is in the `CODECS` list of Apple's HLS Authoring Spec | libavcodec |
@@ -236,7 +237,16 @@ On the software host, VideoToolbox still decodes where it can: VP9 (see below), 
 
 #### AV1
 
-AV1 runs through libavcodec / dav1d on devices without hardware AV1.
+AV1 runs through libavcodec / dav1d on devices without hardware AV1, and on every Apple TV.
+
+**tvOS does not use the hardware AV1 decoder (AE#1144).** The Apple TV 4K (4th generation, A19) is the first Apple TV with one. On tvOS 27.0 the native route plays sound there, but the picture stays black. AVPlayer reaches `readyToPlay`, `isReadyForDisplay` never turns true, and no error arrives, so nothing falls back. It is not known yet whether VideoToolbox or AVPlayer fails. So tvOS keeps the route the earlier Apple TVs take, dav1d on the software host, Dolby Vision 10.1 included. The log says so once, with an `AE#1144` line after `[VTProbe] codec=av01 hwSupported=true`.
+
+What that costs on that box, compared with a native route that worked:
+
+- E-AC-3 Atmos plays as its 5.1 or 7.1 core, as on every software session.
+- AV1 Dolby Vision 10.0 is refused, as it is on every other Apple TV (see [Known limitations](#known-limitations)).
+
+`AetherEngine.usesHardwareAV1OnTVOS` (`@_spi(Diagnostics)`, default off) lifts the hold for the next load, to check whether a later tvOS shows the picture.
 
 - **10-bit.** A 10-bit AV1 frame is converted to P010 (a 10-bit pixel format) on the GPU, and its film grain is applied there too (`GPUFrameConverter`). dav1d exports the grain parameters instead of applying them. One Metal pass then does both the grain and the planar-to-P010 conversion, in place of `sws_scale`, and matches dav1d's picture sample for sample. That takes two per-pixel passes off the CPU, which the decode already keeps busy. On a fanless Apple TV, CPU load means heat. In playback, up to two frames convert while dav1d decodes the next ([architecture-software › 10-bit AV1 conversion](architecture-software.md#10-bit-av1-conversion)).
 - **8-bit.** Keeps dav1d's grain and `sws_scale`.
@@ -635,7 +645,7 @@ On hardware-AV1 hosts the cross-compatible profiles (10.1, 10.4) are signaled th
 **AV1 Profile 10.1 on the software host** gets its Dolby Vision from the engine rather than from AVFoundation. AVFoundation ignores the RPU an AV1 stream carries in its ITU-T T.35 metadata OBU and shows the HDR10 base layer.
 
 - The RPU of a 10.1 stream is the RPU of an HEVC 8.1 stream in another wrapper. The decoder reads it out of each temporal unit (one frame's data). libdovi rewraps it into the `unspec62` form that VideoToolbox attaches to an HEVC 8.1 frame. The decoded frame then carries it under the same two keys, on the buffer and on its IOSurface (`DoviDisplayMetadata`), and the system's Dolby Vision display management applies it.
-- dav1d attaches it where AV1 has no hardware decode (every Apple TV, M1 / M2 Macs, pre-A17-Pro iPhones), which is where AV1 plays on the software host anyway.
+- dav1d attaches it where AV1 has no hardware decode (M1 / M2 Macs, pre-A17-Pro iPhones) and on every Apple TV, which is where AV1 plays on the software host anyway.
 - Where VideoToolbox decodes AV1 and the host loads with `LoadOptions.preferredDecodePath = .software`, `HardwareVideoDecoder` decodes it and hands out each frame as a copy in a pool of its own, because on VideoToolbox's own output buffer the attachment never reached the panel.
 - Measured with a pulse clip (constant pixels under an RPU that alternates): it pulses on an Apple TV 4K (3rd generation, tvOS 27) into an LG CX, and on macOS 27 (M5 Pro), where it composites to within 0.0001 PQ of the same RPU played as HEVC 8.1 through AVPlayer. A null-RPU clip stays steady.
 - Profile 10.0 (no base layer) and 10.4 (its HLG base is unmeasured) keep the plain path.
@@ -1953,8 +1963,8 @@ Things that work today but have a documented edge case, or are deferred behind a
 - **The channel bridge drops TrueHD Atmos objects and DTS:X heights.** TrueHD / MLP and DTS-HD sources route through the AudioBridge. FFmpeg's EAC3 encoder does not produce JOC, and FLAC has no object channels, so bed channels and surround layout survive but objects and heights do not. `LoadOptions.objectAudioRendering = .render(layout)` keeps them, in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default, [Installation › Optional components](installation.md#optional-components)). They are built into a speaker bed from the stream's own lossless 7.1 and delivered as 24-bit PCM, or APAC over AirPlay, which tvOS sends to an Atmos receiver as Dolby MAT ([TrueHD Atmos with heights](#truehd-atmos-with-heights), [DTS:X with heights](#dtsx-with-heights)). EAC3+JOC stream copy from MKV / MP4 sources is intact either way.
 - **`.surroundCompat` audio bridge caps 7.1 sources to 5.1.** FFmpeg's EAC3 encoder currently caps at 6 channels. Once [FFmpeg PR 21668](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/21668) lands, the cap and the dynamic bitrate auto-scale to 1024 kbps engage without a code change here. Use `.lossless` (FLAC) today if 7.1 matters.
 - **Now Playing and the audio session.** On the HLS-loopback path of tvOS 26, manual `MPNowPlayingInfoCenter` writes race the player; a host with a custom transport lets the engine own the card instead (`ownsVideoNowPlayingSession`). The engine activates the audio session per playback, not at launch, so tvOS can negotiate the HDMI channel count (AetherEngine#24). Both are host contracts: [api › Now Playing and the audio session](api.md#now-playing-and-the-audio-session).
-- **AV1 on Apple TV is software-decoded.** No current Apple TV chip ships hardware AV1. The `SoftwarePlaybackHost` + dav1d path handles it, but CPU use is clearly higher than with hardware HEVC. For 10-bit AV1, film grain and the P010 conversion run on the GPU, so what stays on the CPU is dav1d's decode. A Profile 10.1 source keeps its Dolby Vision there ([Dolby Vision signaling](#dolby-vision-signaling)). Where the chip decodes AV1 (A17 Pro, M3 and later), Main profile AV1 takes the native route; High and Professional stay on software. Future Apple TV chips with hardware AV1 will be picked up automatically by `VTCapabilityProbe`.
-- **AV1 Dolby Vision Profile 10.0 does not play on the software path.** dav1d / libavcodec cannot decode the proprietary DV colour space, so a Profile 10.0 source (DV-only, no fallback base layer) would show a green / purple picture there. The load fails instead, with `AetherEngineError.dolbyVisionUnplayableOnSoftwarePath` and the error kind `.dolbyVisionRequiresHardware`. HEVC Profile 5 is refused the same way when it reaches the software path (#176). Profiles 10.1 and 10.4 are unaffected, because they carry an HDR10 / HLG base layer. Profile 10.0 only plays through the native AVPlayer path on hosts with hardware AV1 decode.
+- **AV1 on Apple TV is software-decoded.** Apple TVs up to the 3rd generation have no hardware AV1. The 4th generation has it, but tvOS does not use it, because the native route shows a black picture there ([AV1](#av1), AE#1144). The `SoftwarePlaybackHost` + dav1d path handles it, but CPU use is clearly higher than with hardware HEVC. For 10-bit AV1, film grain and the P010 conversion run on the GPU, so what stays on the CPU is dav1d's decode. A Profile 10.1 source keeps its Dolby Vision there ([Dolby Vision signaling](#dolby-vision-signaling)). Where an iPhone, iPad, Mac or Vision Pro chip decodes AV1 (A17 Pro, M3 and later), Main profile AV1 takes the native route; High and Professional stay on software.
+- **AV1 Dolby Vision Profile 10.0 does not play on the software path.** dav1d / libavcodec cannot decode the proprietary DV colour space, so a Profile 10.0 source (DV-only, no fallback base layer) would show a green / purple picture there. The load fails instead, with `AetherEngineError.dolbyVisionUnplayableOnSoftwarePath` and the error kind `.dolbyVisionRequiresHardware`. HEVC Profile 5 is refused the same way when it reaches the software path (#176). Profiles 10.1 and 10.4 are unaffected, because they carry an HDR10 / HLG base layer. Profile 10.0 only plays through the native AVPlayer path on hosts with hardware AV1 decode, which on Apple TV is none for now (AE#1144).
 - **Software decode stops at 8192x8192 pixels.** The software host and frame extraction refuse a picture larger than that, which still covers 8K UHD (7680x4320) and DCI 8K (8192x4320). The cap keeps a hostile stream from making the decoder allocate gigabytes.
 - **Dolby Vision Profile 5 / AV1 Profile 10.0 thumbnails need the `DolbyVisionStillReshaping` trait.** Without it such a source yields no still ([Frame extraction](#frame-extraction)). A frame that carries no DV metadata falls back to the standard path.
 

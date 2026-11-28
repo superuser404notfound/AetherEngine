@@ -228,6 +228,13 @@ enum VideoRoutingPolicy {
         !isLive || codecID == AV_CODEC_ID_AV1
     }
 
+    /// AE#1144: hardware AV1 is used where the device has it, except on tvOS unless a host lifted the
+    /// hold for a measurement (`AetherEngine.usesHardwareAV1OnTVOS`). Pure so the matrix is testable on
+    /// a Mac, which never compiles the tvOS branch of `VTCapabilityProbe.av1HardwareUsable`.
+    static func usesHardwareAV1(hardwareDecodeSupported: Bool, isTVOS: Bool, allowedOnTVOS: Bool) -> Bool {
+        hardwareDecodeSupported && (!isTVOS || allowedOnTVOS)
+    }
+
     /// Audit HLS-5: Apple's hardware AV1 decoders (A17 Pro, M3 and later) decode Main profile only,
     /// 8/10-bit 4:2:0. `av1Available` is a codec-level answer, so High (4:4:4) and Professional
     /// (4:2:2, 12-bit) reached AVPlayer and rendered nothing while dav1d would have played them.

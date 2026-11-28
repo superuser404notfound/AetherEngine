@@ -6310,7 +6310,7 @@ public final class AetherEngine: ObservableObject {
         var useSoftwarePath = VideoRoutingPolicy.requiresSoftwarePath(
             codecID: detectedCodecID,
             fieldOrder: detectedFieldOrder,
-            av1Available: VTCapabilityProbe.av1Available,
+            av1Available: VTCapabilityProbe.av1HardwareUsable,
             spsIndicatesInterlaced: spsIndicatesInterlaced,
             stereo3DType: containerStereoType,
             dvProfile: detectedDVProfileNum,

@@ -57,8 +57,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private let rpuFrameCopier = FrameCopier()
     private let rpuTable = AV1DolbyVisionRPUTable(logPrefix: "[HardwareVideoDecoder]")
 
-    /// Whether this device decodes AV1 in hardware (Apple silicon from M3 and A17 Pro on).
-    static var canDecodeAV1InHardware: Bool { VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) }
+    /// Whether this decoder may open AV1: the device decodes it in hardware (Apple silicon from M3 and
+    /// A17 Pro on) and the platform is not holding it back (tvOS, AE#1144).
+    static var canDecodeAV1InHardware: Bool { VTCapabilityProbe.av1HardwareUsable }
 
     /// AV1 Dolby Vision Profile 10.1 on hardware that decodes AV1: the one AV1 stream this decoder
     /// opens, since Dolby Vision display management needs its RPU on the decoded frame, which only a
