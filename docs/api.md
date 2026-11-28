@@ -976,7 +976,7 @@ A rebuild consumes no new stream. Anything a host sets up at the moment it hands
 
 | Symbol | Notes |
 | --- | --- |
-| `play()` | Rewinds first when parked at the final frame of a VOD; a no-op on `.ended`. |
+| `play()` | Rewinds first when parked at the final frame of a VOD; a no-op on `.ended`. During a `load()` it waits for the load, see below. |
 | `pause()`, `togglePlayPause()` | `togglePlayPause()` is ignored while seeking, idle, ended or failed. |
 | `seek(to:)` | `async`. Source-axis seconds. See [Seeking](#seeking). |
 | `seek(to:exact:)` | `async`. `seek(to:)` is this with `exact: false`. See [Seeking](#seeking). |
@@ -988,6 +988,16 @@ A rebuild consumes no new stream. Anything a host sets up at the moment it hands
 | `audioDelaySeconds`, `setAudioDelay(_:)` | Lip-sync correction. See [Audio delay](#audio-delay). |
 | `volume` | Pass 0.0 to 1.0 (not clamped). A write before a session exists is remembered and applied at load. |
 | `selectTitle(id:)`, `selectChapter(id:)` | Disc titles and chapters. See the note below. |
+
+**`play()` during a load.** A `play()` while a `load()` is still running does not reach AVPlayer and does not change `state` (AE#1117). The load starts playback itself, after its play gate (the wait for a display mode switch), so the press only says that it should.
+
+- An autostarting load stays `.loading` until it starts, as if the press had not happened.
+- A paused mount (`autoplay: false`) starts too, at the point where an autostart would. Its readiness then keeps `.loading` instead of settling at `.paused`.
+- A press after that point is given when the load returns, if the session is paused then.
+- A `pause()` after the press withdraws it. A new title's `load()` and `stop()` drop it.
+- A session-preserving rebuild (`reloadAtCurrentPosition`, an audio switch) is not affected; it keeps the press its own way (AE#464).
+
+Before, such a press wrote `.playing` at once. On the harness that was 30 ms into the load, about 2 s before the first frame, so a host spinner fell early and a paused mount was left reading `.playing` with nothing playing.
 
 **Titles and chapters.** `selectTitle` is synchronous and returns before the switch. It rebuilds the session at the start of the new title, like a fresh load. A pick made while a `load` is still running waits for that load to return, as an audio pick does. When several picks wait like that, only the last one rebuilds. It ignores an unknown id, the title already playing, and a forward-only custom source; a reload that fails is only logged. `selectChapter` looks only in `discChapters` and seeks with `exact: true`. It cannot reach container chapters (`mediaChapters`): pass their `startSeconds` to `seek(to:exact: true)`.
 
@@ -2826,6 +2836,7 @@ Declares an origin that fakes its range answers: one long-lived unranged GET, no
 **What the host must do.** A host that needs a position this session cannot reach reopens the source (an IPTV archive at a shifted start) or tells the user. An audio switch is a fresh `load` at the position with `audioSourceStreamIndex`.
 
 - **The session plays from the start**, so a `startPosition` given to `load()` is not honoured.
+- **The engine seeks to 0 by itself once the item is ready.** AVPlayer treats the growing append playlist as an EVENT playlist and would otherwise start a few seconds behind its edge. On an autostarting load the seek waits for `.loading` to end and logs `replaying seek stashed during load to 0.00s (#178)`, the same line a host seek stashed during the load prints. It is not one, and the host has nothing to do about it.
 - **Seeking outside what the session holds is unavailable.** On the loopback route, a target inside the `$residentRanges` span that reaches the producer's current end (the last span) lands from the segment cache. Any other target, and every seek on the software host, is rejected as `.sourceNotSeekable`; the host re-requests the archive at a shifted start (AE#958). `canSeek` stays false, so a host offering in-cache seeks checks `residentRanges` itself.
 - **`selectAudioTrack` is ignored**, because it could only reopen at byte 0.
 - **A seek is never repaired with a restart.** Elsewhere a seek into a segment without a keyframe in reach re-cuts that segment first (AE#412). That re-cut is a restart, which this session does not have, so the seek goes out as asked and AVPlayer starts on the next keyframe (AE#1117).

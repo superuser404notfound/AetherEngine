@@ -1581,6 +1581,7 @@ The reader:
 | `--join-offset-mb N` | Where the join sits, for `join` and `mismatched`. | 4 |
 | `--vod-sequential SECONDS` | Loads the spool as a closed recording instead of live (AE#1117). See below. | off (live) |
 | `--seek-during-load S` | Seeks to S while the engine reads `.loading`, so it stashes the seek and replays it (AE#1117). Prints a skip line if the load never got there. | off |
+| `--play-during-load` | Presses `play()` every 20 ms while the engine reads `.loading`, and samples clock, duration and state for 8 s (AE#1117). See below. | off |
 
 **The measurement.** Every ten seconds it prints `physFP` and its slope. It closes with that slope stated against the source's own mux rate:
 
@@ -1608,6 +1609,19 @@ VERDICT: physFP 72 -> 64 MB over 903s = -0.01 MB/s (source mux rate 1.79 MB/s, r
 ```
 
 **`--seek-during-load S` (AE#1117).** Some hosts seek right after they call `load()`, at every start and every resume. The engine stashes that seek and replays it once the session settles (#178). On a sequential origin the replay is either rejected as `.sourceNotSeekable` or lands from the segment cache, depending on what the cache holds by then. The `[AetherEngine] seek` lines say which.
+
+A replay line also shows up without the flag. A sequential origin queues its own seek to 0 for the moment the item is ready, and it prints the same `replaying seek stashed during load` line (see [api.md › `sequentialOrigin`](api.md#sequentialorigin)).
+
+**`--play-during-load` (AE#1117).** Some hosts call `play()` again while the load is still running. The arm does that every 20 ms and prints a `CLOCK` line whenever the state changes, or the playhead reads at the end (`AT-END`, the condition of the #164 rewind). The engine holds the press, so the first `CLOCK` line after the load starts should read `state=playing` only once the load itself starts it, with one `play() during the load ... held for the load's own start` line before it.
+
+```
+aetherctl customio --live --no-wrap --rate-kbps 20000 --seconds 12 --vod-sequential 35 --play-during-load late-key.ts
+  CLOCK t=0.00s currentTime=0.000s duration=0.000s state=loading
+[AetherEngine] play() during the load (state=loading): held for the load's own start (AE#1117)
+  CLOCK t=0.74s currentTime=0.000s duration=35.000s state=playing
+```
+
+Before the fix the second line was `state=playing` at `t=0.03s`. The fixture is a TS that starts mid-GOP on a far-off timestamp, like the reporter's archive: encode with a 3 s GOP and `-output_ts_offset 25338`, then cut it with `ffmpeg -i src.ts -ss 0.9 -map 0 -c copy -copyinkf -output_ts_offset 25340 -f mpegts late-key.ts`.
 
 **Read the retention ratio over a long run, not a short one.** The slope anchors at 60 s to skip the load step. That is exactly where `--reload-at 60` puts a SECOND step: the software pipeline's own baseline. A 100 s run reads ratio 1.31, which means nothing. A 260 s run shows `physFP` stepping 25 to 66 MB across the switch and then flat at 67 for 140 s: ratio 0.18 and still falling, which is a step being amortized, not a session retaining anything.
 

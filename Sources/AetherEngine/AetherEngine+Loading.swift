@@ -272,7 +272,9 @@ extension AetherEngine {
                         self.recordStartupCheckpoint(.presenting)
                     }
                 }
-                if ready, settlePausedAtReadiness, self.state == .loading {
+                // AE#1117: a paused mount the host pressed Play on during the load starts at the
+                // load's end, so it stays `.loading` until then like an autostart (AE#1000).
+                if ready, settlePausedAtReadiness, !self.playRequestedDuringLoad, self.state == .loading {
                     self.state = .paused
                 }
                 // #315: on an external screen this readiness IS the edge; the local layer never rises.
@@ -567,7 +569,7 @@ extension AetherEngine {
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
-            settlePausedAtReadiness: Self.readinessSettlesPaused(autostarts: Self.loadPerformsAutostart(options)),
+            settlePausedAtReadiness: Self.readinessSettlesPaused(autostarts: loadAutostarts(options)),
             failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             videoReadyForDisplay: host.$isVideoReadyForDisplay,
@@ -716,7 +718,7 @@ extension AetherEngine {
         // AE#1110: no play gate on this route, so right before play() is the latest point there is.
         await activateNativeAudioSession("remote HLS bypass, no play gate")
         try checkLoadCurrent(bypassGeneration)
-        if Self.loadPerformsAutostart(options) {
+        if loadAutostarts(options) {
             host.play()
         }
         startMemoryProbe()

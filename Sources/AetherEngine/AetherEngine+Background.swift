@@ -235,8 +235,20 @@ extension AetherEngine {
     func endLoadInFlight(_ generation: UInt64) {
         guard loadInFlightGeneration == generation else { return }
         loadInFlightGeneration = nil
+        settlePlayRequestedDuringLoad()
         settleOwedBackgroundAction()
         settleOwedUpscaleNativeReturn()
+    }
+
+    /// AE#1117: a press that came after the load's own start point (its last stretch has awaits of
+    /// its own) is still owed. A load that started playing has nothing to add; one that ended paused
+    /// gets the press now, with nothing in flight to hold it.
+    func settlePlayRequestedDuringLoad() {
+        guard playRequestedDuringLoad else { return }
+        playRequestedDuringLoad = false
+        guard state == .paused else { return }
+        EngineLog.emit("[AetherEngine] play() held during the load is given at its exit (AE#1117)", category: .engine)
+        play()
     }
 
     /// didEnterBackground's bookkeeping. Audit CORE-2: a load or seek in flight has a pipeline

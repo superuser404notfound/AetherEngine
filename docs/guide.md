@@ -39,7 +39,7 @@ Three rules to start with:
 
 - **One engine per app.** Create it once and reuse it for every title.
 - **No built-in UI.** There is no `AVPlayerViewController` and there are no controls. You build the transport bar and the menus, and you read the engine's published properties for state.
-- **No `play()` after a load.** Playback starts by itself. Call `play()` yourself only after a load with `autoplay: false`.
+- **No `play()` after a load.** Playback starts by itself. Call `play()` yourself only after a load with `autoplay: false`. A `play()` while the load is still running is harmless: the engine holds it for the load's own start (see [api.md › Transport](api.md#transport)).
 
 ### The two paths
 
