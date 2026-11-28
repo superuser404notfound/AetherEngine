@@ -31,6 +31,9 @@ struct TrickleWatchdogTests {
         case drip(bytes: Int, everyUs: useconds_t)
         /// `bytes` at loopback speed, then nothing more on an open socket (no FIN, no error).
         case silentAfter(bytes: Int)
+        /// `bytes` at loopback speed, then nothing until an override replaces this pace. Nothing
+        /// waits in the socket buffers, so what follows the hold arrives at the override's pace.
+        case holdAfter(bytes: Int)
     }
 
     /// Loopback 206 origin with a per-request pace. Keep-alive, Range-aware, no other features.
@@ -161,6 +164,12 @@ struct TrickleWatchdogTests {
                         return false
                     }
                     piece = min(body.count, bytes - Int(sent))
+                case .holdAfter(let bytes):
+                    if sent >= Int64(bytes) {
+                        usleep(20_000)
+                        continue
+                    }
+                    piece = min(body.count, bytes - Int(sent))
                 }
                 let n = Int(min(Int64(piece), length - sent))
                 guard writeAll(fd, Array(body[0..<n])) else { return false }
@@ -202,10 +211,13 @@ struct TrickleWatchdogTests {
 
     private static func makeReader(_ origin: PacedOrigin, held: Bool = false,
                                    trickleFloorBytes: Int64? = nil,
-                                   stallTimeout: TimeInterval = stallTimeout) -> AVIOReader {
-        AVIOReader(url: URL(string: "http://127.0.0.1:\(origin.port)/movie.bin")!,
+                                   stallTimeout: TimeInterval = stallTimeout,
+                                   label: String = "source",
+                                   windowHighWater: Int? = nil) -> AVIOReader {
+        AVIOReader(url: URL(string: "http://127.0.0.1:\(origin.port)/movie.bin")!, label: label,
                    boundedInitialFetch: held ? nil : firstRange,
                    connStallTimeout: stallTimeout, trickleFloorBytes: trickleFloorBytes,
+                   windowHighWater: windowHighWater,
                    heldConnection: held, backoffScale: 0.02)
     }
 
@@ -515,38 +527,55 @@ struct TrickleWatchdogTests {
 
     /// The reviewers' scenario: a held connection parks on a full window for several thresholds
     /// with zero delivery, the consumer then drains it and blocks, and the origin delivers 3.5 MiB
-    /// per 20 s scaled to this threshold, 1.75x the floor. A mark from before the wait would fold
-    /// the park into the span and end a healthy stream.
+    /// per 20 s, 1.75x the floor. A mark from before the wait would fold the park into the span and
+    /// end a healthy stream.
+    ///
+    /// The origin holds once the window is full, so nothing waits in the socket buffers. With a
+    /// `.fast` origin they held several MiB, the read after the park was served from them, and the
+    /// drip was never judged at all (4 MiB at 50 KB/s finished in 6 s with no trickle end, so the
+    /// case could not fail). And the threshold is 2 s, not 0.5 s: at 0.5 s a period holds five
+    /// drips, one late origin write pulls it under the floor, and CI ended this healthy drip seven
+    /// times (2026-11-28). Reproduced locally with a 100 or 200 ms delay on one write in four: 8 of
+    /// 10 runs red at 0.5 s with up to 9 ends, 1 of 10 at 2 s.
+    ///
+    /// Measured on this harness: a drip at a sixth of the floor is ended 19 times, so the drip is
+    /// judged. It does not isolate the pre-wait guard in `trickleVerdictLocked`, though: with that
+    /// guard removed the case still passed 3 of 3.
     @Test("a park on a full window followed by a healthy drip does not trip",
           .timeLimit(.minutes(3)))
     func parkThenHealthyDripDoesNotTrip() async throws {
-        // Loopback caveat: whatever the kernel buffered for the socket during the park arrives as a
-        // burst once the pump resumes, and that burst alone lifts a stale span over the floor. So on
-        // this harness the case passes even without the pre-wait guard. It pins the behaviour; the
-        // guard in `trickleVerdictLocked` (no mark older than the starved clock) is what decides it
-        // when the origin itself is the slow side and no buffered burst follows the park.
-        let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { _, _ in .fast })
+        let stallTimeout: TimeInterval = 2
+        let window = 4 * 1024 * 1024
+        let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { _, _ in .holdAfter(bytes: window) })
         let origin = try #require(originMaybe)
         defer { origin.stop() }
-        let reader = Self.makeReader(origin, held: true)
+        let label = "trickle-park-\(UUID().uuidString.prefix(8))"
+        let capture = EngineLogCapture()
+        defer { capture.end() }
+        let reader = Self.makeReader(origin, held: true, stallTimeout: stallTimeout, label: label,
+                                     windowHighWater: window)
         defer { reader.markClosed(); reader.close() }
         reader.playIntentProvider = { true }
         try reader.open()
-        try await waitFor { reader.windowDiagnostics.aheadBytes >= 15 * 1024 * 1024 }
+        try await waitFor { reader.windowDiagnostics.aheadBytes >= window - 64 * 1024 }
         // The park: four thresholds of zero delivery on a full window.
-        let parkEnded = try await waitFor(upTo: .seconds(4 * Self.stallTimeout)) {
+        let parkEnded = try await waitFor(upTo: .seconds(4 * stallTimeout)) {
             reader.trickleEndCountForTesting > 0 || !reader.hasLiveConnectionForTesting
         }
         #expect(!parkEnded)
 
-        // 3.5 MiB / 20 s at 0.5 s is 91750 B per threshold: 18350 B every 100 ms.
+        // 3.5 MiB / 20 s is 183500 B/s: 18350 B every 100 ms. 1 MiB of it is several periods.
         origin.setPaceOverride(.drip(bytes: 18_350, everyUs: 100_000))
         let ahead = reader.windowDiagnostics.aheadBytes
-        let target = ahead + 512 * 1024
+        let target = ahead + 1024 * 1024
         let progress = Self.startReading(reader, bytes: target)
-        try await waitFor { progress.done }
+        try await waitFor(upTo: .seconds(60)) { progress.done }
         #expect(progress.got == target)
-        #expect(reader.trickleEndCountForTesting == 0, "a healthy drip after a park was ended as a trickle")
+        #expect(reader.trickleEndCountForTesting == 0,
+                """
+                a healthy drip after a park was ended as a trickle
+                \(capture.matching("\(label) ").suffix(40).joined(separator: "\n"))
+                """)
         #expect(origin.requests.filter { $0.start == 0 }.count == 1,
                 "the healthy held connection was replaced: \(origin.requests.map(\.start))")
     }
