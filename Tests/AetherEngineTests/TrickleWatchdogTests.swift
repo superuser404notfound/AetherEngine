@@ -27,7 +27,9 @@ struct TrickleWatchdogTests {
     /// How one response body is written.
     enum Pace: Sendable {
         case fast
-        /// `bytes` per write, then `everyUs` microseconds of sleep.
+        /// `bytes` per write, one write every `everyUs` microseconds. Paced by the clock, so a
+        /// write that a loaded runner delays is followed at once by the ones it held up, and the
+        /// rate stays what the case names (CI, 2026-11-28).
         case drip(bytes: Int, everyUs: useconds_t)
         /// `bytes` at loopback speed, then nothing more on an open socket (no FIN, no error).
         case silentAfter(bytes: Int)
@@ -147,17 +149,26 @@ struct TrickleWatchdogTests {
             let requested = pace(start, attempt)
             let body = [UInt8](repeating: 0x55, count: 256 * 1024)
             var sent: Int64 = 0
+            // The drip's schedule: when its first write went out, and how many have since.
+            var dripStartNs: UInt64 = 0
+            var dripPeriodUs: useconds_t = 0
+            var dripWrites: UInt64 = 0
             while sent < length {
                 if stopped { return false }
                 let current = paceOverride ?? requested
                 let piece: Int
-                var sleepUs: useconds_t = 0
+                var dripping = false
                 switch current {
                 case .fast:
                     piece = 256 * 1024
                 case .drip(let bytes, let everyUs):
                     piece = min(bytes, body.count)
-                    sleepUs = everyUs
+                    dripping = true
+                    if dripPeriodUs != everyUs || dripWrites == 0 {
+                        dripPeriodUs = everyUs
+                        dripWrites = 0
+                        dripStartNs = DispatchTime.now().uptimeNanoseconds
+                    }
                 case .silentAfter(let bytes):
                     if sent >= Int64(bytes) {
                         while !stopped { usleep(50_000) }
@@ -174,7 +185,14 @@ struct TrickleWatchdogTests {
                 let n = Int(min(Int64(piece), length - sent))
                 guard writeAll(fd, Array(body[0..<n])) else { return false }
                 sent += Int64(n)
-                if sleepUs > 0 { usleep(sleepUs) }
+                if dripping {
+                    dripWrites += 1
+                    let due = dripStartNs + dripWrites * UInt64(dripPeriodUs) * 1000
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if due > now { usleep(useconds_t((due - now) / 1000)) }
+                } else {
+                    dripWrites = 0
+                }
             }
             return true
         }
@@ -557,18 +575,29 @@ struct TrickleWatchdogTests {
         defer { reader.markClosed(); reader.close() }
         reader.playIntentProvider = { true }
         try reader.open()
-        try await waitFor { reader.windowDiagnostics.aheadBytes >= window - 64 * 1024 }
+        // Full means strictly less than `heldPullSlack` (64 KiB) of headroom. Bounded, because a
+        // consumed byte or a window that stops short would leave the rest of the origin's bytes in
+        // a socket buffer, which is the burst this case must not be served from. A few KiB can
+        // stay in flight anyway (1664 B once in 25 runs), a fraction of one period's floor.
+        let filled = try await waitFor(upTo: .seconds(10)) {
+            reader.windowDiagnostics.aheadBytes > window - 64 * 1024
+        }
+        try #require(filled, "the window never filled: \(reader.windowDiagnostics)")
         // The park: four thresholds of zero delivery on a full window.
         let parkEnded = try await waitFor(upTo: .seconds(4 * stallTimeout)) {
             reader.trickleEndCountForTesting > 0 || !reader.hasLiveConnectionForTesting
         }
         #expect(!parkEnded)
 
-        // 3.5 MiB / 20 s is 183500 B/s: 18350 B every 100 ms. 1 MiB of it is several periods.
-        origin.setPaceOverride(.drip(bytes: 18_350, everyUs: 100_000))
+        // 3.5 MiB / 20 s is 183500 B/s: 18350 B every 100 ms. 2 MiB of it is about 11 s, five
+        // periods. The drip starts once the consumer has drained the window, so no drip waits in
+        // a socket buffer for the pump to resume.
         let ahead = reader.windowDiagnostics.aheadBytes
-        let target = ahead + 1024 * 1024
+        let target = ahead + 2 * 1024 * 1024
         let progress = Self.startReading(reader, bytes: target)
+        let drained = try await waitFor(upTo: .seconds(10)) { reader.windowDiagnostics.aheadBytes < 64 * 1024 }
+        try #require(drained, "the consumer never drained the window: \(reader.windowDiagnostics)")
+        origin.setPaceOverride(.drip(bytes: 18_350, everyUs: 100_000))
         try await waitFor(upTo: .seconds(60)) { progress.done }
         #expect(progress.got == target)
         #expect(reader.trickleEndCountForTesting == 0,
