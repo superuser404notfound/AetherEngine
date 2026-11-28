@@ -20,6 +20,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A panel that refuses the HDR master pays for it once, not on every start (AE#1143).** After a display
+  switch, the startup readiness gate held the refusal, reloaded the master, tried the reduced master and
+  only then fell back, without recording what it had learned. Behind a cable that could not carry the HDR
+  link, the first HDR start took about 14 s and the next about 26 s. A refusal now skips the master reload,
+  and the gate's media fallback latches the refusal like the reactive path, so later HDR titles go
+  media-direct until the next return from the background. The gate's reloads also stay on the loopback
+  address unless a receiver is involved; they went to the LAN address on every run.
 - **A `play()` during a load waits for the load (AE#1117).** It used to reach AVPlayer and write
   `.playing` at once: on the harness 30 ms into the load, about 2 s before the first frame, so a host
   spinner fell early and a mounted item could start ahead of the display switch. The press is now held

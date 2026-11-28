@@ -1566,6 +1566,10 @@ So HDR / DV on an SDR external display plays from the media playlist, and the `S
 
 The separate `#35` cold-DV-start readiness gate (its scenario is an HDR TV) tries one step in between. Before the bare media playlist, it serves a reduced master that keeps HDR: `SUPPLEMENTAL-CODECS` dropped so it is plain HDR10, the source range and the `SUBTITLES` group kept. So a cold DV start keeps HDR10 plus subtitles instead of dropping straight to subtitle-less media.
 
+**A refusal is remembered for the process (#459, #588).** On tvOS, a display refusal of an HDR master while the display reads eligible for HDR means this panel will not take HDR masters in its current output setup. Later HDR titles then go media-direct at once instead of paying for the refusal again. The latch is cleared on a real return from the background, because the user may have changed the output format in Settings, and withdrawn when the panel reports HDR headroom during playback (#887). These never latch: a refused SDR master, the `-1002` parse failure, a refusal during a display mode switch, and any refusal on a panel that engages HDR on demand (iOS, macOS).
+
+**The gate learns a refusal too (#1143).** A display refusal inside the `#35` gate (`-11868`, `-11848`, or the 404 of a withheld I-frame playlist, which stands in for `-11848`) skips the master reload. The gate tries the reduced master once, then the media playlist, and that fallback latches like the reactive one. Before, the gate fell back without latching, so behind a cable that could not carry the HDR link every HDR start took 14 to 26 s. A cold start that only failed (`-11819`) or parked without tracks still gets its master reload and latches nothing, so the next title keeps Dolby Vision once the link is warm. A reduced master that starts latches nothing either, since the panel did take an HDR master.
+
 #### Timing
 
 Served cues are on the AVPlayer clock axis, and producer restarts are timeline-exact (see [architecture](architecture.md)), so cues stay in sync with the picture across seeks and restarts.
