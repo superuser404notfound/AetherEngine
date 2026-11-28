@@ -430,6 +430,14 @@ final class HLSLocalServer: @unchecked Sendable {
         return URL(string: "http://127.0.0.1:\(port)/\(pathToken)/\(livePlaylistPrefix)master_hdr.m3u8")
     }
 
+    /// AE#1143: whether the primary master names DV in SUPPLEMENTAL-CODECS, the one thing the reduced
+    /// master drops. Without it the two masters offer the panel the same variant.
+    var masterCarriesSupplementalCodecs: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return provider?.masterSupplementalCodecs != nil
+    }
+
     /// Numeric address of the peer on an accepted connection, or nil if the socket is already gone (#227 diag).
     static func peerAddress(of fd: Int32) -> String? {
         var storage = sockaddr_storage()

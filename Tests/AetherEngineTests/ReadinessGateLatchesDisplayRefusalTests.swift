@@ -11,7 +11,7 @@ import Testing
 /// same helper the reactive path uses. A plain cold failure (-11819, the silent park) keeps its reload
 /// and latches nothing, which is what lets the next title keep its DV master once the link is warm.
 @Suite("AE#1143: the readiness gate learns a display refusal", .timeLimit(.minutes(3)))
-struct Issue1143GateLatchesRefusalTests {
+struct ReadinessGateLatchesDisplayRefusalTests {
 
     private func engineSource(_ name: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
@@ -99,8 +99,38 @@ struct Issue1143GateLatchesRefusalTests {
         let reactive = try functionBody(text, from: "func fallBackToMediaPlaylist(")
         #expect(reactive.contains("latchPanelRefusalIfDue(code: rejection.code"))
         let gate = try functionBody(text, from: "private func runStartupReadinessGate(")
-        #expect(gate.contains("latchPanelRefusalIfDue(code: refusalCode"))
-        #expect(gate.contains("refusedByDisplay: refusalCode != nil"))
+        #expect(gate.contains("latchPanelRefusalIfDue(code: refusal.code"))
+        #expect(gate.contains("refusedByDisplay: refusal != nil"))
+    }
+
+    /// The AE#535 / AE#667 guards judge the display at the refusal. The gate falls back up to 3 s
+    /// later, by when a panel that read ineligible mid-handshake may read eligible.
+    @Test("the gate hands the helper the display state it read at the refusal")
+    func gateLatchesOnTheRefusalsDisplayState() throws {
+        let gate = try functionBody(try engineSource("AetherEngine.swift"),
+                                    from: "private func runStartupReadinessGate(")
+        #expect(gate.contains("eligibleAtRefusal: refusal.eligible, switchingAtRefusal: refusal.switching"))
+    }
+
+    /// The status KVO reaches the main actor through a Task, so a code stashed by `handleItemFailed`
+    /// can still be missing when the gate's poll sees `.failed`. The host reads it off the item.
+    @Test("the refusal is read off the failed item, not from a field the failure handler fills")
+    func refusalIsReadOffTheItem() throws {
+        let host = try engineSource("Native/NativeAVPlayerHost.swift")
+        let getter = try functionBody(host, from: "var startupDisplayRejectionCode: Int? {")
+        #expect(getter.contains("item.status == .failed"))
+    }
+
+    /// After a cold master failure, a refused reduced master may be the link still warming (#35), and
+    /// the stated rule is that a cold start latches nothing. Only master attempts are judged.
+    @Test("the reduced master's outcome is never recorded as a refusal")
+    func reducedAttemptRecordsNoRefusal() throws {
+        let gate = try functionBody(try engineSource("AetherEngine.swift"),
+                                    from: "private func runStartupReadinessGate(")
+        let reduced = try #require(gate.range(of: "if let reducedURL = session.reducedHDRMasterPlaylistURL"))
+        let fallback = try #require(gate.range(of: "masterFallbackUsed = true"))
+        #expect(!gate[reduced.lowerBound..<fallback.lowerBound].contains("noteRefusal()"))
+        #expect(gate.contains("refusal == nil || session.masterCarriesSupplementalCodecs"))
     }
 
     @Test("the gate reloads onto the LAN address only for a receiver")

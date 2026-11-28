@@ -287,9 +287,25 @@ final class NativeAVPlayerHost {
     /// every option (a timed-out silent 0-track park leaves it nil; the gate supplies a fallback).
     var startupReadinessGateActive: Bool = false
     private(set) var lastSuppressedStartupFailure: String?
-    /// AE#1143: the display-rejection code of a failure the gate held, classified exactly as the
-    /// reactive path below would have (a withheld I-frame playlist's -1100 reads -11848). Per item.
-    private(set) var heldStartupRejectionCode: Int?
+
+    /// AE#1143: the display-rejection code the current item failed with, classified the way the
+    /// reactive path in `handleItemFailed` does (a withheld I-frame playlist's -1100 reads -11848).
+    /// Read off the item, not stashed by `handleItemFailed`: the status KVO reaches the main actor
+    /// through a Task, so the gate's poll can see `.failed` before that handler has run.
+    var startupDisplayRejectionCode: Int? {
+        guard let item = playerItem, item.status == .failed else { return nil }
+        return displayRejectionCode(of: item)
+    }
+
+    private func displayRejectionCode(of item: AVPlayerItem) -> Int? {
+        guard let error = item.error as NSError? else { return nil }
+        let withheld = iFramePlaylistWithheld?() ?? false
+        guard MasterFallbackDecision.isMasterRejection(error,
+            mediaErrorCodes: item.errorLog()?.events.map(\.errorStatusCode) ?? [],
+            iFramePlaylistWithheld: withheld) else { return nil }
+        let code = MasterFallbackDecision.rejectionCode(for: error, iFramePlaylistWithheld: withheld)
+        return MasterFallbackDecision.isDisplayRejectionCode(code) ? code : nil
+    }
 
     // MARK: - Seek landing state
 
@@ -756,7 +772,6 @@ final class NativeAVPlayerHost {
         pendingSoftwarePathEscalation = nil
         pendingStereoRefusal = nil
         lastSuppressedStartupFailure = nil
-        heldStartupRejectionCode = nil
         isReady = false
         seekableEnd = 0
         // AE#454 round 2: both ends, or the mirror is a mixture. Only the end was reset here, so after
@@ -1270,16 +1285,10 @@ final class NativeAVPlayerHost {
             // falls back to media / surfaces a terminal error itself. Publishing here would race it.
             if startupReadinessGateActive {
                 lastSuppressedStartupFailure = desc
-                if let error = item.error as NSError?, MasterFallbackDecision.isMasterRejection(error,
-                    mediaErrorCodes: item.errorLog()?.events.map(\.errorStatusCode) ?? [],
-                    iFramePlaylistWithheld: iFramePlaylistWithheld?() ?? false) {
-                    heldStartupRejectionCode = MasterFallbackDecision.rejectionCode(for: error,
-                        iFramePlaylistWithheld: iFramePlaylistWithheld?() ?? false)
-                }
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(sessionID) startup .failed (code=\(code.map(String.init) ?? "?")) "
                     + "held by the readiness gate"
-                    + (heldStartupRejectionCode.map { ", a master rejection (code=\($0))" } ?? "")
+                    + (displayRejectionCode(of: item).map { ", a display refusal (code=\($0))" } ?? "")
                     + ": \(desc)",
                     category: .engine)
                 return
