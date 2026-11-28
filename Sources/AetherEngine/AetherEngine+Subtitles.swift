@@ -1180,9 +1180,7 @@ extension AetherEngine {
         let anchorCandidates = streams.sorted()
         let engineDisplayDuration = await MainActor.run { [weak self] in self?.duration ?? 0 }
         let readFrom = landingWindow.readStart(for: startAt)
-        let seekAnchor = SubtitleForwardPrefetcher.seekAnchor(
-            demuxer: demuxer, for: readFrom, candidates: anchorCandidates)
-        let landed = SubtitleForwardPrefetcher.reposition(
+        let (landed, seekAnchor) = SubtitleForwardPrefetcher.reposition(
             demuxer: demuxer, to: readFrom, anchorCandidates: anchorCandidates,
             fallbackDuration: engineDisplayDuration,
             timeout: Self.sideReaderSeekBudgetSeconds)

@@ -58,29 +58,24 @@ enum SubtitleForwardPrefetcher {
     /// (#234), byte-estimate fallback with the same budget when the container cannot seek by time.
     ///
     /// The anchor is picked per move from `anchorCandidates`, because which routed stream can anchor
-    /// depends on the target (AE#1142: a sparse track's index does not reach every position).
+    /// depends on the target (AE#1142: a sparse track's index does not reach every position). The
+    /// result names the stream that was used, for the log.
     static func reposition(
         demuxer: Demuxer,
         to seconds: Double,
         anchorCandidates: [Int32],
         fallbackDuration: Double,
         timeout: TimeInterval
-    ) -> Positioning {
+    ) -> (positioning: Positioning, anchor: Int32) {
         let seekTo = max(0, seconds - anchorBackscanSeconds)
-        let anchor = seekAnchor(demuxer: demuxer, for: seconds, candidates: anchorCandidates)
+        let anchor = demuxer.sideReaderSeekAnchor(among: anchorCandidates, forSeconds: seekTo)
         if demuxer.seekBounded(to: seekTo, anchorStreamIndex: anchor, timeout: timeout) {
-            return .seek
+            return (.seek, anchor)
         }
         demuxer.markTimestampSeekUnreliable()
         let duration = demuxer.duration > 0 ? demuxer.duration : fallbackDuration
-        return demuxer.seekByteEstimate(to: seekTo, knownDuration: duration, timeout: timeout)
-            ? .byteEstimate : .failed
-    }
-
-    /// The stream `reposition` measures a move to `seconds` against, exposed for the session log.
-    static func seekAnchor(demuxer: Demuxer, for seconds: Double, candidates: [Int32]) -> Int32 {
-        demuxer.sideReaderSeekAnchor(among: candidates,
-                                     forSeconds: max(0, seconds - anchorBackscanSeconds))
+        let estimated = demuxer.seekByteEstimate(to: seekTo, knownDuration: duration, timeout: timeout)
+        return (estimated ? .byteEstimate : .failed, anchor)
     }
 
     /// #416/#941: what a reposition tells the coverage ledger. Only a completed timestamp seek says
@@ -354,13 +349,13 @@ enum SubtitleForwardPrefetcher {
                 let readFrom = landingWindow?.readStart(for: target.seconds) ?? target.seconds
                 currentLanding = target.seconds
                 landingReadOwed = landingWindow?.aheadSeconds != nil
-                let landed = reposition(demuxer: demuxer, to: readFrom,
-                                        anchorCandidates: reanchor.anchorCandidates,
-                                        fallbackDuration: reanchor.fallbackDuration,
-                                        timeout: reanchor.seekTimeout)
+                let (landed, anchor) = reposition(demuxer: demuxer, to: readFrom,
+                                                  anchorCandidates: reanchor.anchorCandidates,
+                                                  fallbackDuration: reanchor.fallbackDuration,
+                                                  timeout: reanchor.seekTimeout)
                 EngineLog.emit(
                     "[AetherEngine] #151 forward prefetch re-anchored in place at "
-                    + "\(String(format: "%.2f", target.seconds))s (\(landed))",
+                    + "\(String(format: "%.2f", target.seconds))s (\(landed)) anchor=\(anchor)",
                     category: .engine)
                 // #250: the banked position is now this seek's, and the pre-seek one is void.
                 // Stamped here rather than at request time so the window between the two reads

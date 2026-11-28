@@ -3547,20 +3547,21 @@ public final class Demuxer: @unchecked Sendable {
     /// read to EOF. `mov_seek_stream` clamps to sample 0 the same way. And a usable sparse anchor
     /// still lands on ITS last cue before the target, which can be minutes back.
     ///
-    /// So: among the streams whose index brackets the target, the earliest landing inside
-    /// `landingWindowSeconds` wins, which keeps a line that is still on screen (#234). Without one
-    /// the nearest landing wins, and with no usable index at all -1. Streams with no index entries
-    /// (nothing parsed yet, or a container that builds it while reading) keep the old rule, the
-    /// lowest index, but only when no candidate has an index.
+    /// The rule is therefore this. Among the streams whose index brackets the target, the earliest
+    /// landing inside `landingWindowSeconds` wins, which keeps a line that is still on screen
+    /// (#234). Without one it is -1: a landing further back is a line that has ended, and video
+    /// lands next to the target. Streams with no index entries (nothing parsed yet, or a container
+    /// that builds it while reading) keep the old rule, the lowest index, but only when no
+    /// candidate has an index.
     func sideReaderSeekAnchor(among candidates: some Sequence<Int32>, forSeconds seconds: Double,
-                              landingWindowSeconds: Double = 15) -> Int32 {
+                              landingWindowSeconds: Double = AetherEngine.subtitleDrainBackscanSeconds)
+        -> Int32 {
         accessLock.lock()
         defer { accessLock.unlock() }
         guard let ctx = formatContext else { return -1 }
         var unindexed: Int32?
         var anyIndexed = false
         var earliestInWindow: (index: Int32, landing: Double)?
-        var nearest: (index: Int32, landing: Double)?
         for index in candidates.sorted() {
             guard index >= 0, index < Int32(ctx.pointee.nb_streams),
                   let stream = ctx.pointee.streams[Int(index)] else { continue }
@@ -3576,15 +3577,12 @@ public final class Demuxer: @unchecked Sendable {
             guard found >= 0, found < count - 1,
                   let entry = avformat_index_get_entry(stream, found) else { continue }
             let landing = Double(entry.pointee.timestamp) * Double(tb.num) / Double(tb.den)
-            if seconds - landing <= landingWindowSeconds {
-                if earliestInWindow.map({ landing < $0.landing }) ?? true {
-                    earliestInWindow = (index, landing)
-                }
-            } else if nearest.map({ landing > $0.landing }) ?? true {
-                nearest = (index, landing)
+            if seconds - landing <= landingWindowSeconds,
+               earliestInWindow.map({ landing < $0.landing }) ?? true {
+                earliestInWindow = (index, landing)
             }
         }
-        if let pick = earliestInWindow ?? nearest { return pick.index }
+        if let pick = earliestInWindow { return pick.index }
         return anyIndexed ? -1 : (unindexed ?? -1)
     }
 

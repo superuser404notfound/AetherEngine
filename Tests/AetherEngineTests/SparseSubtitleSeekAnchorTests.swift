@@ -13,7 +13,7 @@ import AetherLibavutil
 /// (`timestamp = FFMAX(timestamp, index_entries[0].timestamp)`), so a forced track whose first cue
 /// sits at 900 s turned a seek to 6 s into a seek to 900 s, and nothing in between was read. The
 /// anchor now comes only from a routed stream whose index brackets the target.
-struct Issue1142SparseFirstAnchorTests {
+struct SparseSubtitleSeekAnchorTests {
 
     /// Fixture: 15 s Matroska, gray 128x72 at 5 fps with a keyframe every second, a cluster per
     /// second, and two SubRip tracks. Stream 1 is the sparse "forced" track with cues at 10 s and
@@ -47,7 +47,7 @@ struct Issue1142SparseFirstAnchorTests {
         return nil
     }
 
-    @Test("a sparse anchor clamps the seek to its first cue", .timeLimit(.minutes(3)))
+    @Test("AE#1142: a sparse anchor clamps the seek to its first cue", .timeLimit(.minutes(3)))
     func sparseAnchorClampsTheSeek() throws {
         let demuxer = try Self.makeDemuxer()
         defer { demuxer.close() }
@@ -56,7 +56,7 @@ struct Issue1142SparseFirstAnchorTests {
         #expect(clamped == 10, "the 5 s to 9 s cues of the full track are skipped, got \(String(describing: clamped))")
     }
 
-    @Test("the anchor is a routed stream whose index brackets the target",
+    @Test("AE#1142: the anchor is a routed stream whose index brackets the target",
           .timeLimit(.minutes(3)))
     func anchorBracketsTheTarget() throws {
         let demuxer = try Self.makeDemuxer()
@@ -68,7 +68,10 @@ struct Issue1142SparseFirstAnchorTests {
                 "both land inside the window, the sparse track's 10 s cue is the earlier landing")
         #expect(demuxer.sideReaderSeekAnchor(among: routed, forSeconds: 11.5,
                                              landingWindowSeconds: 1) == Self.full,
-                "outside the window the nearest landing wins")
+                "the sparse landing is outside the window, the full track's 11 s cue is not")
+        #expect(demuxer.sideReaderSeekAnchor(among: routed, forSeconds: 11.5,
+                                             landingWindowSeconds: 0.25) == -1,
+                "a landing outside the window is a line that has ended, so video lands closer")
         #expect(demuxer.sideReaderSeekAnchor(among: routed, forSeconds: 13.5) == Self.full,
                 "past the sparse track's last cue Matroska would parse clusters to EOF")
         #expect(demuxer.sideReaderSeekAnchor(among: routed, forSeconds: 0.5) == -1,
@@ -76,7 +79,7 @@ struct Issue1142SparseFirstAnchorTests {
         #expect(demuxer.sideReaderSeekAnchor(among: [Int32](), forSeconds: 6.5) == -1)
     }
 
-    @Test("a stream without index entries keeps anchoring", .timeLimit(.minutes(3)))
+    @Test("AE#1142: a stream without index entries keeps anchoring", .timeLimit(.minutes(3)))
     func unindexedCandidateKeepsTheOldRule() throws {
         let demuxer = try Self.makeDemuxer(prewarm: false)
         defer { demuxer.close() }
@@ -87,7 +90,7 @@ struct Issue1142SparseFirstAnchorTests {
         #expect(demuxer.sideReaderSeekAnchor(among: [Self.sparse], forSeconds: 6.5) == Self.sparse)
     }
 
-    @Test("the native readers' seek lands at the target", .timeLimit(.minutes(3)))
+    @Test("AE#1142: the native readers' seek lands at the target", .timeLimit(.minutes(3)))
     func nativeReaderSeekLandsAtTheTarget() throws {
         let demuxer = try Self.makeDemuxer()
         defer { demuxer.close() }
@@ -97,7 +100,7 @@ struct Issue1142SparseFirstAnchorTests {
         #expect(first <= 6.5, "landed at \(first)")
     }
 
-    @Test("the prefetcher's reposition lands at the target", .timeLimit(.minutes(3)))
+    @Test("AE#1142: the prefetcher's reposition lands at the target", .timeLimit(.minutes(3)))
     func prefetcherRepositionLandsAtTheTarget() throws {
         let demuxer = try Self.makeDemuxer()
         defer { demuxer.close() }
@@ -105,7 +108,7 @@ struct Issue1142SparseFirstAnchorTests {
         let landed = SubtitleForwardPrefetcher.reposition(
             demuxer: demuxer, to: 8.5, anchorCandidates: [Self.sparse, Self.full],
             fallbackDuration: 15, timeout: 5)
-        #expect(landed == .seek)
+        #expect(landed.positioning == .seek)
         let first = try #require(Self.firstDeliveredPTS(demuxer, streamIndex: Self.full))
         #expect(first <= 6.5, "landed at \(first)")
     }

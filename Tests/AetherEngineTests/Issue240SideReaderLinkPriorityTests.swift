@@ -314,7 +314,7 @@ struct Issue240SideReaderLinkPriorityTests {
         let landed = SubtitleForwardPrefetcher.reposition(
             demuxer: demuxer, to: 10, anchorCandidates: [subtitleIndex],
             fallbackDuration: 15, timeout: 5)
-        #expect(landed == .seek)
+        #expect(landed.positioning == .seek)
 
         var firstSubtitlePts: Double? = nil
         while let pkt = try? demuxer.readPacket() {
