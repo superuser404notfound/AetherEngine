@@ -129,4 +129,58 @@ struct EngineFillAreaTests {
         #expect(CATransform3DIsIdentity(host.sublayerTransform))
         engine.unbind(view: view)
     }
+
+    @MainActor
+    private func hostLayer(_ view: AetherPlayerView) throws -> CALayer {
+        #if canImport(UIKit)
+        return view.layer
+        #else
+        return try #require(view.layer)
+        #endif
+    }
+
+    @MainActor
+    @Test("the zoom holds while the picture size is briefly unknown (a held still across a rebuild)",
+          .timeLimit(.minutes(3)))
+    func zoomHoldsWhilePlaneIsUnknown() throws {
+        let engine = try AetherEngine()
+        let view = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        engine.bind(view: view)
+        engine.setFillPictureArea(SyntheticFrame.centred(ratio: 2.39))
+        engine.softwareDisplaySize = CGSize(width: 1920, height: 1080)
+        engine.softwareDisplaySize = nil
+        let t = CATransform3DGetAffineTransform(try hostLayer(view).sublayerTransform)
+        #expect(abs(t.a - 1.3444) <= 0.001)
+        engine.unbind(view: view)
+    }
+
+    @MainActor
+    @Test("a surface the layer falls back to after an unbind keeps the zoom", .timeLimit(.minutes(3)))
+    func fallbackSurfaceKeepsZoom() throws {
+        let engine = try AetherEngine()
+        let first = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        let second = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        engine.bind(view: first)
+        engine.setFillPictureArea(SyntheticFrame.centred(ratio: 2.39))
+        engine.softwareDisplaySize = CGSize(width: 1920, height: 1080)
+        engine.bind(view: second)
+        engine.unbind(view: second)
+        let t = CATransform3DGetAffineTransform(try hostLayer(first).sublayerTransform)
+        #expect(abs(t.a - 1.3444) <= 0.001)
+        engine.unbind(view: first)
+    }
+
+    #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+    @MainActor
+    @Test("a detached view gives clipping back even with no layer hosted", .timeLimit(.minutes(3)))
+    func detachRestoresClipping() throws {
+        let view = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        let host = try hostLayer(view)
+        host.masksToBounds = false
+        view.setFill(area: SyntheticFrame.centred(ratio: 2.39), softwarePresentationSize: nil, animated: false)
+        #expect(host.masksToBounds)
+        view.detach()
+        #expect(!host.masksToBounds)
+    }
+    #endif
 }

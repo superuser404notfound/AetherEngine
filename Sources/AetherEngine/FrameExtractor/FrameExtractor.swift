@@ -17,8 +17,9 @@ public struct BoundedStillFrame: @unchecked Sendable {
 /// full-res), `preview` (frame-accurate, downscaled) and `thumbnail` (keyframe-snapped, fast). Lazy: context opens on
 /// first use; blocking FFmpeg work runs on a dedicated serial queue, not the cooperative pool.
 /// Create one per URL; for the playing item prefer `AetherEngine.makeFrameExtractor()`.
-/// What a still request produced. `.yielded` means the request stood back for a starved playback
-/// pipeline and is worth repeating; `.unavailable` covers every other way no image came back.
+/// What a still request produced. `.yielded` means the request stood back (a starved playback
+/// pipeline, a cancel, a newer request) and is worth repeating; `.unavailable` covers every other way
+/// no image came back.
 public enum StillOutcome: @unchecked Sendable {
     case image(CGImage)
     case yielded
@@ -359,7 +360,9 @@ public actor FrameExtractor: StillSource {
 
     private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> StillOutcome {
         // Audit BIT-105: a 0/0 scrub fraction or `CMTime.indefinite.seconds` is a host bug, not a position.
-        guard !isShutDown, !Task.isCancelled, seconds.isFinite, seconds >= 0 else { return .unavailable }
+        guard !isShutDown, seconds.isFinite, seconds >= 0 else { return .unavailable }
+        // Cancelled or superseded is not a failed still: a caller that keeps sampling asks again.
+        guard !Task.isCancelled else { return .yielded }
         // A valid request owns the scrub intent even when its image is already cached or it
         // yields to playback. Retire the preceding decode before either early return.
         currentToken?.cancel()
@@ -417,7 +420,8 @@ public actor FrameExtractor: StillSource {
         }
         // Cancellation can win after the decode's last check, or while its result waits to
         // reenter this actor. Never publish/cache that result or reset a newer request's idle timer.
-        guard !isShutDown, !Task.isCancelled, !token.isCancelled else { return .unavailable }
+        guard !isShutDown else { return .unavailable }
+        guard !Task.isCancelled, !token.isCancelled else { return .yielded }
         guard let image = result.image else { return .unavailable }
         cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize)
         return .image(image)

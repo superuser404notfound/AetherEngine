@@ -60,4 +60,21 @@ struct FrameExtractorOutcomeTests {
         }
         await extractor.shutdown()
     }
+
+    @Test("a cancelled request is worth repeating, not a failure", .timeLimit(.minutes(3)))
+    func cancelledIsYielded() async {
+        let missing = URL(fileURLWithPath: "/nonexistent/aether-\(UUID().uuidString).mp4")
+        let extractor = FrameExtractor(url: missing)
+        let task = Task { () -> StillOutcome in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await extractor.thumbnailOutcome(at: 1.0, maxWidth: 320)
+        }
+        let outcome = await task.value
+        guard case .yielded = outcome else {
+            Issue.record("expected .yielded, got \(outcome)")
+            await extractor.shutdown()
+            return
+        }
+        await extractor.shutdown()
+    }
 }

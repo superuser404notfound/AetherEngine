@@ -2385,7 +2385,9 @@ public final class AetherEngine: ObservableObject {
     /// Attaches nativeHost.playerLayer or softwareHost.displayLayer to the bound view. No-op when no host.
     func presentCurrentLayer() {
         guard let view = boundView else { return }
-        defer { updatePictureFit() }
+        // The fill travels with the layer: a surface it falls back to after an unbind or a takeover
+        // was detached once and lost it.
+        defer { updatePictureFit(); refreshFillTransform() }
         if let host = nativeHost {
             view.attach(host.playerLayer)
             view.attachOverlay(dualLayerOutputLayer)

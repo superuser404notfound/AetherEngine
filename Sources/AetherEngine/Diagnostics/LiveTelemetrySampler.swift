@@ -423,7 +423,8 @@ final class LiveTelemetrySampler {
             engine.extractorYieldState.recordTick(healthy: ExtractorYieldState.softwareTickIsHealthy(
                 state: engine.state,
                 isRebuffering: engine.softwareHost?.isRebuffering ?? true,
-                displayCushionSeconds: displayCushionSeconds))
+                displayCushionSeconds: displayCushionSeconds,
+                readerWindowAheadBytes: readerWindowAheadBytes.map { Int(clamping: $0) }))
         } else {
             engine.extractorYieldState.setForwardBuffer(forwardBufferSeconds)
         }

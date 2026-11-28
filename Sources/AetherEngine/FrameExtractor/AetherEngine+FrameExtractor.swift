@@ -50,12 +50,21 @@ final class ExtractorYieldState: @unchecked Sendable {
         recordTick(healthy: (seconds ?? -1) >= FrameExtractor.yieldMinForwardBufferSeconds)
     }
 
-    /// The software path has no forward buffer in seconds (the pump is renderer-back-pressured), so a
-    /// tick is healthy while the decoded cushion is not empty and the host is not rebuffering.
+    /// The reader runway a playing software session needs before stills may use the link: the decoded
+    /// cushion is a fraction of a second and only empties once the stall has happened, so the bytes
+    /// fetched ahead of the demuxer are the early warning on a thin line.
+    static let softwareMinimumReaderRunwayBytes = 4 * 1_048_576
+
+    /// The software path has no forward buffer in seconds (the pump is renderer-back-pressured). A
+    /// paused pipeline cannot starve; after a paused seek it holds one frame and a zero cushion, and
+    /// gating on that cost every scrub preview until play. A playing one is healthy while its cushion
+    /// is not empty, its reader runway (when it has a reader) is deep enough, and it is not rebuffering.
     static func softwareTickIsHealthy(state: PlaybackState, isRebuffering: Bool,
-                                      displayCushionSeconds: Double?) -> Bool {
-        guard state == .playing || state == .paused, !isRebuffering else { return false }
-        return (displayCushionSeconds ?? 0) > 0
+                                      displayCushionSeconds: Double?, readerWindowAheadBytes: Int?) -> Bool {
+        guard !isRebuffering else { return false }
+        if state == .paused { return true }
+        guard state == .playing, (displayCushionSeconds ?? 0) > 0 else { return false }
+        return (readerWindowAheadBytes ?? Int.max) >= softwareMinimumReaderRunwayBytes
     }
 
     /// Session returned outside the lock so its own lock-guarded accessors are never

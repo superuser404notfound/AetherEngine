@@ -162,4 +162,15 @@ struct PictureAreaDetectorTests {
         #expect(area.snappedRatio == nil)
         #expect(abs(area.rect.height - h) <= 0.0005)
     }
+
+    @Test("snapping never cuts more than a sliver of measured picture", .timeLimit(.minutes(3)))
+    func snapDoesNotCropInward() throws {
+        // 2.33 is within 2 % of 2.35, but snapping would cut 0.65 % of the height.
+        let h = (16.0 / 9.0) / 2.33
+        let measured = PictureAreaReading(rect: CGRect(x: 0, y: (1 - h) / 2, width: 1, height: h))
+        let area = try #require(PictureAreaDetector.combine(Array(repeating: measured, count: 5),
+                                                            displayAspect: 16.0 / 9.0))
+        #expect(area.snappedRatio == nil)
+        #expect(abs(area.rect.height - h) <= 0.0005)
+    }
 }

@@ -47,13 +47,28 @@ struct ExtractorYieldStateTests {
         #expect(!state.shouldYieldNow())
     }
 
-    @Test("a software tick is healthy only with a cushion and no rebuffer", .timeLimit(.minutes(3)))
+    @Test("a playing software tick needs a cushion, reader runway and no rebuffer", .timeLimit(.minutes(3)))
     func softwareTickHealth() {
-        #expect(ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: false, displayCushionSeconds: 0.4))
-        #expect(ExtractorYieldState.softwareTickIsHealthy(state: .paused, isRebuffering: false, displayCushionSeconds: 0.4))
-        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: true, displayCushionSeconds: 0.4))
-        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: false, displayCushionSeconds: 0))
-        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: false, displayCushionSeconds: nil))
-        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .seeking, isRebuffering: false, displayCushionSeconds: 0.4))
+        let mb = 1_048_576
+        #expect(ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: false,
+                                                          displayCushionSeconds: 0.4, readerWindowAheadBytes: 8 * mb))
+        #expect(ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: false,
+                                                          displayCushionSeconds: 0.4, readerWindowAheadBytes: nil))
+        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: false,
+                                                           displayCushionSeconds: 0.4, readerWindowAheadBytes: mb))
+        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: true,
+                                                           displayCushionSeconds: 0.4, readerWindowAheadBytes: 8 * mb))
+        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .playing, isRebuffering: false,
+                                                           displayCushionSeconds: 0, readerWindowAheadBytes: 8 * mb))
+        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .seeking, isRebuffering: false,
+                                                           displayCushionSeconds: 0.4, readerWindowAheadBytes: 8 * mb))
+    }
+
+    @Test("a paused software pipeline cannot starve, whatever its cushion", .timeLimit(.minutes(3)))
+    func pausedIsHealthy() {
+        #expect(ExtractorYieldState.softwareTickIsHealthy(state: .paused, isRebuffering: false,
+                                                          displayCushionSeconds: 0, readerWindowAheadBytes: 0))
+        #expect(!ExtractorYieldState.softwareTickIsHealthy(state: .paused, isRebuffering: true,
+                                                           displayCushionSeconds: 0, readerWindowAheadBytes: 0))
     }
 }

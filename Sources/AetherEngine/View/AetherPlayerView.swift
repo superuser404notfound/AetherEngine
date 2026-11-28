@@ -143,8 +143,11 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
 
     /// The zoom as a sublayer transform, so the hosted layer, the overlay and a held still move as one
     /// and their frames stay what the PiP fit lays out. No zoom while a PiP fit shapes the layer: the
-    /// system window mirrors the layer's own geometry, not this view's.
-    private var fillTransform: CGAffineTransform {
+    /// system window mirrors the layer's own geometry, not this view's. nil while the plane is not
+    /// known: a rebuild under a held still clears the software size and a reused native item reports an
+    /// empty `videoRect` for a moment, and dropping to identity there showed the bars for the length of
+    /// the swap, then snapped the zoom back.
+    private var fillTransform: CGAffineTransform? {
         guard let area = fillArea, pictureFit == nil, pictureArea == nil else { return .identity }
         let size = bounds.size
         let plane: CGRect?
@@ -155,7 +158,7 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         } else {
             plane = nil
         }
-        guard let plane else { return .identity }
+        guard let plane else { return nil }
         return PictureFillGeometry.coverTransform(plane: plane, area: area, bounds: size)
     }
 
@@ -165,9 +168,12 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         let yUp = false
         #elseif canImport(AppKit)
         guard let host = layer else { return }
-        let yUp = !host.isGeometryFlipped
+        // The view's own flip, not the layer's flag: AppKit sets a backing layer's `geometryFlipped`
+        // relative to the superview, so inside a flipped SwiftUI host it reads true over a y-up space.
+        let yUp = !isFlipped
         #endif
-        let t = PictureFillGeometry.sublayerTransform(fillTransform, bounds: host.bounds,
+        guard let transform = fillTransform else { return }
+        let t = PictureFillGeometry.sublayerTransform(transform, bounds: host.bounds,
                                                       anchorPoint: host.anchorPoint, yUp: yUp)
         let target = CATransform3DMakeAffineTransform(t)
         guard !CATransform3DEqualToTransform(host.sublayerTransform, target) else { return }
@@ -179,6 +185,9 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
             animation.duration = 0.35
             animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             host.add(animation, forKey: "aether.fill")
+        } else {
+            // A layout or plane change mid-animation retargets: the old animation would ease to the stale zoom.
+            host.removeAnimation(forKey: "aether.fill")
         }
         CATransaction.setDisableActions(true)
         host.sublayerTransform = target
@@ -351,6 +360,7 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         fillSoftwareSize = nil
         videoRectObservation = nil
         applyFillTransform(animated: false)
+        updateClipping()
         guard let hosted = hostedLayer else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)

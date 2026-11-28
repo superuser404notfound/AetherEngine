@@ -26,8 +26,8 @@ the public-API contract.
 - **Stills yield to a starved pipeline on every path (Sodalite#118).** Only the native loopback session armed
   the extractor's yield gate. On a remote HLS transcode and on the software host, session-coupled stills
   read the original file unthrottled, on a transcode over the line that was already too thin for it. Both
-  paths now arm it. The software path counts a tick as healthy while its decoded cushion is not empty and
-  the host is not rebuffering.
+  paths now arm it. On the software path a paused tick counts as healthy, and a playing one needs a decoded
+  cushion, 4 MB of reader runway and no rebuffer, so stills stand back before a thin line stalls.
 
 - **Go Live on a software-path channel no longer lands past the newest media after a native live session
   (AE#1135).** The native path's 1 Hz live window timer ran one more pass after the stop cancelled it. By

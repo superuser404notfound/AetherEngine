@@ -1858,6 +1858,8 @@ If you need it, say so on the tracker instead of working around it.
 - **How it draws.** While an area is set, the engine's layers lay out aspect-fit and the view zooms them with one sublayer transform. That moves the video, the Dolby Vision FEL overlay and a held still together. The view clips the overflow. The native plane is read off `AVPlayerLayer.videoRect`, the software one off `softwareDisplaySize`, and both are followed as they change.
 - **Picture in Picture** turns the zoom off while a PiP fit shapes the layer, because the system window copies the layer's own geometry.
 - **`animated: true`** eases the change over 0.35 s. Use it when a result arrives mid-playback and nothing should jump.
+- **It outlives a load**, like `videoGravity`. A host clears or replaces it on an item switch, or the next title inherits the zoom.
+- **While the picture size is unknown** (a held still across a rebuild, a reused native item before its first frame), the zoom stays as it was instead of dropping to the letterboxed picture.
 
 `PictureFillGeometry` is the same zoom as plain functions, all top-left based:
 
@@ -2313,9 +2315,9 @@ A certificate the host does not accept still reaches the host as `PlaybackErrorK
 
 It is async and read off the main actor; nil when no native item is mounted. The engine's published clock is `item + playlistShiftSeconds`. On a live source whose encoder clock is hours in, the two are thousands of seconds apart in a healthy session, so quote both or neither.
 
-`thumbnailOutcome(at:maxWidth:)` returns the same still as a `StillOutcome`: `.image`, `.yielded` when the request stood back for a starved pipeline (worth repeating), or `.unavailable`. `FrameExtractor` conforms to `StillSource`, the one-method protocol a scanner samples through.
+`thumbnailOutcome(at:maxWidth:)` returns the same still as a `StillOutcome`: `.image`, `.yielded` when the request stood back (a starved pipeline, a cancel or a newer request, all worth repeating), or `.unavailable`. `FrameExtractor` conforms to `StillSource`, the one-method protocol a scanner samples through.
 
-A session-coupled extractor (`makeFrameExtractor()`, `makeFrameExtractor(url:httpHeaders:)`) yields on every playback path. Earlier releases armed the gate only for the native loopback session. A remote HLS transcode and the software host read stills unthrottled, and on a transcode that is the line already too thin for the original file. The native paths measure health by the forward buffer. The software path counts a tick as healthy while its decoded cushion is not empty and the host is not rebuffering.
+A session-coupled extractor (`makeFrameExtractor()`, `makeFrameExtractor(url:httpHeaders:)`) yields on every playback path. Earlier releases armed the gate only for the native loopback session. A remote HLS transcode and the software host read stills unthrottled, and on a transcode that is the line already too thin for the original file. The native paths measure health by the forward buffer. The software path counts a paused tick as healthy, since a paused pipeline cannot starve. A playing tick is healthy while the decoded cushion is not empty, the reader has at least 4 MB fetched ahead of the demuxer (when it has a reader), and the host is not rebuffering.
 
 ### Finding the picture area
 
@@ -2332,6 +2334,7 @@ if let wider = await scanner.advance(playhead: now) { engine.setFillPictureArea(
 ```
 
 - **First pass.** Twelve samples from 10 % to 90 % of the runtime. Samples that yielded are retried every 2 s until the task is cancelled.
+- **Call order.** Start `advance(playhead:)` only after `firstPass()` returned. The actor would interleave the two, which only duplicates readings, but the look-ahead is meant to build on the first pass.
 - **Look-ahead.** `advance(playhead:)` samples one point of a 30 s grid inside the 180 s ahead of the playhead. The area only grows, so a zoom built on it only shrinks, and it shrinks before a wider passage (an IMAX sequence) is on screen. It stops once the area is the full frame.
 - **Conservative by design.** A mostly dark frame is dropped, never read as bars. Frames combine by union. Burned-in text in a bar counts as picture. Fewer than five usable frames give no answer.
 - **Snapping** uses `displayAspect`, the frame's presented aspect with the pixel aspect applied. An anamorphic DVD then snaps against the shape it is shown at. The ratios are 4:3, 1.66, 1.78, 1.85, 2.00, 2.20, 2.35, 2.39 and 2.40, within 2 %.

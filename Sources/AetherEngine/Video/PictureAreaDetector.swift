@@ -25,6 +25,9 @@ public enum PictureAreaDetector {
     public static let minimumPictureExtent: Double = 0.3
     public static let minimumUsableFrames = 5
     public static let snapTolerance: Double = 0.02
+    /// How much of the measured picture a snap may cut, as a share of the cropped axis. About one row
+    /// at the analysis height, which is the measurement's own error; more would crop real picture.
+    public static let maximumInwardSnap: CGFloat = 0.005
     public static let snapRatios: [Double] = [4.0 / 3.0, 1.66, 1.78, 1.85, 2.00, 2.20, 2.35, 2.39, 2.40]
     /// Frames are measured at most this wide; enough to tell 1.85, 2.00 and 2.39 apart.
     public static let analysisWidth = 480
@@ -86,6 +89,9 @@ public enum PictureAreaDetector {
             out = CGRect(x: rect.minX, y: rect.midY - height / 2, width: rect.width, height: height)
         }
         out = out.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        if rect.width - out.width > maximumInwardSnap || rect.height - out.height > maximumInwardSnap {
+            return PictureArea(rect: rect)
+        }
         return PictureArea(rect: out, snappedRatio: ratio)
     }
 }
