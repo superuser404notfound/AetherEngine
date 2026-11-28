@@ -230,7 +230,7 @@ struct Issue240SideReaderLinkPriorityTests {
     @Test("a pending re-anchor moves the running reader instead of rebuilding it")
     func reanchorMovesTheCursorInPlace() async throws {
         let box = SubtitleForwardPrefetcher.SideReaderReanchor(
-            anchorStreamIndex: -1, fallbackDuration: 15, seekTimeout: 5)
+            anchorCandidates: [], fallbackDuration: 15, seekTimeout: 5)
         box.request(10)
 
         let harvested = try await Self.harvestedPTS(link: nil, reanchor: box)
@@ -251,7 +251,7 @@ struct Issue240SideReaderLinkPriorityTests {
     @Test("a busy video path may not hold a pending re-anchor")
     func reanchorSurvivesTheLinkYield() async throws {
         let box = SubtitleForwardPrefetcher.SideReaderReanchor(
-            anchorStreamIndex: -1, fallbackDuration: 15, seekTimeout: 5)
+            anchorCandidates: [], fallbackDuration: 15, seekTimeout: 5)
         box.request(10)
 
         _ = try await Self.harvestedPTS(
@@ -268,7 +268,7 @@ struct Issue240SideReaderLinkPriorityTests {
     @Test("a parked reader may not hold a pending re-anchor")
     func reanchorSurvivesThePark() async throws {
         let box = SubtitleForwardPrefetcher.SideReaderReanchor(
-            anchorStreamIndex: -1, fallbackDuration: 15, seekTimeout: 5)
+            anchorCandidates: [], fallbackDuration: 15, seekTimeout: 5)
 
         // Lead 1 s against a playhead held at 0 parks the loop on the fixture's 3 s cue, and the
         // move arrives after that, from inside the park's own callback.
@@ -282,7 +282,7 @@ struct Issue240SideReaderLinkPriorityTests {
     @Test("only the newest anchor survives a burst")
     func latestRequestWins() {
         let box = SubtitleForwardPrefetcher.SideReaderReanchor(
-            anchorStreamIndex: -1, fallbackDuration: 0, seekTimeout: 1)
+            anchorCandidates: [], fallbackDuration: 0, seekTimeout: 1)
         box.request(600, seekGeneration: 4)
         box.request(30, seekGeneration: 5)
         box.request(302, seekGeneration: 6)
@@ -295,7 +295,7 @@ struct Issue240SideReaderLinkPriorityTests {
     @Test("clearing drops a pending request")
     func clearDropsPending() {
         let box = SubtitleForwardPrefetcher.SideReaderReanchor(
-            anchorStreamIndex: -1, fallbackDuration: 0, seekTimeout: 1)
+            anchorCandidates: [], fallbackDuration: 0, seekTimeout: 1)
         box.request(42)
         box.clear()
         #expect(box.take() == nil)
@@ -312,7 +312,7 @@ struct Issue240SideReaderLinkPriorityTests {
         let subtitleIndex = Int32(try #require(demuxer.subtitleTrackInfos().first).id)
 
         let landed = SubtitleForwardPrefetcher.reposition(
-            demuxer: demuxer, to: 10, anchorStreamIndex: subtitleIndex,
+            demuxer: demuxer, to: 10, anchorCandidates: [subtitleIndex],
             fallbackDuration: 15, timeout: 5)
         #expect(landed == .seek)
 

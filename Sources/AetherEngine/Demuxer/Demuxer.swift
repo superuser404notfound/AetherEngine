@@ -3537,6 +3537,57 @@ public final class Demuxer: @unchecked Sendable {
         return av_find_default_stream_index(ctx)
     }
 
+    /// The stream a side reader should measure a seek to `seconds` against, chosen from the subtitle
+    /// streams it reads (`candidates`). -1 hands the choice to libavformat (video in practice).
+    ///
+    /// AE#1142: an anchor is only usable where its own index reaches. `matroska_read_seek` clamps
+    /// the target up to the anchor's FIRST entry, so a forced track whose first cue is at 900 s
+    /// sent a seek to 6 s to 900 s and nothing in between was read; at or past its LAST entry it
+    /// parses clusters forward until a new one appears, which for a track with no later cue is a
+    /// read to EOF. `mov_seek_stream` clamps to sample 0 the same way. And a usable sparse anchor
+    /// still lands on ITS last cue before the target, which can be minutes back.
+    ///
+    /// So: among the streams whose index brackets the target, the earliest landing inside
+    /// `landingWindowSeconds` wins, which keeps a line that is still on screen (#234). Without one
+    /// the nearest landing wins, and with no usable index at all -1. Streams with no index entries
+    /// (nothing parsed yet, or a container that builds it while reading) keep the old rule, the
+    /// lowest index, but only when no candidate has an index.
+    func sideReaderSeekAnchor(among candidates: some Sequence<Int32>, forSeconds seconds: Double,
+                              landingWindowSeconds: Double = 15) -> Int32 {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext else { return -1 }
+        var unindexed: Int32?
+        var anyIndexed = false
+        var earliestInWindow: (index: Int32, landing: Double)?
+        var nearest: (index: Int32, landing: Double)?
+        for index in candidates.sorted() {
+            guard index >= 0, index < Int32(ctx.pointee.nb_streams),
+                  let stream = ctx.pointee.streams[Int(index)] else { continue }
+            let count = avformat_index_get_entries_count(stream)
+            guard count > 0 else {
+                if unindexed == nil { unindexed = index }
+                continue
+            }
+            anyIndexed = true
+            let tb = stream.pointee.time_base
+            guard let target = Self.ticks(forSeconds: seconds, timeBase: tb) else { continue }
+            let found = av_index_search_timestamp(stream, target, AVSEEK_FLAG_BACKWARD)
+            guard found >= 0, found < count - 1,
+                  let entry = avformat_index_get_entry(stream, found) else { continue }
+            let landing = Double(entry.pointee.timestamp) * Double(tb.num) / Double(tb.den)
+            if seconds - landing <= landingWindowSeconds {
+                if earliestInWindow.map({ landing < $0.landing }) ?? true {
+                    earliestInWindow = (index, landing)
+                }
+            } else if nearest.map({ landing > $0.landing }) ?? true {
+                nearest = (index, landing)
+            }
+        }
+        if let pick = earliestInWindow ?? nearest { return pick.index }
+        return anyIndexed ? -1 : (unindexed ?? -1)
+    }
+
     /// Seek with AVIO read deadline. Returns true if completed; false if aborted.
     /// Needed for VOD cue prewarm: missing/truncated MKV Cues causes matroska to
     /// degrade from "1-2 byte-range reads" into a linear half-file scan on a remote

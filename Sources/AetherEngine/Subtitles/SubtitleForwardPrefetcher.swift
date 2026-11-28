@@ -56,21 +56,31 @@ enum SubtitleForwardPrefetcher {
     /// Position a side-reader demuxer at `seconds`, the one place the rules live (memory rule: all
     /// side readers share every positioning fix). Bounded timestamp seek on the routed subtitle axis
     /// (#234), byte-estimate fallback with the same budget when the container cannot seek by time.
+    ///
+    /// The anchor is picked per move from `anchorCandidates`, because which routed stream can anchor
+    /// depends on the target (AE#1142: a sparse track's index does not reach every position).
     static func reposition(
         demuxer: Demuxer,
         to seconds: Double,
-        anchorStreamIndex: Int32,
+        anchorCandidates: [Int32],
         fallbackDuration: Double,
         timeout: TimeInterval
     ) -> Positioning {
         let seekTo = max(0, seconds - anchorBackscanSeconds)
-        if demuxer.seekBounded(to: seekTo, anchorStreamIndex: anchorStreamIndex, timeout: timeout) {
+        let anchor = seekAnchor(demuxer: demuxer, for: seconds, candidates: anchorCandidates)
+        if demuxer.seekBounded(to: seekTo, anchorStreamIndex: anchor, timeout: timeout) {
             return .seek
         }
         demuxer.markTimestampSeekUnreliable()
         let duration = demuxer.duration > 0 ? demuxer.duration : fallbackDuration
         return demuxer.seekByteEstimate(to: seekTo, knownDuration: duration, timeout: timeout)
             ? .byteEstimate : .failed
+    }
+
+    /// The stream `reposition` measures a move to `seconds` against, exposed for the session log.
+    static func seekAnchor(demuxer: Demuxer, for seconds: Double, candidates: [Int32]) -> Int32 {
+        demuxer.sideReaderSeekAnchor(among: candidates,
+                                     forSeconds: max(0, seconds - anchorBackscanSeconds))
     }
 
     /// #416/#941: what a reposition tells the coverage ledger. Only a completed timestamp seek says
@@ -97,9 +107,9 @@ enum SubtitleForwardPrefetcher {
     /// the constrained link where a seek is already struggling. The running session already holds an
     /// open demuxer with a parsed index; moving its cursor is one seek.
     ///
-    /// The anchor stream and the seek budget are captured from the session that created the box, so
-    /// an in-place move cannot drift from the session-start rules (#234: a -1 seek elects the pacing
-    /// stream by score and lands on a video keyframe in a different Matroska cluster).
+    /// The anchor candidates and the seek budget are captured from the session that created the
+    /// box, so an in-place move cannot drift from the session-start rules (#234: a -1 seek elects the
+    /// pacing stream by score and lands on a video keyframe in a different Matroska cluster).
     final class SideReaderReanchor: @unchecked Sendable {
         /// A pending move plus the seek generation that asked for it (#250). The generation rides
         /// along because the session survives the seek: a fence captured at session start goes
@@ -110,14 +120,14 @@ enum SubtitleForwardPrefetcher {
             var seekGeneration: UInt64
         }
 
-        let anchorStreamIndex: Int32
+        let anchorCandidates: [Int32]
         let fallbackDuration: Double
         let seekTimeout: TimeInterval
         private let lock = NSLock()
         private var pending: Anchor?
 
-        init(anchorStreamIndex: Int32, fallbackDuration: Double, seekTimeout: TimeInterval) {
-            self.anchorStreamIndex = anchorStreamIndex
+        init(anchorCandidates: [Int32], fallbackDuration: Double, seekTimeout: TimeInterval) {
+            self.anchorCandidates = anchorCandidates
             self.fallbackDuration = fallbackDuration
             self.seekTimeout = seekTimeout
         }
@@ -345,7 +355,7 @@ enum SubtitleForwardPrefetcher {
                 currentLanding = target.seconds
                 landingReadOwed = landingWindow?.aheadSeconds != nil
                 let landed = reposition(demuxer: demuxer, to: readFrom,
-                                        anchorStreamIndex: reanchor.anchorStreamIndex,
+                                        anchorCandidates: reanchor.anchorCandidates,
                                         fallbackDuration: reanchor.fallbackDuration,
                                         timeout: reanchor.seekTimeout)
                 EngineLog.emit(

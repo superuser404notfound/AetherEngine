@@ -182,7 +182,7 @@ struct Issue1022LandingWindowTests {
         engine.subtitleDrainTargets[.primary] = 3
         engine.maximumSubtitleOffsetSeconds = 0
         let box = SubtitleForwardPrefetcher.SideReaderReanchor(
-            anchorStreamIndex: 3, fallbackDuration: 150, seekTimeout: 1)
+            anchorCandidates: [3], fallbackDuration: 150, seekTimeout: 1)
         engine.subtitleForwardPrefetchReanchor = box
         defer { engine.cancelSubtitleForwardPrefetcher(reason: .sessionStopped) }
 

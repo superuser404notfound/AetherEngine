@@ -20,6 +20,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A sparse first subtitle track no longer parks the side readers at its first cue (AE#1142).** Both
+  subtitle side readers anchored their seek on the lowest routed track, and Matroska raises a seek target
+  to the anchor's first cue. On an MKV whose first track is a forced track starting at 900 s, the native
+  readers jumped there and every pick on an Apple TV ended `cues=0 exit=deadline`. The anchor is now a
+  track whose index reaches the target. Measured with aetherctl on the reporter's synthetic file: readers
+  parked at `demuxPos=900.0s` with `totalCues=0` before, pre-fill `exit=target` in 160 ms after, and the
+  forward prefetch went from `harvested=0` to 30.
 - **Subtitles off during a native pre-fill stays off (AE#1141).** `clearSubtitle()` while the rendition was
   the display deselected the item, but a select still waiting on its pre-fill landed a second later and
   turned the rendition back on with nothing feeding it. Measured with aetherctl (`nativerender@8,subsoff@8`):

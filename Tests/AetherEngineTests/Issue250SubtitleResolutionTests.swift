@@ -183,7 +183,7 @@ struct Issue250SubtitleResolutionTests {
     @Test("a re-anchor request carries its seek generation")
     func anchorCarriesItsGeneration() {
         let box = SubtitleForwardPrefetcher.SideReaderReanchor(
-            anchorStreamIndex: -1, fallbackDuration: 0, seekTimeout: 1)
+            anchorCandidates: [], fallbackDuration: 0, seekTimeout: 1)
         box.request(302, seekGeneration: 9)
         let taken = box.take()
         #expect(taken?.seconds == 302)

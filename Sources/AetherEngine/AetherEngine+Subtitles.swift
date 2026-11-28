@@ -1174,11 +1174,16 @@ extension AetherEngine {
         // keyframe instead. On Matroska that is a different cluster, so a landing cue further back
         // than one keyframe is behind the read head before the first packet arrives and the seek
         // destination stays dark. Lowest index matches what the score used to elect.
-        let seekAnchor = streams.min() ?? -1
+        //
+        // AE#1142: only among the routed streams whose index reaches the target, picked per move
+        // (`reposition`); a sparse first track would otherwise clamp the seek to its first cue.
+        let anchorCandidates = streams.sorted()
         let engineDisplayDuration = await MainActor.run { [weak self] in self?.duration ?? 0 }
         let readFrom = landingWindow.readStart(for: startAt)
+        let seekAnchor = SubtitleForwardPrefetcher.seekAnchor(
+            demuxer: demuxer, for: readFrom, candidates: anchorCandidates)
         let landed = SubtitleForwardPrefetcher.reposition(
-            demuxer: demuxer, to: readFrom, anchorStreamIndex: seekAnchor,
+            demuxer: demuxer, to: readFrom, anchorCandidates: anchorCandidates,
             fallbackDuration: engineDisplayDuration,
             timeout: Self.sideReaderSeekBudgetSeconds)
         // #416: this session reads forwards from here, and nothing below it is this reader's to
@@ -1196,7 +1201,7 @@ extension AetherEngine {
         // instead of rebuilding the session. Captures this session's positioning inputs, so an
         // in-place move cannot drift from the rules above.
         let reanchor = SubtitleForwardPrefetcher.SideReaderReanchor(
-            anchorStreamIndex: seekAnchor,
+            anchorCandidates: anchorCandidates,
             fallbackDuration: engineDisplayDuration,
             seekTimeout: Self.sideReaderSeekBudgetSeconds)
         // #250: the fence this session's read positions belong to, captured in the same hop that
@@ -2471,7 +2476,10 @@ extension AetherEngine {
         // `av_find_default_stream_index`'s +200 for `discard != AVDISCARD_ALL` and video takes the reference
         // on its own +75. Unlike the prefetcher there was never an accidental subtitle anchor here to lose,
         // so this is not part of the #230 regression, but the landing cue it drops is the same one.
-        let seekAnchor = pairs.map(\.streamIndex).min() ?? -1
+        //
+        // AE#1142: only a routed stream whose index reaches the target can anchor. A forced track
+        // whose first cue sits at 900 s otherwise clamps the seek there and parks the readers.
+        let seekAnchor = demuxer.sideReaderSeekAnchor(among: pairs.map(\.streamIndex), forSeconds: seekTo)
         if !demuxer.seekBounded(to: seekTo, anchorStreamIndex: seekAnchor,
                                 timeout: Self.sideReaderSeekBudgetSeconds) {
             demuxer.markTimestampSeekUnreliable()
