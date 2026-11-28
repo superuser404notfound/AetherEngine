@@ -82,4 +82,54 @@ struct Issue1141NativeSubtitleSelectionStateTests {
         engine.endNativeSubtitleSelectionCarry(restoring: outer)
         #expect(engine.nativeSubtitleSelectionState == .idle)
     }
+
+    @Test("stop moves the generation, so a select from the old session writes nothing", .timeLimit(.minutes(3)))
+    func resetDropsStaleSelect() throws {
+        let engine = try AetherEngine()
+        let stale = engine.nativeSubtitleSelectGeneration
+        engine.stop()
+        #expect(engine.nativeSubtitleSelectGeneration != stale)
+        engine.publishNativeSubtitleSelectionState(.refused(ordinal: 1), generation: stale)
+        #expect(engine.nativeSubtitleSelectionState == .idle)
+    }
+
+    /// Review finding: a refused or preparing pick has nothing on the item, so the deselect branch of
+    /// `clearSubtitle()` never ran for it and the state stayed where Off is ignored.
+    @Test("subtitles off while the rendition is the display ends a refused pick", .timeLimit(.minutes(3)))
+    func offEndsRefusedPick() throws {
+        let engine = try AetherEngine()
+        engine.setNativeSubtitleRendering(true)
+        engine.setNativeSubtitleSelected(track: 1)
+        #expect(engine.nativeSubtitleSelectionState == .refused(ordinal: 1))
+        let generation = engine.nativeSubtitleSelectGeneration
+        engine.clearSubtitle()
+        #expect(engine.nativeSubtitleSelectionState == .idle)
+        #expect(engine.nativeSubtitleSelectGeneration != generation)
+    }
+
+    /// Review finding: the off supersedes the select that would have lifted an outgoing marker's
+    /// silence, so the off lifts it.
+    @Test("subtitles off lifts a silence the superseded select handed back", .timeLimit(.minutes(3)))
+    func offLiftsPendingSilence() throws {
+        let engine = try AetherEngine()
+        let session = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/ae1141.mkv"))
+        let stores = [NativeSubtitleCueStore(), NativeSubtitleCueStore()]
+        session.nativeSubtitleCueStoresForSession = stores
+        engine.nativeVideoSession = session
+        defer { engine.nativeVideoSession = nil }
+        engine.setNativeSubtitleRendering(true)
+        engine.setNativeSubtitleSelected(track: 1)
+        stores[0].servesSilently = true   // the old marker, still waiting for its lift
+        engine.clearSubtitle()
+        #expect(!stores.contains { $0.servesSilently })
+    }
+
+    @Test("an in-app selection is left alone by subtitles off", .timeLimit(.minutes(3)))
+    func offInAppKeepsState() throws {
+        let engine = try AetherEngine()
+        engine.setNativeSubtitleSelected(track: 0)
+        let generation = engine.nativeSubtitleSelectGeneration
+        engine.clearSubtitle()
+        #expect(engine.nativeSubtitleSelectGeneration == generation)
+    }
 }

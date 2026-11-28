@@ -2129,22 +2129,32 @@ extension AetherEngine {
         // `nativeSubtitleReapplyOrdinal`, and `nativeOrdinalToReplay` is guarded on
         // `currentOrdinal == nil`, so clearing it here would ARM the #170 carryover replay and
         // re-select on the next session-preserving reload, the opposite of the point.
-        if let active = activeSubtitleTrackIndex,
-           nativeSubtitleRenderingRequested
-            || RemoteHLSMediaSelection.ordinal(forTrackID: active) != nil
-            || injectedSubtitleRenditionNames[active] != nil,
-           let item = currentAVPlayer?.currentItem {
-            if nativeSubtitleRenderingRequested {
-                // AE#1141: Off is idle at once, and a select still pre-filling must not land after it.
-                nativeSubtitleSelectGeneration &+= 1
-                setNativeSubtitleSelectionState(.idle)
-            }
+        let deselectsItem = activeSubtitleTrackIndex.map { active in
+            nativeSubtitleRenderingRequested
+                || RemoteHLSMediaSelection.ordinal(forTrackID: active) != nil
+                || injectedSubtitleRenditionNames[active] != nil
+        } ?? false
+        // AE#1141: Off is idle at once, and a select still pre-filling must not land after it. A
+        // pick that is preparing or was refused has nothing on the item, so it ends here too.
+        // The superseded select no longer lifts the silence it handed back, so the off does, once
+        // its deselect has landed (AE#1052: AVKit asks for the old rendition until then).
+        var pendingLift: [NativeSubtitleCueStore] = []
+        if nativeSubtitleRenderingRequested,
+           deselectsItem || !nativeSubtitleSelectionState.emptySelectionMeansOff {
+            nativeSubtitleSelectGeneration &+= 1
+            setNativeSubtitleSelectionState(.idle)
+            pendingLift = silenceNativeRendition(ordinal: nil, displaying: nil)
+        }
+        if deselectsItem, let item = currentAVPlayer?.currentItem {
             Task { @MainActor in
+                defer { Self.liftNativeSilence(pendingLift) }
                 self.currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
                 guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
                 item.select(nil, in: group)
                 EngineLog.emit("[AetherEngine] subtitles off: legible selection cleared", category: .engine)
             }
+        } else {
+            Self.liftNativeSilence(pendingLift)
         }
         cancelSidecarTask()
         cancelSubtitleOCRWorker()   // Phase D: subtitles off = worker off (cursors persist)
@@ -2738,8 +2748,8 @@ extension AetherEngine {
                                                  displaying: marker ? nil : ordinal)
         guard let item = currentAVPlayer?.currentItem else {
             Self.liftNativeSilence(pendingLift)
-            // Nothing to select on (software path, or a call ahead of the item). The #93 recovery
-            // replays it onto a fresh item, which moves the state on again.
+            // Nothing to select on (software path, or a call ahead of the item). A later replay
+            // onto a fresh item (#93 recovery) moves the state on again.
             if let ordinal { setNativeSubtitleSelectionState(.refused(ordinal: ordinal)) }
             return
         }
@@ -2802,11 +2812,12 @@ extension AetherEngine {
                     guard generation == nativeSubtitleSelectGeneration else { return }
                 }
                 item.select(option, in: group)
-                let after = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
+                let held = item.currentMediaSelection.selectedMediaOption(in: group)
                 EngineLog.emit("[AetherEngine] AE#1052 native subtitle marker: ordinal=\(ordinal) "
-                               + "selected=\(after), served empty", category: .engine)
+                               + "selected=\(held?.displayName ?? "nil"), served empty", category: .engine)
+                guard currentAVPlayer?.currentItem === item else { return }
                 publishNativeSubtitleSelectionState(
-                    Self.nativeSelectionStateAfterSelect(ordinal: ordinal, landed: after != "nil"),
+                    Self.nativeSelectionStateAfterSelect(ordinal: ordinal, landed: held != nil),
                     generation: generation)
                 return
             }
@@ -2906,6 +2917,8 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] native subtitle select: item=\(itemID) opt=\(option.displayName) groupOpts=\(group.options.count) criteriaAuto=\(currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically ?? true) itemIsCurrent=\(currentAVPlayer?.currentItem === item)", category: .engine)
             item.select(nil, in: group)
             try? await Task.sleep(nanoseconds: 100_000_000)
+            // AE#1141: an Off or a newer pick inside the hop wins.
+            guard generation == nativeSubtitleSelectGeneration else { return }
             item.select(option, in: group)
             let after = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
             EngineLog.emit("[AetherEngine] native subtitle select done: selected=\(after) itemIsCurrent=\(currentAVPlayer?.currentItem === item)", category: .engine)
@@ -2918,6 +2931,7 @@ extension AetherEngine {
                   currentAVPlayer?.currentItem === item {
                 retries += 1
                 try? await Task.sleep(nanoseconds: 700_000_000)
+                guard generation == nativeSubtitleSelectGeneration else { return }
                 item.select(option, in: group)
                 let retried = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
                 EngineLog.emit("[AetherEngine] native subtitle select retry #\(retries): selected=\(retried)", category: .engine)
@@ -2950,8 +2964,10 @@ extension AetherEngine {
         landed ? .selected(ordinal: ordinal) : .refused(ordinal: ordinal)
     }
 
-    /// Load and stop. A reload carrying a pick keeps reading `preparing` through its own stop.
+    /// Load and stop. A reload carrying a pick keeps reading `preparing` through its own stop. The
+    /// generation moves too, so a select still running for the old item writes nothing here.
     func resetNativeSubtitleSelectionState() {
+        nativeSubtitleSelectGeneration &+= 1
         setNativeSubtitleSelectionState(Self.nativeSelectionStateAfterReset(carrying: nativeSubtitleSelectionCarry))
     }
 
