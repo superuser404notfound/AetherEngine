@@ -3472,6 +3472,62 @@ public final class AetherEngine: ObservableObject {
         host.play()
     }
 
+    /// AE#459: the one place the process learns that the panel refuses HDR masters. Called by the
+    /// reactive fallback and, since AE#1143, by the #35 readiness gate when it ends on the media
+    /// playlist after a display rejection. The gate used to fall back without it, so every later HDR
+    /// load on that panel ran the whole escalation again (14 s, then 26 s, measured on an Apple TV 4K
+    /// behind a cable that could not carry the HDR link).
+    @MainActor
+    ///
+    /// Call it before the fallback swaps to the media playlist: it forgets the panel proof, and the
+    /// reloaded session must not read it. The gate passes the display state it read at the refusal; the
+    /// reactive path reads it here, one main-actor hop after the failure.
+    func latchPanelRefusalIfDue(code: Int, session: HLSVideoEngine,
+                                eligibleAtRefusal: Bool? = nil, switchingAtRefusal: Bool? = nil) {
+        // AE#459: the display answered. Display-rejection codes only, never the -1002 parse failure.
+        // AE#535: and only for an HDR master on an HDR-eligible display, or the answer is about the window.
+        if MasterFallbackDecision.isDisplayRejectionCode(code), !Self.panelRefusedHDRMaster {
+            let eligibleNow = eligibleAtRefusal ?? AVPlayer.eligibleForHDRPlayback
+            let switching = switchingAtRefusal ?? displayCriteria.displayModeSwitchInProgress
+            if !session.servedSourceIsHDR {
+                EngineLog.emit(
+                    "[DisplayCriteria] SDR master refused (code=\(code)); this item falls back, "
+                    + "an SDR refusal does not latch the HDR route (#535)",
+                    category: .engine)
+            } else if MasterFallbackDecision.shouldLatchPanelRefusal(
+                code: code, servedMasterIsHDR: true, displayEligibleForHDRNow: eligibleNow,
+                displaySwitchInProgress: switching,
+                panelEngagesHDROnDemand: HLSVideoEngine.builtInPanelEngagesOnDemand,
+                hostAssertsPanelHDR: loadedOptions.panelIsInHDRMode) {
+                Self.panelRefusedHDRMaster = true
+                // A display that refused an HDR master no longer vouches for the HDR proof either. Both
+                // callers latch before their fallback reloads, so that session cannot read the proof.
+                DisplayCriteriaController.forgetPanelProof("a refused HDR master")
+                EngineLog.emit(
+                    "[DisplayCriteria] panel refused an HDR master (code=\(code)); this process "
+                    + "routes HDR sources media-direct until it returns from the background (#588)",
+                    category: .engine)
+            } else if loadedOptions.panelIsInHDRMode {
+                EngineLog.emit(
+                    "[DisplayCriteria] HDR master refused (code=\(code)) while the host asserts the "
+                    + "panel presents HDR; this item falls back, the process does not latch the refusal (#887)",
+                    category: .engine)
+            } else if HLSVideoEngine.builtInPanelEngagesOnDemand {
+                EngineLog.emit(
+                    "[DisplayCriteria] HDR master refused (code=\(code)) on a panel that engages HDR "
+                    + "on demand; this item falls back, later titles still offer the master (#849)",
+                    category: .engine)
+            } else {
+                EngineLog.emit(
+                    "[DisplayCriteria] HDR master refused (code=\(code)) while the display reads "
+                    + "hdrEligible=\(eligibleNow ? "yes" : "no") switching=\(switching ? "yes" : "no") "
+                    + "(#535, #667); this item falls back, the process does not latch the refusal; "
+                    + displayCriteria.criteriaHoldingDescription,
+                    category: .engine)
+            }
+        }
+    }
+
     /// Last-resort consumer revival (#93 residual): device-proven that after a -15628 errorLog
     /// the nudge seek reaches AVPlayer (rate re-asserts) yet its media loader stays dead, zero
     /// GETs follow. Only a fresh AVPlayerItem resets the loader, the same effect as the user's
@@ -3501,48 +3557,7 @@ public final class AetherEngine: ObservableObject {
         session.notePanelPresentsHDR(false)   // AE#1018: the fold resumes at the next keyframe
         masterRefusedByDisplay = MasterFallbackDecision.isDisplayRejectionCode(rejection.code)
             && session.servedSourceIsHDR
-        // AE#459: the display answered. Display-rejection codes only, never the -1002 parse failure.
-        // AE#535: and only for an HDR master on an HDR-eligible display, or the answer is about the window.
-        if MasterFallbackDecision.isDisplayRejectionCode(rejection.code), !Self.panelRefusedHDRMaster {
-            let eligibleNow = AVPlayer.eligibleForHDRPlayback
-            let switching = displayCriteria.displayModeSwitchInProgress
-            if !session.servedSourceIsHDR {
-                EngineLog.emit(
-                    "[DisplayCriteria] SDR master refused (code=\(rejection.code)); this item falls back, "
-                    + "an SDR refusal does not latch the HDR route (#535)",
-                    category: .engine)
-            } else if MasterFallbackDecision.shouldLatchPanelRefusal(
-                code: rejection.code, servedMasterIsHDR: true, displayEligibleForHDRNow: eligibleNow,
-                displaySwitchInProgress: switching,
-                panelEngagesHDROnDemand: HLSVideoEngine.builtInPanelEngagesOnDemand,
-                hostAssertsPanelHDR: loadedOptions.panelIsInHDRMode) {
-                Self.panelRefusedHDRMaster = true
-                // A display that refused an HDR master no longer vouches for the HDR proof either. Cleared
-                // here, before the fallback below reloads, so that session cannot read the proof.
-                DisplayCriteriaController.forgetPanelProof("a refused HDR master")
-                EngineLog.emit(
-                    "[DisplayCriteria] panel refused an HDR master (code=\(rejection.code)); this process "
-                    + "routes HDR sources media-direct until it returns from the background (#588)",
-                    category: .engine)
-            } else if loadedOptions.panelIsInHDRMode {
-                EngineLog.emit(
-                    "[DisplayCriteria] HDR master refused (code=\(rejection.code)) while the host asserts the "
-                    + "panel presents HDR; this item falls back, the process does not latch the refusal (#887)",
-                    category: .engine)
-            } else if HLSVideoEngine.builtInPanelEngagesOnDemand {
-                EngineLog.emit(
-                    "[DisplayCriteria] HDR master refused (code=\(rejection.code)) on a panel that engages HDR "
-                    + "on demand; this item falls back, later titles still offer the master (#849)",
-                    category: .engine)
-            } else {
-                EngineLog.emit(
-                    "[DisplayCriteria] HDR master refused (code=\(rejection.code)) while the display reads "
-                    + "hdrEligible=\(eligibleNow ? "yes" : "no") switching=\(switching ? "yes" : "no") "
-                    + "(#535, #667); this item falls back, the process does not latch the refusal; "
-                    + displayCriteria.criteriaHoldingDescription,
-                    category: .engine)
-            }
-        }
+        latchPanelRefusalIfDue(code: rejection.code, session: session)
         session.markServingMediaAfterFallback()
         nativeSubtitleRenditionsServed = false
         // #227: while AirPlaying, the item under the rejection is the LAN-IP URL; `mediaPlaylistURL` is the
@@ -3723,6 +3738,15 @@ public final class AetherEngine: ObservableObject {
             : Self.startupGateInitialSeconds
         var attempt = 1
         var dataWaitRounds = 0
+        // AE#1143: the display rejection a master attempt failed with, and the display state at that
+        // moment. Read right after each wait, because the next swap replaces the item, and the AE#535 /
+        // AE#667 guards have to judge the refusal's moment, not the fallback's seconds later.
+        var refusal: (code: Int, eligible: Bool, switching: Bool)?
+        func noteRefusal() {
+            if let code = host.startupDisplayRejectionCode {
+                refusal = (code, AVPlayer.eligibleForHDRPlayback, displayCriteria.displayModeSwitchInProgress)
+            }
+        }
         while true {
             // Attempt 1 plays the item the load path already created; later attempts replay it fresh.
             host.play()
@@ -3731,6 +3755,7 @@ public final class AetherEngine: ObservableObject {
                 : Self.startupGateReloadSeconds
             let outcome = await host.awaitStartupReadiness(timeoutSeconds: timeout)
             try checkLoadCurrent(gen)
+            noteRefusal()
 
             // AE#169 round 3: the data-wait exists for a first segment still being produced. A pump
             // that already exited with nothing served (tail resume onto an unproducible final
@@ -3750,7 +3775,8 @@ public final class AetherEngine: ObservableObject {
                 masterAlreadyFellBack: masterFallbackUsed,
                 hasMediaFallbackURL: session.mediaPlaylistURL != nil,
                 dataWaitRounds: dataWaitRounds,
-                productionFinished: productionFinished
+                productionFinished: productionFinished,
+                refusedByDisplay: refusal != nil
             ) {
             case .proceed:
                 return
@@ -3782,7 +3808,7 @@ public final class AetherEngine: ObservableObject {
                     + "\(StartupReadinessGate.masterAttempts), link may still be warming) at "
                     + "\(String(format: "%.2f", position))s",
                     category: .session)
-                host.swapItem(url: airPlayHostSwapped(masterURL), startPosition: position)
+                host.swapItem(url: gateItemURL(masterURL), startPosition: position)
                 attempt += 1
 
             case .fallBackToMedia:
@@ -3790,17 +3816,25 @@ public final class AetherEngine: ObservableObject {
                 // master. It keeps HDR10 + subtitle renditions and, being plain hvc1 without DV signaling,
                 // may start where the cold DV handshake did not. This case is terminal (returns/throws),
                 // so it runs at most once per gate; no guard needed.
-                if let reducedURL = session.reducedHDRMasterPlaylistURL {
+                let masterVerdict = refusal.map { "the display refused the master (code=\($0.code))" }
+                    ?? "master never produced tracks"
+                // AE#1143: after a refusal the reduced master is only worth its 3 s when it differs from
+                // the refused one, i.e. when the master carried DV in SUPPLEMENTAL-CODECS. Otherwise it is
+                // the same HDR variant on the same panel.
+                if let reducedURL = session.reducedHDRMasterPlaylistURL,
+                   refusal == nil || session.masterCarriesSupplementalCodecs {
                     EngineLog.emit(
-                        "[AetherEngine] #35 readiness gate: master never produced tracks; trying the "
+                        "[AetherEngine] #35 readiness gate: \(masterVerdict); trying the "
                         + "HDR-preserving reduced master (subtitles preserved, DV dropped) at "
                         + "\(String(format: "%.2f", position))s",
                         category: .session)
-                    host.swapItem(url: airPlayHostSwapped(reducedURL), startPosition: position)
+                    host.swapItem(url: gateItemURL(reducedURL), startPosition: position)
                     host.play()
                     let reducedOutcome = await host.awaitStartupReadiness(
                         timeoutSeconds: Self.startupGateReloadSeconds)
                     try checkLoadCurrent(gen)
+                    // Its outcome latches nothing: one that starts is an HDR master the panel took, and a
+                    // refusal of it after a cold master failure may be the link still warming (#35).
                     if reducedOutcome == .ready {
                         EngineLog.emit(
                             "[AetherEngine] #35 readiness gate: reduced master started; HDR10 base and "
@@ -3814,15 +3848,23 @@ public final class AetherEngine: ObservableObject {
                 }
                 masterFallbackUsed = true
                 session.notePanelPresentsHDR(false)   // AE#1018
+                // AE#1143: a gate that ends here on a display rejection learned what the reactive path
+                // learns, so it latches the same way. A cold start that only failed or parked does not:
+                // the next title then still gets the DV master over a link that is warm by now (#35).
+                masterRefusedByDisplay = refusal != nil && session.servedSourceIsHDR
+                if let refusal {
+                    latchPanelRefusalIfDue(code: refusal.code, session: session,
+                                           eligibleAtRefusal: refusal.eligible, switchingAtRefusal: refusal.switching)
+                }
                 session.markServingMediaAfterFallback()
                 nativeSubtitleRenditionsServed = false
                 EngineLog.emit(
-                    "[AetherEngine] #35 readiness gate: master never produced tracks after "
-                    + "\(StartupReadinessGate.masterAttempts) attempts; falling back to the media "
+                    "[AetherEngine] #35 readiness gate: \(masterVerdict) after \(attempt) "
+                    + "attempt\(attempt == 1 ? "" : "s"); falling back to the media "
                     + "playlist at \(String(format: "%.2f", position))s (HDR10 base, DV upgrade "
                     + "dropped this session)",
                     category: .session)
-                host.swapItem(url: airPlayHostSwapped(mediaURL), startPosition: position)
+                host.swapItem(url: gateItemURL(mediaURL), startPosition: position)
                 host.play()
                 // Best-effort readiness confirm; the media playlist is the universal-compatible route.
                 // Clearing the gate (defer) lets a genuine residual media failure surface normally via
@@ -8602,6 +8644,13 @@ public final class AetherEngine: ObservableObject {
     /// reach. Identity when no LAN IP resolves.
     func airPlayHostSwapped(_ url: URL) -> URL {
         airPlayPlaybackURL(base: url, playlist: .master) ?? url
+    }
+
+    /// AE#1143: the readiness gate's reloads go onto the LAN IP only for a receiver, the way the first
+    /// mount does. They were rewritten on every gate run, so a gate after a local panel switch reloaded
+    /// the master over the LAN address with no AirPlay route anywhere.
+    func gateItemURL(_ url: URL) -> URL {
+        airPlayActive || airPlayServedMasterToReceiver ? airPlayHostSwapped(url) : url
     }
 
     /// AirPlay loopback URL (#86): rewrite the loopback playback URL to the device's LAN IP so the receiver

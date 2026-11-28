@@ -3117,6 +3117,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// HDR-preserving reduced master URL (#98), subtitle-preserving fallback for the #35 cold-DV gate.
     public var reducedHDRMasterPlaylistURL: URL? { server?.reducedHDRMasterPlaylistURL }
+    var masterCarriesSupplementalCodecs: Bool { server?.masterCarriesSupplementalCodecs ?? false }
 
     /// True once the loopback server has handed out an init or media segment this session (#227). The
     /// AirPlay watchdog reads it: a receiver that refuses the manifest asks for playlists and never for a

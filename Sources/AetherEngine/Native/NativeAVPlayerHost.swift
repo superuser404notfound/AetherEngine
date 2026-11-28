@@ -288,6 +288,25 @@ final class NativeAVPlayerHost {
     var startupReadinessGateActive: Bool = false
     private(set) var lastSuppressedStartupFailure: String?
 
+    /// AE#1143: the display-rejection code the current item failed with, classified the way the
+    /// reactive path in `handleItemFailed` does (a withheld I-frame playlist's -1100 reads -11848).
+    /// Read off the item, not stashed by `handleItemFailed`: the status KVO reaches the main actor
+    /// through a Task, so the gate's poll can see `.failed` before that handler has run.
+    var startupDisplayRejectionCode: Int? {
+        guard let item = playerItem, item.status == .failed else { return nil }
+        return displayRejectionCode(of: item)
+    }
+
+    private func displayRejectionCode(of item: AVPlayerItem) -> Int? {
+        guard let error = item.error as NSError? else { return nil }
+        let withheld = iFramePlaylistWithheld?() ?? false
+        guard MasterFallbackDecision.isMasterRejection(error,
+            mediaErrorCodes: item.errorLog()?.events.map(\.errorStatusCode) ?? [],
+            iFramePlaylistWithheld: withheld) else { return nil }
+        let code = MasterFallbackDecision.rejectionCode(for: error, iFramePlaylistWithheld: withheld)
+        return MasterFallbackDecision.isDisplayRejectionCode(code) ? code : nil
+    }
+
     // MARK: - Seek landing state
 
     /// Monotonic seek counter; only the latest generation clears seekInFlight and publishes the landed time (abandoned seeks complete with finished==false).
@@ -1268,7 +1287,9 @@ final class NativeAVPlayerHost {
                 lastSuppressedStartupFailure = desc
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(sessionID) startup .failed (code=\(code.map(String.init) ?? "?")) "
-                    + "held by the readiness gate: \(desc)",
+                    + "held by the readiness gate"
+                    + (displayRejectionCode(of: item).map { ", a display refusal (code=\($0))" } ?? "")
+                    + ": \(desc)",
                     category: .engine)
                 return
             }

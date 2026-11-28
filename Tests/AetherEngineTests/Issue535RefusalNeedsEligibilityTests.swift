@@ -61,6 +61,7 @@ struct Issue535RefusalNeedsEligibilityTests {
     }
 
     /// A policy test cannot see the call site, so this one reads it: the latch is set only behind the gate.
+    /// Since AE#1143 the site is `latchPanelRefusalIfDue`, shared by the reactive fallback and the gate.
     @Test("The latch site asks the eligibility gate before setting the latch")
     func latchSiteUsesTheGate() throws {
         let source = URL(fileURLWithPath: #filePath)
@@ -69,7 +70,7 @@ struct Issue535RefusalNeedsEligibilityTests {
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/AetherEngine/AetherEngine.swift")
         let text = try #require(try? String(contentsOf: source, encoding: .utf8))
-        let fn = try #require(text.range(of: "func fallBackToMediaPlaylist("))
+        let fn = try #require(text.range(of: "func latchPanelRefusalIfDue("))
         let body = String(text[fn.lowerBound...].prefix(2500))
         let gate = try #require(body.range(of: "shouldLatchPanelRefusal("))
         let set = try #require(body.range(of: "Self.panelRefusedHDRMaster = true"))

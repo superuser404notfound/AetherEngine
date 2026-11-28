@@ -78,6 +78,11 @@ enum StartupReadinessGate {
     /// `productionFinished` reports pump liveness (AE#169 round 3): the data-wait exists for a
     /// first segment still being produced; production that already exited with nothing served can
     /// never satisfy it, so riding the rounds is pure false hope.
+    ///
+    /// AE#1143: `refusedByDisplay` means the item failed with a display rejection, the -11868/-11848
+    /// pair or the withheld I-frame playlist that stands in for it. That is an answer, not a warm-up:
+    /// the #35 cold start fails with -11819 or parks silently, and a reload of the same master onto
+    /// the same panel was measured refusing again 3 s later. So it skips the data-wait and the reload.
     static func nextAction(
         outcome: StartupReadiness,
         attempt: Int,
@@ -86,9 +91,13 @@ enum StartupReadinessGate {
         hasMediaFallbackURL: Bool,
         dataWaitRounds: Int = 0,
         maxDataWaitRounds: Int = maxDataWaitRounds,
-        productionFinished: Bool = false
+        productionFinished: Bool = false,
+        refusedByDisplay: Bool = false
     ) -> StartupGateAction {
         if outcome == .ready { return .proceed }
+        if refusedByDisplay {
+            return !masterAlreadyFellBack && hasMediaFallbackURL ? .fallBackToMedia : .giveUp
+        }
         // First segment not served yet: keep the current master (DV preserved) and keep waiting, bounded
         // by the data-wait budget. Only once the budget is spent, or production has provably exited
         // without serving anything (AE#169 round 3), does an unstarted first segment fall through to
