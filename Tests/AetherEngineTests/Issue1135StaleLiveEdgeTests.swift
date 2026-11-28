@@ -73,8 +73,13 @@ struct Issue1135StaleLiveEdgeTests {
         engine.adoptSessionLiveness(from: Self.liveOptions())
         engine.startLiveWindowTimer(host: host)
 
-        let deadline = Date().addingTimeInterval(20)
-        while (engine.liveWindow?.edgeTime ?? 0) == 0, Date() < deadline {
+        // Counted polls, not a wall-clock deadline. Under a busy main actor (a full parallel CI run)
+        // the poll and the timer pass wake together after the deadline, and the poll ran first and
+        // gave up with the edge still 0. Every poll needs a main-actor turn, so after 20 of them the
+        // 1 s tick is due and queued ahead of the next one.
+        var polls = 0
+        while (engine.liveWindow?.edgeTime ?? 0) == 0, polls < 400 {
+            polls += 1
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         withExtendedLifetime(host) {}
