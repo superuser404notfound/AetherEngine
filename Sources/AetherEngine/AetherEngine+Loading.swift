@@ -421,6 +421,8 @@ extension AetherEngine {
         if let generation { try checkLoadCurrent(generation) }
         releaseRendererChannelPreference(reason: "remote HLS load")
         playbackBackend = .native
+        // Sodalite#118: no producer session on this path, but stills still defer to the pipeline.
+        extractorYieldState.activatePipeline()
         sessionCacheStatusToken &+= 1
         diagnostics.sessionCacheStatus = .nativeRemoteHLS(
             requestedBudgetBytes: options.sessionCacheByteBudget.map { max(0, $0) })
@@ -433,7 +435,7 @@ extension AetherEngine {
         } else {
             host = makeNativeHost()
         }
-        host.playerLayer.videoGravity = _videoGravity
+        host.playerLayer.videoGravity = effectiveVideoGravity
         if !pendingExternalMetadata.isEmpty {
             host.setExternalMetadata(pendingExternalMetadata)
         }
@@ -1523,7 +1525,7 @@ extension AetherEngine {
         } else {
             host = makeNativeHost()
         }
-        host.playerLayer.videoGravity = _videoGravity
+        host.playerLayer.videoGravity = effectiveVideoGravity
         // Forward pre-load externalMetadata so the AVPlayerItem picks it up before AVPlayer assigns it.
         if !pendingExternalMetadata.isEmpty {
             host.setExternalMetadata(pendingExternalMetadata)
@@ -2200,7 +2202,8 @@ extension AetherEngine {
         // #489: same contract as the native host two paths over, which re-applies `_videoGravity`
         // on every build. Without it a software host came up aspect-fit whatever the app had set,
         // and only a second write mid-session took effect.
-        let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
+        let host = SoftwarePlaybackHost(videoGravity: effectiveVideoGravity)
+        extractorYieldState.activatePipeline()
         let upscaleRebuild = UpscaleRouteDecision.forRebuild(
             sessionPlan: sourceUpscalePlan,
             optionOn: sourceUpscalePlan.map { UpscaleSizePolicy(loadedOptions).covers($0) } ?? false,

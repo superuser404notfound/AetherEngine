@@ -1825,6 +1825,8 @@ If you need it, say so on the tracker instead of working around it.
 | Symbol | Notes |
 | --- | --- |
 | `videoGravity` | Fill mode of whichever layer is mounted (`AVPlayerLayer` or the software display layer). Settable; this is the aspect-fit / aspect-fill control. |
+| `setFillPictureArea(_:animated:)`, `fillPictureArea` | Zooms the picture so a part of it covers the bound view: the fill for a film whose black bars are painted into the frame. See [Filling past bars in the picture](#filling-past-bars-in-the-picture). |
+| `PictureFillGeometry` | The zoom as plain math, for a host that renders through AVKit or lays overlays out against the zoomed picture. Same section. |
 | `AetherStillView`, `bindStillView(_:)`, `unbindStillView(_:)` | Holds the outgoing picture across the item swap of an audio switch, for a host that renders the native path through AVKit rather than `AetherPlayerView`. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). An `AetherStillView` is also the surface for `holdOutgoingPicture(on:)`. |
 | `heldPictureFrameWaitSeconds` | The longest a native audio switch waits for the outgoing frame it holds. Default 0.5 s. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). |
 | `holdOutgoingPicture(on:)`, `releaseOutgoingPicture()` | Holds the outgoing picture on an `AetherStillView` the host places, across the host's own next `load()`, until the host releases it. For an episode change that shrinks and fades the old picture. See [Held pictures across an episode change](#held-pictures-across-an-episode-change). |
@@ -1847,6 +1849,31 @@ If you need it, say so on the tracker instead of working around it.
 3. **`presentationAxisMap`.** Cue times and `sourceTime` live on the source axis; `AVPlayerItem.currentTime()` lives on the item axis. They differ by the producer shift.
    - The property itself is never nil. Its three conversions return nil, not a guess, where no seam covers the position.
    - A host or test can also build its own: `init(seams:)`, `anchored(shiftSeconds:)` (one shift covering everything), `appendSeam(shiftSeconds:activatingAtItemSeconds:)`, and `maxSeams` (64; older seams are dropped beyond that).
+
+### Filling past bars in the picture
+
+`setFillPictureArea(_:animated:)` makes a chosen part of the picture cover the bound `AetherPlayerView`. Use it for a 2.39 film delivered as a 16:9 file with the bars painted in. `.resizeAspectFill` finds nothing to crop there, because the raster already matches the screen. nil turns it off and `videoGravity` applies again.
+
+- **The area** is normalized to the frame, 0...1 with the origin top-left. It is usually a `PictureArea.rect` from [Finding the picture area](#finding-the-picture-area). The full frame `(0, 0, 1, 1)` gives exactly what aspect fill gives.
+- **How it draws.** While an area is set, the engine's layers lay out aspect-fit and the view zooms them with one sublayer transform. That moves the video, the Dolby Vision FEL overlay and a held still together. The view clips the overflow. The native plane is read off `AVPlayerLayer.videoRect`, the software one off `softwareDisplaySize`, and both are followed as they change.
+- **Picture in Picture** turns the zoom off while a PiP fit shapes the layer, because the system window copies the layer's own geometry.
+- **`animated: true`** eases the change over 0.35 s. Use it when a result arrives mid-playback and nothing should jump.
+- **It outlives a load**, like `videoGravity`. A host clears or replaces it on an item switch, or the next title inherits the zoom.
+- **While the picture size is unknown** (a held still across a rebuild, a reused native item before its first frame), the zoom stays as it was instead of dropping to the letterboxed picture.
+
+`PictureFillGeometry` is the same zoom as plain functions, all top-left based:
+
+- `coverTransform(presentationSize:area:bounds:)` and `coverTransform(plane:area:bounds:)` give the scale about the centre of `bounds` that makes the area cover it.
+- `planeRect(presentationSize:area:bounds:)` says where the whole picture lands afterwards. A host lays bitmap subtitles out against it.
+- `changesPicture(presentationSize:area:bounds:)` is false when the area already covers the screen, so a host can grey out its control.
+- `sublayerTransform(_:bounds:anchorPoint:yUp:)` re-expresses the transform for a layer with another anchor, or a y-up macOS backing layer.
+
+A host that renders the native path through `AVPlayerViewController` applies `coverTransform` to AVKit's own `AVPlayerLayer`. The engine's property does not reach that layer.
+
+```swift
+engine.setFillPictureArea(area.rect, animated: true)   // zoom past the bars
+engine.setFillPictureArea(nil)                          // back to videoGravity
+```
 
 ### Held pictures across an audio switch
 
@@ -2287,6 +2314,36 @@ A certificate the host does not accept still reaches the host as `PlaybackErrorK
 - `status`: 0 unknown, 1 ready, 2 failed
 
 It is async and read off the main actor; nil when no native item is mounted. The engine's published clock is `item + playlistShiftSeconds`. On a live source whose encoder clock is hours in, the two are thousands of seconds apart in a healthy session, so quote both or neither.
+
+`thumbnailOutcome(at:maxWidth:)` returns the same still as a `StillOutcome`: `.image`, `.yielded` when the request stood back (a starved pipeline, a cancel or a newer request, all worth repeating), or `.unavailable`. `FrameExtractor` conforms to `StillSource`, the one-method protocol a scanner samples through.
+
+A session-coupled extractor (`makeFrameExtractor()`, `makeFrameExtractor(url:httpHeaders:)`) yields on every playback path. Earlier releases armed the gate only for the native loopback session. A remote HLS transcode and the software host read stills unthrottled, and on a transcode that is the line already too thin for the original file. The native paths measure health by the forward buffer. The software path counts a paused tick as healthy, since a paused pipeline cannot starve. A playing tick is healthy while the decoded cushion is not empty, the reader has at least 4 MB fetched ahead of the demuxer (when it has a reader), and the host is not rebuffering.
+
+Two cases differ. A live session skips the 4 MB rule, because near the edge the reader only holds what the origin has sent so far. A tick during a seek or a load gives no verdict, so the healthy run keeps counting and previews come back right after the seek.
+
+### Finding the picture area
+
+`PictureAreaScanner` learns where the picture sits inside the frame, for a film whose black bars are painted into the raster. It samples keyframes through any `StillSource` and returns a `PictureArea`: a normalized `rect`, the cinema ratio it snapped to (`snappedRatio`), and `isFullFrame`.
+
+```swift
+let frames = engine.makeFrameExtractor(url: url)          // a second extractor, not the scrub one
+let scanner = PictureAreaScanner(source: frames, duration: duration,
+                                 displayAspect: presented.width / presented.height,
+                                 seed: cachedArea)
+let first = await scanner.firstPass()                     // nil: too few usable frames yet
+// later, every few seconds while playing:
+if let wider = await scanner.advance(playhead: now) { engine.setFillPictureArea(wider.rect, animated: true) }
+```
+
+- **First pass.** Twelve samples from 10 % to 90 % of the runtime. Samples that yielded are retried every 2 s until the task is cancelled.
+- **Call order.** Start `advance(playhead:)` only after `firstPass()` returned. The actor would interleave the two, which only duplicates readings, but the look-ahead is meant to build on the first pass.
+- **Look-ahead.** `advance(playhead:)` samples one point of a 30 s grid inside the 180 s ahead of the playhead. The area only grows, so a zoom built on it only shrinks, and it shrinks before a wider passage (an IMAX sequence) is on screen. It stops once the area is the full frame.
+- **Conservative by design.** A mostly dark frame is dropped, never read as bars. Frames combine by union. Burned-in text in a bar counts as picture. Fewer than five usable frames give no answer.
+- **Snapping** uses `displayAspect`, the frame's presented aspect with the pixel aspect applied. An anamorphic DVD then snaps against the shape it is shown at. The ratios are 4:3, 1.66, 1.78, 1.85, 2.00, 2.20, 2.35, 2.39 and 2.40, within 2 %.
+- **Use a second extractor.** A `FrameExtractor` cancels its in-flight decode on every new request, so sharing the scrub-preview one would cost the user previews.
+- **Logs.** Each first pass and each change writes one `[PictureArea]` line (samples, usable frames, rect, ratio).
+
+`PictureAreaDetector` exposes the per-frame reading (`reading(of:)`) and the union (`combine(_:displayAspect:)`) on their own, with its thresholds as static constants.
 
 ### Live telemetry
 

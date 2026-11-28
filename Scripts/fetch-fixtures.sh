@@ -23,6 +23,7 @@
 #   long-first-gop-{aac,pcm}.mkv  - 11 s first GOP, then 2 s GOPs; passthrough and bridged audio
 #   bridge-eac3-51.mkv            - 5.1 PCM in MKV, drives the EAC3 audio bridge (AE#561 follow-up)
 #   audio-tail.mkv                - 6 s of video, 70 s of audio, interleaved by time (AE#962)
+#   letterbox239.mp4              - a 2.39 picture with black bars painted into 640x360 (Sodalite#118)
 #
 # Real-world DV / Atmos / multichannel sources have to come from your
 # own library. Drop those into ./Fixtures/user/ (also gitignored)
@@ -430,6 +431,13 @@ ffmpeg -hide_banner -loglevel error -y \
 ffmpeg -hide_banner -loglevel error -y -i "$FIXTURES_DIR/audio-tail-raw.mkv" -c copy \
     -max_interleave_delta 0 "$FIXTURES_DIR/audio-tail.mkv"
 rm -f "$FIXTURES_DIR/audio-tail-raw.mkv"
+
+# A 2.39 picture painted into a 16:9 raster, the shape PictureAreaScanner exists for.
+echo "→ letterbox239.mp4 (2.39 picture letterboxed into 640x360, keyframe every second)"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "testsrc2=size=640x268:rate=24" \
+    -t 10 -vf "pad=640:360:0:46:black" -c:v libx264 -preset veryfast -pix_fmt yuv420p \
+    -g 24 -sc_threshold 0 "$FIXTURES_DIR/letterbox239.mp4"
 
 echo ""
 echo "Done. Try:"

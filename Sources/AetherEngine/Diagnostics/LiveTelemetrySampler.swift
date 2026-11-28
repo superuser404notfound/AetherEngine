@@ -417,9 +417,18 @@ final class LiveTelemetrySampler {
             averageBitrateMbps = declared.average
         }
 
-        // Feed the extractor yield gate (#93 startup): nil on non-native paths keeps the
-        // gate conservative there, but those paths have no active session to gate anyway.
-        engine.extractorYieldState.setForwardBuffer(forwardBufferSeconds)
+        // Feed the extractor yield gate (#93 startup). The software path has no forward buffer in
+        // seconds, so its tick reads the decoded cushion and the rebuffer flag (Sodalite#118).
+        if engine.playbackBackend == .software {
+            engine.extractorYieldState.recordSoftwareTick(ExtractorYieldState.softwareTickVerdict(
+                state: engine.state,
+                isLive: engine.isLive,
+                isRebuffering: engine.softwareHost?.isRebuffering ?? true,
+                displayCushionSeconds: displayCushionSeconds,
+                readerWindowAheadBytes: readerWindowAheadBytes))
+        } else {
+            engine.extractorYieldState.setForwardBuffer(forwardBufferSeconds)
+        }
 
         if let readings = nativeReadings {
             emitLagDiag(engine: engine, readings: readings, netMbps: transferMbps)

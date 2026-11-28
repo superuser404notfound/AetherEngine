@@ -40,7 +40,7 @@ extension AetherEngine {
             return
         }
         dualLayerOutputRoute = route
-        route.setVideoGravity(_videoGravity)
+        route.setVideoGravity(effectiveVideoGravity)
         session.setVideoPacketTap(route.tap)
         EngineLog.emit("[AetherEngine] DV P7 dual-layer: AVPlayer-output route (AVPlayer plays the base layer "
                        + "and audio, the enhancement layer is composed onto its frames"

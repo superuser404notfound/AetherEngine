@@ -144,7 +144,7 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] \(logLabel): superseded while the frame was read", category: .engine)
             return nil
         }
-        guard view.showStill(held.frame, gravity: videoGravity, isHDR: held.isHDR) else {
+        guard view.showStill(held.frame, gravity: effectiveVideoGravity, isHDR: held.isHDR) else {
             heldPictureLastSkip = "frame could not be wrapped for display"
             EngineLog.emit("[AetherEngine] \(logLabel): frame could not be wrapped for display", category: .engine)
             return nil
@@ -194,7 +194,7 @@ extension AetherEngine {
             + Double((ContinuousClock.now - started).components.attoseconds) / 1e18
         let budget = max(0.2, Self.heldPictureDolbyVisionBudgetSeconds - spent)
         let shown = await view.showCompositorStill(file: hold.url, pastFirstFrameBy: hold.offsetSeconds,
-                                                   gravity: videoGravity, budgetSeconds: budget,
+                                                   gravity: effectiveVideoGravity, budgetSeconds: budget,
                                                    deletesFileOnClear: ownedFile != nil)
         guard shown else {
             heldPictureLastSkip = "no frame from the outgoing picture"

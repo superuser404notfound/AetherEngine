@@ -357,9 +357,9 @@ Notes:
 
 | File | What it does |
 | --- | --- |
-| `AetherEngine+FrameExtractor.swift` | `makeFrameExtractor()` convenience for the currently loaded URL. |
+| `AetherEngine+FrameExtractor.swift` | `makeFrameExtractor()` convenience for the currently loaded URL, and `ExtractorYieldState`, the starvation gate every playback path arms (Sodalite#118). |
 | `DolbyVisionStillConverter.swift` | `DolbyVisionStillReshaping` trait. Applies the RPU-carried DV colour transform to a DV P5 / P10.0 base-layer frame (IPT-PQ-C2, not YCbCr), so scrub stills lose the green and magenta cast (#103). |
-| `FrameExtractor.swift` | Off-playback still extraction actor: serial decode queue, cancel-supersede, idle-close. |
+| `FrameExtractor.swift` | Off-playback still extraction actor: serial decode queue, cancel-supersede, idle-close. `StillOutcome` / `StillSource` tell a yielded still from a failed one. |
 | `FrameDecodeContext.swift` | Isolated FFmpeg demux + decode + sws_scale → `CGImage` (thumbnail / preview / snapshot). |
 | `FrameCache.swift` | Bounded LRU: stores isolated per mode, thumbnails bucketed by second. |
 | `FrameTypes.swift` | `FrameMode` (`.thumbnail` / `.preview` / `.snapshot`). |
@@ -540,6 +540,9 @@ Notes:
 | File | What it does |
 | --- | --- |
 | `HLSVideoEngine.swift` | Native path: session orchestrator (start/stop, producer construction and restart, shift handling). |
+| `PictureArea.swift` | `PictureArea`: where the picture sits inside a frame with bars painted in, normalized, with the snapped cinema ratio (Sodalite#118). |
+| `PictureAreaDetector.swift` | Finds the bars in one frame and unions many frames into a `PictureArea`. Dark frames are dropped, never read as bars. |
+| `PictureAreaScanner.swift` | Samples a title's keyframes (first pass, then a look-ahead ahead of the playhead) into a `PictureArea` that only grows. |
 | `KeyframeStillLadder.swift` | Native VOD: which keyframe the sparse scrub-still ladder reads next (one a minute, then every 30 s, nearest the playhead first; with an I-frame rendition served, every segment within 30 of the playhead's before that, read back to back) and whether the origin is idle enough to read it (nothing in flight or queued, no recent refusal, 30 s buffered). Lets `scrubPreviewFrame` answer beyond the resident window on a one-connection plan. |
 | `HLSVideoEngine+AudioRoute.swift` | Native path: audio cascade of stream-copy, then `AudioBridge` (E-AC-3 above stereo by default, FLAC with `.lossless`, or the object-audio bed through `SpatialAudioBridge`), then video-only. |
 | `HLSVideoEngine+SegmentPlanning.swift` | Native path: keyframe / uniform segment plans, extradata and AAC fixups. |
@@ -678,7 +681,8 @@ Notes:
 
 | File | What it does |
 | --- | --- |
-| `AetherPlayerView.swift` | One view for both paths: hosts either `AVPlayerLayer` (native) or `AVSampleBufferDisplayLayer` (software). |
+| `AetherPlayerView.swift` | One view for both paths: hosts either `AVPlayerLayer` (native) or `AVSampleBufferDisplayLayer` (software). Applies the fill zoom as a sublayer transform. |
+| `PictureFillGeometry.swift` | The zoom that makes a part of the picture cover a view, the plane rect after it, and the anchor / y-up adaptation (Sodalite#118). |
 | `AetherStillView.swift` | Public transparent surface a host using AVKit binds (`bindStillView(_:)`), so a picture can be held across an item swap. Also the tile a host passes to `holdOutgoingPicture(on:)`. |
 | `HeldStill.swift` | `HeldStillSurface` and the presenter that shows and clears a held picture on it (AE#711). On an `AetherStillView` each still gets an autoresizing subview of its own, so it follows the view's animated frame (AE#1113). |
 | `AetherScrubPreviewView.swift` | Public scrub preview surface for DV Profile 5 / AV1 10.0, played through its own muted `AVPlayer`. |

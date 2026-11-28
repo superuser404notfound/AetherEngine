@@ -192,6 +192,7 @@ How to wire it: [guide.md › Picture in Picture](guide.md#picture-in-picture). 
 ## Frames, metadata and the audio tap
 
 - **Frames:** the off-playback `FrameExtractor` has `thumbnail` (scrub preview) and `snapshot` (frame-accurate).
+- **Bars painted into the picture:** `PictureAreaScanner` finds where the picture sits inside a letterboxed or pillarboxed frame, and `setFillPictureArea(_:animated:)` zooms it to cover the view. See [api.md › Filling past bars in the picture](api.md#filling-past-bars-in-the-picture).
 - **Probing without playing:** `AetherEngine.probe(url:)` / `probe(source:)` read tracks, HDR and Dolby Vision format, container and disc titles without starting a session, with optional byte and time limits and cancellation. Opt-in passes settle Atmos, HDR10+ and the Dolby Vision enhancement layer. See [api.md › Probing without playing](api.md#probing-without-playing).
 - **Scan type:** `sourceVideoScan` tells a host 1080i from 1080p. See [api.md › Scan type](api.md#scan-type).
 - **Metadata:** `MediaMetadata` (title, artist, album, cover) is parsed on load. A container's album artist fills `artist` when there is no artist.
