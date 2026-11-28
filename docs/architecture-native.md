@@ -58,7 +58,7 @@ This path handles the codecs AVPlayer's HLS-fMP4 pipeline reliably accepts:
 
 - HEVC,
 - progressive H.264,
-- AV1, on devices with a hardware AV1 decoder.
+- AV1, on devices with a hardware AV1 decoder, except Apple TV (AE#1144: the native route shows a black picture there, so tvOS plays AV1 with dav1d).
 
 Interlaced H.264 goes to the software path, which can deinterlace it (#107). The exception is an AirPlay receiver that shows video: then it stays here, and field-coded frames are joined into one sample each (`H264FieldPairJoiner`, AE#1070). Atmos passthrough, the Dolby Vision (DV) HDMI handshake, and HDR10 / HDR10+ tone-mapping by the system all live on this path.
 

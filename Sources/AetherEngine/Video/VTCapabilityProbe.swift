@@ -18,8 +18,38 @@ enum VTCapabilityProbe {
         #endif
         let supported = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)
         EngineLog.emit("[VTProbe] codec=av01 hwSupported=\(supported)", category: .engine)
+        #if os(tvOS)
+        if supported {
+            EngineLog.emit(
+                "[VTProbe] AE#1144: tvOS keeps AV1 on dav1d despite the hardware decoder "
+                + "(native AV1 plays sound over a black picture on the Apple TV 4K 4th generation)",
+                category: .engine)
+        }
+        #endif
         return supported
     }()
+
+    /// AE#1144: whether AV1 may use the hardware decoder, for the native route and for Dolby Vision 10.1
+    /// on the software host. Read this, not `av1Available`, for any decision about where AV1 plays.
+    ///
+    /// On tvOS it may not. The Apple TV 4K (4th generation, A19, tvOS 27.0) passes the probe, and AVPlayer
+    /// then reaches `readyToPlay` and plays the sound, but `isReadyForDisplay` never turns true and no
+    /// error arrives, so no fallback runs. Nobody with that box has shown whether VideoToolbox or AVPlayer
+    /// is the part that fails, so tvOS keeps the route every earlier Apple TV takes: dav1d on the software
+    /// host. `AetherEngine.usesHardwareAV1OnTVOS` lifts the hold to measure a later tvOS.
+    static var av1HardwareUsable: Bool {
+        #if os(tvOS)
+        let isTVOS = true
+        #else
+        let isTVOS = false
+        #endif
+        return VideoRoutingPolicy.usesHardwareAV1(
+            hardwareDecodeSupported: av1Available, isTVOS: isTVOS,
+            allowedOnTVOS: hardwareAV1AllowedOnTVOS)
+    }
+
+    /// Backs `AetherEngine.usesHardwareAV1OnTVOS`. Read when a load routes AV1.
+    nonisolated(unsafe) static var hardwareAV1AllowedOnTVOS = false
 
     /// What the per-format hardware probe could establish. The two consumers read an unclassifiable
     /// format in OPPOSITE directions, which is why this is three-valued rather than a Bool:
@@ -177,4 +207,16 @@ enum VTCapabilityProbe {
         }
     }
 
+}
+
+extension AetherEngine {
+    /// Default off (AE#1144): let tvOS use the hardware AV1 decoder, on the native route and for Dolby
+    /// Vision 10.1 on the software host. Off, every Apple TV plays AV1 with dav1d, because the first box
+    /// with hardware AV1 plays the native route as sound over a black picture. On is for measuring a
+    /// later tvOS on that box. No effect on other platforms. Applies to the next load.
+    @_spi(Diagnostics)
+    public nonisolated static var usesHardwareAV1OnTVOS: Bool {
+        get { VTCapabilityProbe.hardwareAV1AllowedOnTVOS }
+        set { VTCapabilityProbe.hardwareAV1AllowedOnTVOS = newValue }
+    }
 }

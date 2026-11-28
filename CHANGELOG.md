@@ -20,6 +20,11 @@ the public-API contract.
 
 ### Fixed
 
+- **AV1 shows a picture on the Apple TV 4K (4th generation) (AE#1144).** It is the first Apple TV with
+  hardware AV1, so AV1 took the native route, and there AVPlayer played the sound over a black picture,
+  with no error to fall back on. tvOS now keeps AV1 on dav1d, the route every earlier Apple TV takes,
+  Dolby Vision 10.1 included. `AetherEngine.usesHardwareAV1OnTVOS` (`@_spi(Diagnostics)`) lifts that for
+  a test on a later tvOS.
 - **A panel that refuses the HDR master pays for it once, not on every start (AE#1143).** After a display
   switch, the startup readiness gate held the refusal, reloaded the master, tried the reduced master and
   only then fell back, without recording what it had learned. Behind a cable that could not carry the HDR

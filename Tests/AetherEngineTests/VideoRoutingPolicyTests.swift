@@ -67,6 +67,23 @@ struct VideoRoutingPolicyTests {
             codecID: AV_CODEC_ID_AV1, fieldOrder: AV_FIELD_PROGRESSIVE, av1Available: true))
     }
 
+    @Test("AE#1144: tvOS keeps AV1 off the hardware decoder unless a host lifts the hold",
+          .timeLimit(.minutes(3)))
+    func tvOSHoldsHardwareAV1() {
+        #expect(VideoRoutingPolicy.usesHardwareAV1(
+            hardwareDecodeSupported: true, isTVOS: false, allowedOnTVOS: false))
+        #expect(!VideoRoutingPolicy.usesHardwareAV1(
+            hardwareDecodeSupported: true, isTVOS: true, allowedOnTVOS: false))
+        #expect(VideoRoutingPolicy.usesHardwareAV1(
+            hardwareDecodeSupported: true, isTVOS: true, allowedOnTVOS: true))
+        for isTVOS in [false, true] {
+            for allowed in [false, true] {
+                #expect(!VideoRoutingPolicy.usesHardwareAV1(
+                    hardwareDecodeSupported: false, isTVOS: isTVOS, allowedOnTVOS: allowed))
+            }
+        }
+    }
+
     @Test("Only AV1 routing evaluates the hardware capability probe")
     func hardwareProbeIsLazy() {
         var calls = 0
