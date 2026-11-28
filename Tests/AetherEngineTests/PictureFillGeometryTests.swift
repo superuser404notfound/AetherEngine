@@ -18,14 +18,14 @@ struct PictureFillGeometryTests {
         return CGPoint(x: q.x + c.x, y: q.y + c.y)
     }
 
-    @Test("the full frame as area reproduces aspect fill", .timeLimit(.minutes(3)))
+    @Test("the full frame as area reproduces aspect fill (Sodalite#118)", .timeLimit(.minutes(3)))
     func fullFrameEqualsAspectFill() {
         let plane = PictureFillGeometry.planeRect(presentationSize: CGSize(width: 1440, height: 1080), area: full,
                                                   bounds: CGSize(width: 1920, height: 1080))
         #expect(close(plane, CGRect(x: 0, y: -180, width: 1920, height: 1440)))
     }
 
-    @Test("a 2.39 band in a 16:9 picture covers a 16:9 screen", .timeLimit(.minutes(3)))
+    @Test("a 2.39 band in a 16:9 picture covers a 16:9 screen (Sodalite#118)", .timeLimit(.minutes(3)))
     func letterbox239CoversScreen() {
         let size = CGSize(width: 1920, height: 1080)
         let t = PictureFillGeometry.coverTransform(presentationSize: size, area: scope, bounds: size)
@@ -35,7 +35,7 @@ struct PictureFillGeometryTests {
         #expect(close(plane, CGRect(x: -330.7, y: -186.0, width: 2581.3, height: 1452.0)))
     }
 
-    @Test("an off-centre area is moved to the centre", .timeLimit(.minutes(3)))
+    @Test("an off-centre area is moved to the centre (Sodalite#118)", .timeLimit(.minutes(3)))
     func offCentreAreaIsCentred() {
         let size = CGSize(width: 1920, height: 1080)
         let area = scope.offsetBy(dx: 0, dy: -0.05)
@@ -46,7 +46,7 @@ struct PictureFillGeometryTests {
         #expect(abs(mapped.y - 540) <= 0.5)
     }
 
-    @Test("the cover scale follows the bounds", .timeLimit(.minutes(3)))
+    @Test("the cover scale follows the bounds (Sodalite#118)", .timeLimit(.minutes(3)))
     func coverTransformFollowsBounds() {
         let size = CGSize(width: 1920, height: 1080)
         let pillar = SyntheticFrame.centred(ratio: 4.0 / 3.0)
@@ -64,7 +64,7 @@ struct PictureFillGeometryTests {
         }
     }
 
-    @Test("a picture that already covers the screen changes nothing", .timeLimit(.minutes(3)))
+    @Test("a picture that already covers the screen changes nothing (Sodalite#118)", .timeLimit(.minutes(3)))
     func noChangeWhenAlreadyCovering() {
         let size = CGSize(width: 2390, height: 1000)
         #expect(!PictureFillGeometry.changesPicture(presentationSize: size, area: full, bounds: size))
@@ -72,7 +72,7 @@ struct PictureFillGeometryTests {
         #expect(PictureFillGeometry.changesPicture(presentationSize: wide, area: scope, bounds: wide))
     }
 
-    @Test("an unknown size or empty bounds gives the identity", .timeLimit(.minutes(3)))
+    @Test("an unknown size or empty bounds gives the identity (Sodalite#118)", .timeLimit(.minutes(3)))
     func degenerateInputsAreIdentity() {
         #expect(PictureFillGeometry.coverTransform(presentationSize: .zero, area: scope,
                                                    bounds: CGSize(width: 1920, height: 1080)).isIdentity)
@@ -80,7 +80,7 @@ struct PictureFillGeometryTests {
                                                    bounds: .zero).isIdentity)
     }
 
-    @Test("a bottom-left anchored, y-up layer maps the area centre to the middle", .timeLimit(.minutes(3)))
+    @Test("a bottom-left anchored, y-up layer maps the area centre to the middle (Sodalite#118)", .timeLimit(.minutes(3)))
     func sublayerTransformForYUpLayer() {
         let size = CGSize(width: 1920, height: 1080)
         let area = scope.offsetBy(dx: 0, dy: -0.05)
@@ -97,7 +97,7 @@ struct PictureFillGeometryTests {
 @Suite("Engine fill area")
 struct EngineFillAreaTests {
     @MainActor
-    @Test("a fill area lays the engine's layers out aspect-fit and nil restores the host's gravity",
+    @Test("a fill area lays the engine's layers out aspect-fit and nil restores the host's gravity (Sodalite#118)",
           .timeLimit(.minutes(3)))
     func fillAreaOverridesGravity() throws {
         let engine = try AetherEngine()
@@ -111,7 +111,7 @@ struct EngineFillAreaTests {
     }
 
     @MainActor
-    @Test("a bound view zooms once the software size is known", .timeLimit(.minutes(3)))
+    @Test("a bound view zooms once the software size is known (Sodalite#118)", .timeLimit(.minutes(3)))
     func boundViewGetsSublayerTransform() throws {
         let engine = try AetherEngine()
         let view = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080))
@@ -140,7 +140,7 @@ struct EngineFillAreaTests {
     }
 
     @MainActor
-    @Test("the zoom holds while the picture size is briefly unknown (a held still across a rebuild)",
+    @Test("the zoom holds while the picture size is briefly unknown (a held still across a rebuild) (Sodalite#118)",
           .timeLimit(.minutes(3)))
     func zoomHoldsWhilePlaneIsUnknown() throws {
         let engine = try AetherEngine()
@@ -155,7 +155,7 @@ struct EngineFillAreaTests {
     }
 
     @MainActor
-    @Test("a surface the layer falls back to after an unbind keeps the zoom", .timeLimit(.minutes(3)))
+    @Test("a surface the layer falls back to after an unbind keeps the zoom (Sodalite#118)", .timeLimit(.minutes(3)))
     func fallbackSurfaceKeepsZoom() throws {
         let engine = try AetherEngine()
         let first = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080))
@@ -172,7 +172,7 @@ struct EngineFillAreaTests {
 
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
     @MainActor
-    @Test("a detached view gives clipping back even with no layer hosted", .timeLimit(.minutes(3)))
+    @Test("a detached view gives clipping back even with no layer hosted (Sodalite#118)", .timeLimit(.minutes(3)))
     func detachRestoresClipping() throws {
         let view = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080))
         let host = try hostLayer(view)

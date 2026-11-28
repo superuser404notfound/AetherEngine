@@ -63,7 +63,7 @@ struct PictureAreaDetectorTests {
         PictureAreaDetector.reading(of: SyntheticFrame.make(picture: picture, barNoise: barNoise, extra: extra))
     }
 
-    @Test("a 2.39 picture in a 16:9 frame reads as its band", .timeLimit(.minutes(3)))
+    @Test("a 2.39 picture in a 16:9 frame reads as its band (Sodalite#118)", .timeLimit(.minutes(3)))
     func letterbox239In16x9() throws {
         let r = try #require(reading(SyntheticFrame.centred(ratio: 2.39)))
         #expect(abs(r.rect.height - 0.744) <= 0.01)
@@ -71,14 +71,14 @@ struct PictureAreaDetectorTests {
         #expect(abs(r.rect.width - 1) <= 0.01)
     }
 
-    @Test("a 4:3 picture in a 16:9 frame reads as its pillar", .timeLimit(.minutes(3)))
+    @Test("a 4:3 picture in a 16:9 frame reads as its pillar (Sodalite#118)", .timeLimit(.minutes(3)))
     func pillarbox4x3In16x9() throws {
         let r = try #require(reading(SyntheticFrame.centred(ratio: 4.0 / 3.0)))
         #expect(abs(r.rect.width - 0.75) <= 0.01)
         #expect(abs(r.rect.height - 1) <= 0.01)
     }
 
-    @Test("a windowboxed picture is inset on both axes", .timeLimit(.minutes(3)))
+    @Test("a windowboxed picture is inset on both axes (Sodalite#118)", .timeLimit(.minutes(3)))
     func windowbox() throws {
         let r = try #require(reading(CGRect(x: 0.1, y: 0.12, width: 0.8, height: 0.76)))
         #expect(abs(r.rect.minX - 0.1) <= 0.01)
@@ -87,20 +87,20 @@ struct PictureAreaDetectorTests {
         #expect(abs(r.rect.height - 0.76) <= 0.01)
     }
 
-    @Test("frames without bars combine to the full frame", .timeLimit(.minutes(3)))
+    @Test("frames without bars combine to the full frame (Sodalite#118)", .timeLimit(.minutes(3)))
     func noBarsIsFullFrame() throws {
         let r = try #require(reading(Self.full))
         let area = try #require(PictureAreaDetector.combine(Array(repeating: r, count: 5), displayAspect: 16.0 / 9.0))
         #expect(area.isFullFrame)
     }
 
-    @Test("a dark scene is unusable, never a bar", .timeLimit(.minutes(3)))
+    @Test("a dark scene is unusable, never a bar (Sodalite#118)", .timeLimit(.minutes(3)))
     func darkSceneIsUnusable() {
         let image = SyntheticFrame.make(picture: Self.full, pictureLuma: 0.03)
         #expect(PictureAreaDetector.reading(of: image) == nil)
     }
 
-    @Test("grain in the bars still reads as bar", .timeLimit(.minutes(3)))
+    @Test("grain in the bars still reads as bar (Sodalite#118)", .timeLimit(.minutes(3)))
     func grainInBarsStillBar() throws {
         let clean = try #require(reading(SyntheticFrame.centred(ratio: 2.39)))
         let grainy = try #require(reading(SyntheticFrame.centred(ratio: 2.39), barNoise: 0.05))
@@ -108,7 +108,7 @@ struct PictureAreaDetectorTests {
         #expect(abs(clean.rect.maxY - grainy.rect.maxY) <= 0.005)
     }
 
-    @Test("burned-in text in the bottom bar counts as picture", .timeLimit(.minutes(3)))
+    @Test("burned-in text in the bottom bar counts as picture (Sodalite#118)", .timeLimit(.minutes(3)))
     func textInBarCountsAsPicture() throws {
         let band = SyntheticFrame.centred(ratio: 2.39)
         let text = CGRect(x: 0.4, y: band.maxY + 0.03, width: 0.2, height: 0.04)
@@ -116,7 +116,7 @@ struct PictureAreaDetectorTests {
         #expect(r.rect.maxY >= text.maxY - 0.005)
     }
 
-    @Test("one full-frame passage keeps the union at full frame", .timeLimit(.minutes(3)))
+    @Test("one full-frame passage keeps the union at full frame (Sodalite#118)", .timeLimit(.minutes(3)))
     func unionKeepsImaxPassage() throws {
         let scope = try #require(reading(SyntheticFrame.centred(ratio: 2.39)))
         let imax = try #require(reading(Self.full))
@@ -125,13 +125,13 @@ struct PictureAreaDetectorTests {
         #expect(area.isFullFrame)
     }
 
-    @Test("fewer than five usable frames give no answer", .timeLimit(.minutes(3)))
+    @Test("fewer than five usable frames give no answer (Sodalite#118)", .timeLimit(.minutes(3)))
     func tooFewUsableIsNil() throws {
         let scope = try #require(reading(SyntheticFrame.centred(ratio: 2.39)))
         #expect(PictureAreaDetector.combine(Array(repeating: scope, count: 4), displayAspect: 16.0 / 9.0) == nil)
     }
 
-    @Test("a measurement close to 2.39 snaps to it", .timeLimit(.minutes(3)))
+    @Test("a measurement close to 2.39 snaps to it (Sodalite#118)", .timeLimit(.minutes(3)))
     func snapsTo239() throws {
         let measured = PictureAreaReading(rect: CGRect(x: 0, y: 0.126, width: 1, height: 0.748))
         let area = try #require(PictureAreaDetector.combine(Array(repeating: measured, count: 5),
@@ -141,7 +141,7 @@ struct PictureAreaDetectorTests {
         #expect(abs(area.rect.midY - 0.5) <= 0.0005)
     }
 
-    @Test("snapping uses the display aspect, not the coded one", .timeLimit(.minutes(3)))
+    @Test("snapping uses the display aspect, not the coded one (Sodalite#118)", .timeLimit(.minutes(3)))
     func snapsUsingDisplayAspect() throws {
         // 720x576 at 64:45 presents as 1024x576; the same normalized band is 2.35 there and 1.65 coded.
         let measured = PictureAreaReading(rect: CGRect(x: 0, y: 0.122, width: 1, height: 0.756))
@@ -153,7 +153,7 @@ struct PictureAreaDetectorTests {
         #expect(coded.snappedRatio != 2.35)
     }
 
-    @Test("a ratio outside every snap tolerance keeps its measured rect", .timeLimit(.minutes(3)))
+    @Test("a ratio outside every snap tolerance keeps its measured rect (Sodalite#118)", .timeLimit(.minutes(3)))
     func noSnapOutsideTolerance() throws {
         let h = (16.0 / 9.0) / 2.10
         let measured = PictureAreaReading(rect: CGRect(x: 0, y: (1 - h) / 2, width: 1, height: h))
@@ -163,7 +163,7 @@ struct PictureAreaDetectorTests {
         #expect(abs(area.rect.height - h) <= 0.0005)
     }
 
-    @Test("snapping never cuts more than a sliver of measured picture", .timeLimit(.minutes(3)))
+    @Test("snapping never cuts more than a sliver of measured picture (Sodalite#118)", .timeLimit(.minutes(3)))
     func snapDoesNotCropInward() throws {
         // 2.33 is within 2 % of 2.35, but snapping would cut 0.65 % of the height.
         let h = (16.0 / 9.0) / 2.33

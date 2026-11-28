@@ -34,7 +34,7 @@ private let dark = SyntheticFrame.make(picture: CGRect(x: 0, y: 0, width: 1, hei
 struct PictureAreaScannerTests {
     private let aspect = 16.0 / 9.0
 
-    @Test("the first pass samples twelve points from 10 % to 90 %", .timeLimit(.minutes(3)))
+    @Test("the first pass samples twelve points from 10 % to 90 % (Sodalite#118)", .timeLimit(.minutes(3)))
     func firstPassSamplesTwelveEvenly() async throws {
         let stills = ScriptedStills { _ in scope }
         let scanner = PictureAreaScanner(source: stills, duration: 1100, displayAspect: aspect)
@@ -48,7 +48,7 @@ struct PictureAreaScannerTests {
         #expect(abs(asked[1] - 190) < 0.001)
     }
 
-    @Test("a yielded sample is asked again", .timeLimit(.minutes(3)))
+    @Test("a yielded sample is asked again (Sodalite#118)", .timeLimit(.minutes(3)))
     func yieldedSamplesAreRetried() async throws {
         let stills = ScriptedStills(yields: [110: 2]) { _ in scope }
         let scanner = PictureAreaScanner(source: stills, duration: 1100, displayAspect: aspect,
@@ -58,7 +58,7 @@ struct PictureAreaScannerTests {
         #expect(asked.filter { abs($0 - 110) < 0.001 }.count == 3)
     }
 
-    @Test("a seed skips the first pass", .timeLimit(.minutes(3)))
+    @Test("a seed skips the first pass (Sodalite#118)", .timeLimit(.minutes(3)))
     func seedSkipsFirstPass() async throws {
         let stills = ScriptedStills { _ in scope }
         let seed = PictureArea(rect: SyntheticFrame.centred(ratio: 2.39), snappedRatio: 2.39)
@@ -67,7 +67,7 @@ struct PictureAreaScannerTests {
         #expect(await stills.asked.isEmpty)
     }
 
-    @Test("the look-ahead widens the area before the playhead reaches the wider passage",
+    @Test("the look-ahead widens the area before the playhead reaches the wider passage (Sodalite#118)",
           .timeLimit(.minutes(3)))
     func advanceWidensBeforePlayheadArrives() async throws {
         let stills = ScriptedStills { t in (600...640).contains(t) ? fullPicture : scope }
@@ -83,7 +83,7 @@ struct PictureAreaScannerTests {
         #expect(asked.allSatisfy { $0 > 450 && $0 <= 630 })
     }
 
-    @Test("the look-ahead never narrows the area", .timeLimit(.minutes(3)))
+    @Test("the look-ahead never narrows the area (Sodalite#118)", .timeLimit(.minutes(3)))
     func advanceNeverNarrows() async throws {
         let narrower = SyntheticFrame.make(picture: SyntheticFrame.centred(ratio: 2.76))
         let stills = ScriptedStills { t in t < 1000 ? scope : narrower }
@@ -94,7 +94,7 @@ struct PictureAreaScannerTests {
         #expect(await stills.asked.contains { $0 > 1000 })
     }
 
-    @Test("a full-frame area stops the look-ahead", .timeLimit(.minutes(3)))
+    @Test("a full-frame area stops the look-ahead (Sodalite#118)", .timeLimit(.minutes(3)))
     func stopsAtFullFrame() async throws {
         let stills = ScriptedStills { _ in fullPicture }
         let scanner = PictureAreaScanner(source: stills, duration: 1100, displayAspect: aspect)
@@ -103,7 +103,7 @@ struct PictureAreaScannerTests {
         #expect(await stills.asked.count == 12)
     }
 
-    @Test("a dark first pass gives no answer, the look-ahead finishes the job", .timeLimit(.minutes(3)))
+    @Test("a dark first pass gives no answer, the look-ahead finishes the job (Sodalite#118)", .timeLimit(.minutes(3)))
     func lookAheadCompletesAfterThinFirstPass() async throws {
         // Three usable first-pass frames (the last three), the rest dark until 1000 s.
         let stills = ScriptedStills { t in t >= 750 ? scope : dark }
@@ -116,7 +116,7 @@ struct PictureAreaScannerTests {
         #expect(area?.snappedRatio.map { (2.39...2.40).contains($0) } == true)
     }
 
-    @Test("cancelling the task ends the first pass", .timeLimit(.minutes(3)))
+    @Test("cancelling the task ends the first pass (Sodalite#118)", .timeLimit(.minutes(3)))
     func cancellationStopsFirstPass() async throws {
         let stills = ScriptedStills(yields: [110: 1_000_000]) { _ in scope }
         let scanner = PictureAreaScanner(source: stills, duration: 1100, displayAspect: aspect,

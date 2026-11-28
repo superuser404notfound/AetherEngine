@@ -2302,7 +2302,6 @@ public final class AetherEngine: ObservableObject {
         boundSurfaces.removeAll { $0.view == nil || $0.view === view }
         boundSurfaces.append(BoundSurface(view: view))
         presentCurrentLayer()
-        refreshFillTransform()
     }
 
     /// Bind the surface the engine holds the picture on across the item swap of an audio-track switch,

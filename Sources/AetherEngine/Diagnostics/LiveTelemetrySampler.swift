@@ -420,11 +420,12 @@ final class LiveTelemetrySampler {
         // Feed the extractor yield gate (#93 startup). The software path has no forward buffer in
         // seconds, so its tick reads the decoded cushion and the rebuffer flag (Sodalite#118).
         if engine.playbackBackend == .software {
-            engine.extractorYieldState.recordTick(healthy: ExtractorYieldState.softwareTickIsHealthy(
+            engine.extractorYieldState.recordSoftwareTick(ExtractorYieldState.softwareTickVerdict(
                 state: engine.state,
+                isLive: engine.isLive,
                 isRebuffering: engine.softwareHost?.isRebuffering ?? true,
                 displayCushionSeconds: displayCushionSeconds,
-                readerWindowAheadBytes: readerWindowAheadBytes.map { Int(clamping: $0) }))
+                readerWindowAheadBytes: readerWindowAheadBytes))
         } else {
             engine.extractorYieldState.setForwardBuffer(forwardBufferSeconds)
         }

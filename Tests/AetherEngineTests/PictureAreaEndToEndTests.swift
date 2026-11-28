@@ -14,7 +14,7 @@ private func fixtureURL(_ name: String) -> URL {
 
 @Suite("Picture area end to end")
 struct PictureAreaEndToEndTests {
-    @Test("the scanner finds the bars a real decode carries",
+    @Test("the scanner finds the bars a real decode carries (Sodalite#118)",
           .enabled(if: FileManager.default.fileExists(atPath: fixtureURL("letterbox239.mp4").path),
                    "run Scripts/fetch-fixtures.sh"),
           .timeLimit(.minutes(3)))

@@ -101,9 +101,7 @@ public actor PictureAreaScanner {
     private func recompute() -> PictureArea? {
         guard let seed else { return PictureAreaDetector.combine(readings, displayAspect: displayAspect) }
         guard !readings.isEmpty else { return seed }
-        let union = readings.reduce(seed.rect) { $0.union($1.rect) }
-        if PictureArea(rect: union).isFullFrame { return .fullFrame }
-        return PictureAreaDetector.snapped(union, displayAspect: displayAspect)
+        return PictureAreaDetector.combine(rects: [seed.rect] + readings.map(\.rect), displayAspect: displayAspect)
     }
 
     /// Snapping recomputes a rect from its ratio, so an unchanged union can come back a few ulps off.

@@ -19,7 +19,7 @@ private func fixtureExists(_ name: String) -> Bool {
 /// share the bare nil `thumbnail(at:)` returns (Sodalite#118).
 @Suite("FrameExtractor still outcome")
 struct FrameExtractorOutcomeTests {
-    @Test("a starved pipeline reports yielded",
+    @Test("a starved pipeline reports yielded (Sodalite#118)",
           .enabled(if: fixtureExists("sdr-h264.mp4"), "run Scripts/fetch-fixtures.sh"),
           .timeLimit(.minutes(3)))
     func yieldReportsYielded() async {
@@ -33,7 +33,7 @@ struct FrameExtractorOutcomeTests {
         await extractor.shutdown()
     }
 
-    @Test("no gate decodes an image",
+    @Test("no gate decodes an image (Sodalite#118)",
           .enabled(if: fixtureExists("sdr-h264.mp4"), "run Scripts/fetch-fixtures.sh"),
           .timeLimit(.minutes(3)))
     func noGateReturnsImage() async {
@@ -48,7 +48,7 @@ struct FrameExtractorOutcomeTests {
         await extractor.shutdown()
     }
 
-    @Test("a source that cannot open is unavailable", .timeLimit(.minutes(3)))
+    @Test("a source that cannot open is unavailable (Sodalite#118)", .timeLimit(.minutes(3)))
     func badURLIsUnavailable() async {
         let missing = URL(fileURLWithPath: "/nonexistent/aether-\(UUID().uuidString).mp4")
         let extractor = FrameExtractor(url: missing)
@@ -61,7 +61,7 @@ struct FrameExtractorOutcomeTests {
         await extractor.shutdown()
     }
 
-    @Test("a cancelled request is worth repeating, not a failure", .timeLimit(.minutes(3)))
+    @Test("a cancelled request is worth repeating, not a failure (Sodalite#118)", .timeLimit(.minutes(3)))
     func cancelledIsYielded() async {
         let missing = URL(fileURLWithPath: "/nonexistent/aether-\(UUID().uuidString).mp4")
         let extractor = FrameExtractor(url: missing)

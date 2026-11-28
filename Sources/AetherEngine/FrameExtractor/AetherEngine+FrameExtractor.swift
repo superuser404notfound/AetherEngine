@@ -55,15 +55,30 @@ final class ExtractorYieldState: @unchecked Sendable {
     /// fetched ahead of the demuxer are the early warning on a thin line.
     static let softwareMinimumReaderRunwayBytes = 4 * 1_048_576
 
+    /// A software tick's verdict; nil leaves the healthy run as it is.
+    func recordSoftwareTick(_ healthy: Bool?) {
+        guard let healthy else { return }
+        recordTick(healthy: healthy)
+    }
+
     /// The software path has no forward buffer in seconds (the pump is renderer-back-pressured). A
     /// paused pipeline cannot starve; after a paused seek it holds one frame and a zero cushion, and
     /// gating on that cost every scrub preview until play. A playing one is healthy while its cushion
     /// is not empty, its reader runway (when it has a reader) is deep enough, and it is not rebuffering.
-    static func softwareTickIsHealthy(state: PlaybackState, isRebuffering: Bool,
-                                      displayCushionSeconds: Double?, readerWindowAheadBytes: Int?) -> Bool {
+    /// A seek or a load gives no verdict: resetting the run there held every preview back for three
+    /// seconds after each seek. Live is not held to the runway, because near the edge the reader only
+    /// has what the origin sent so far, a few MB at most, and every DVR preview would stand back.
+    static func softwareTickVerdict(state: PlaybackState, isLive: Bool, isRebuffering: Bool,
+                                    displayCushionSeconds: Double?, readerWindowAheadBytes: Int?) -> Bool? {
         guard !isRebuffering else { return false }
-        if state == .paused { return true }
-        guard state == .playing, (displayCushionSeconds ?? 0) > 0 else { return false }
+        switch state {
+        case .paused: return true
+        case .seeking, .loading: return nil
+        case .playing: break
+        default: return false
+        }
+        guard (displayCushionSeconds ?? 0) > 0 else { return false }
+        if isLive { return true }
         return (readerWindowAheadBytes ?? Int.max) >= softwareMinimumReaderRunwayBytes
     }
 

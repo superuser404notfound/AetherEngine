@@ -25,8 +25,9 @@ public enum PictureAreaDetector {
     public static let minimumPictureExtent: Double = 0.3
     public static let minimumUsableFrames = 5
     public static let snapTolerance: Double = 0.02
-    /// How much of the measured picture a snap may cut, as a share of the cropped axis. About one row
-    /// at the analysis height, which is the measurement's own error; more would crop real picture.
+    /// How much of the measured picture a snap may cut, in frame units (a share of the whole frame's
+    /// axis, not of the picture). About 1.4 rows at the analysis height of 270, which is the
+    /// measurement's own error; more would crop real picture.
     public static let maximumInwardSnap: CGFloat = 0.005
     public static let snapRatios: [Double] = [4.0 / 3.0, 1.66, 1.78, 1.85, 2.00, 2.20, 2.35, 2.39, 2.40]
     /// Frames are measured at most this wide; enough to tell 1.85, 2.00 and 2.39 apart.
@@ -66,10 +67,15 @@ public enum PictureAreaDetector {
     /// source snaps against the shape it is shown at, not the shape it is coded at.
     public static func combine(_ readings: [PictureAreaReading], displayAspect: Double) -> PictureArea? {
         guard readings.count >= minimumUsableFrames, displayAspect > 0 else { return nil }
-        var union = readings[0].rect
-        for r in readings.dropFirst() { union = union.union(r.rect) }
-        let area = PictureArea(rect: union)
+        return combine(rects: readings.map(\.rect), displayAspect: displayAspect)
+    }
+
+    /// Union and snap without the frame minimum; a scanner seeded from an earlier scan adds its seed.
+    static func combine(rects: [CGRect], displayAspect: Double) -> PictureArea? {
+        guard let first = rects.first else { return nil }
+        let area = PictureArea(rect: rects.dropFirst().reduce(first) { $0.union($1) })
         if area.isFullFrame { return .fullFrame }
+        guard displayAspect > 0 else { return area }
         return snapped(area.rect, displayAspect: displayAspect)
     }
 

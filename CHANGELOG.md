@@ -27,7 +27,8 @@ the public-API contract.
   the extractor's yield gate. On a remote HLS transcode and on the software host, session-coupled stills
   read the original file unthrottled, on a transcode over the line that was already too thin for it. Both
   paths now arm it. On the software path a paused tick counts as healthy, and a playing one needs a decoded
-  cushion, 4 MB of reader runway and no rebuffer, so stills stand back before a thin line stalls.
+  cushion, 4 MB of reader runway (not on live, where the edge caps it) and no rebuffer, so stills stand back
+  before a thin line stalls. A seek or a load leaves the gate as it was instead of holding previews back.
 
 - **Go Live on a software-path channel no longer lands past the newest media after a native live session
   (AE#1135).** The native path's 1 Hz live window timer ran one more pass after the stop cancelled it. By

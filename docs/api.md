@@ -2319,6 +2319,8 @@ It is async and read off the main actor; nil when no native item is mounted. The
 
 A session-coupled extractor (`makeFrameExtractor()`, `makeFrameExtractor(url:httpHeaders:)`) yields on every playback path. Earlier releases armed the gate only for the native loopback session. A remote HLS transcode and the software host read stills unthrottled, and on a transcode that is the line already too thin for the original file. The native paths measure health by the forward buffer. The software path counts a paused tick as healthy, since a paused pipeline cannot starve. A playing tick is healthy while the decoded cushion is not empty, the reader has at least 4 MB fetched ahead of the demuxer (when it has a reader), and the host is not rebuffering.
 
+Two cases differ. A live session skips the 4 MB rule, because near the edge the reader only holds what the origin has sent so far. A tick during a seek or a load gives no verdict, so the healthy run keeps counting and previews come back right after the seek.
+
 ### Finding the picture area
 
 `PictureAreaScanner` learns where the picture sits inside the frame, for a film whose black bars are painted into the raster. It samples keyframes through any `StillSource` and returns a `PictureArea`: a normalized `rect`, the cinema ratio it snapped to (`snappedRatio`), and `isFullFrame`.
